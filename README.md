@@ -49,6 +49,21 @@ cargo build --release
 
 `pax` still needs a `nix` binary on `PATH` at runtime — `fetch`/`check`/`sync`/`open` all shell out to it — so the prebuilt binary alone isn't enough without Nix installed separately.
 
+**Nix flake:** this repo is itself a flake. `nix build github:pax-project/pax-core` builds the `pax` binary as `packages.x86_64-linux.default`; `nix develop` gives the same devshell used for `cargo build` above.
+
+home-manager users can install it via the flake's `homeModules.default` instead of hand-rolling `home.packages`:
+
+```Nix
+{
+  inputs.pax.url = "github:pax-project/pax-core";
+
+  # in your home-manager configuration:
+  imports = [ pax.homeModules.default ];
+  programs.pax.enable = true;
+  # programs.pax.settings.ARXIV_CONTACT = "you@example.com";
+}
+```
+
 ```Bash
 pax init
 pax search "actor model"
