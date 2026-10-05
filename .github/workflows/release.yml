@@ -12,3 +12,13 @@ jobs:
     uses: pax-project/.github/.github/workflows/rust-release-publish.yml@main
     secrets:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  attach-binary:
+    needs: release
+    if: needs.release.outputs.releases_created == 'true'
+    permissions:
+      contents: write
+    uses: pax-project/.github/.github/workflows/rust-release-binary.yml@main
+    with:
+      tag: ${{ fromJSON(needs.release.outputs.releases)[0].tag }}
+      binary-name: pax
