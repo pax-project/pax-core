@@ -22,8 +22,9 @@ impl Provider for CrossrefProvider {
     }
 
     async fn search(&self, query: &str) -> Result<Vec<CandidateWork>, ProviderError> {
-        let query = WorksQuery::new(query)
-            .result_control(WorkResultControl::Standard(ResultControl::Rows(SEARCH_RESULT_LIMIT)));
+        let query = WorksQuery::new(query).result_control(WorkResultControl::Standard(
+            ResultControl::Rows(SEARCH_RESULT_LIMIT),
+        ));
         let works = self
             .client
             .works(query)
@@ -90,7 +91,9 @@ impl From<::crossref::Work> for CandidateWork {
                     .find(|link| link.content_type.as_deref() == Some("application/pdf"))
                     .map(|link| link.url.clone())
             }),
-            venue: value.container_title.and_then(|titles| titles.into_iter().next()),
+            venue: value
+                .container_title
+                .and_then(|titles| titles.into_iter().next()),
             abstract_text: value.abstract_,
         }
     }

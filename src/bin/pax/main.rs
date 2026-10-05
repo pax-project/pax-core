@@ -148,7 +148,12 @@ async fn main() {
             doi,
             local,
         } => {
-            let modes = [query.is_some(), author.is_some(), doi.is_some(), local.is_some()];
+            let modes = [
+                query.is_some(),
+                author.is_some(),
+                doi.is_some(),
+                local.is_some(),
+            ];
             if modes.iter().filter(|set| **set).count() != 1 {
                 sink.error("specify exactly one of QUERY, --author, --doi, or --local");
                 return;
@@ -258,7 +263,11 @@ async fn main() {
                 notes,
                 rename,
                 title,
-                authors: if author.is_empty() { None } else { Some(author) },
+                authors: if author.is_empty() {
+                    None
+                } else {
+                    Some(author)
+                },
                 year,
                 doi,
                 source_url,

@@ -286,15 +286,15 @@ mod known_dois_tests {
             normalize_doi("https://doi.org/10.1145/3474085.3475385"),
             "10.1145/3474085.3475385"
         );
-        assert_eq!(normalize_doi("10.1145/3474085.3475385"), "10.1145/3474085.3475385");
+        assert_eq!(
+            normalize_doi("10.1145/3474085.3475385"),
+            "10.1145/3474085.3475385"
+        );
     }
 
     #[test]
     fn known_dois_normalizes_and_ignores_papers_without_a_doi() {
-        let root = std::env::temp_dir().join(format!(
-            "pax-known-dois-test-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("pax-known-dois-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("research")).unwrap();
         fs::write(
@@ -333,10 +333,8 @@ mod known_dois_tests {
 
     #[test]
     fn known_dois_is_empty_when_library_cannot_be_loaded() {
-        let root = std::env::temp_dir().join(format!(
-            "pax-known-dois-missing-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("pax-known-dois-missing-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         assert!(known_dois(&root).is_empty());
     }
@@ -368,7 +366,10 @@ pub fn search_local(query: &str, root: &Path) -> Vec<Paper> {
                             .venue
                             .as_deref()
                             .is_some_and(|v| v.to_lowercase().contains(&query))
-                        || p.local.tags.iter().any(|t| t.to_lowercase().contains(&query))
+                        || p.local
+                            .tags
+                            .iter()
+                            .any(|t| t.to_lowercase().contains(&query))
                         || p.local.citation_key.to_lowercase().contains(&query)
                 })
                 .cloned()
@@ -480,7 +481,10 @@ mod local_filter_tests {
     fn filter_papers_combines_criteria_with_and() {
         let root = scratch_dir("filter-and");
         fs::write(nix::papers_path(&root), two_papers_fixture()).unwrap();
-        let papers = Library::load(&nix::papers_path(&root)).unwrap().papers().to_vec();
+        let papers = Library::load(&nix::papers_path(&root))
+            .unwrap()
+            .papers()
+            .to_vec();
 
         assert_eq!(
             filter_papers(&papers, &ListFilter::default()).len(),
@@ -746,7 +750,12 @@ mod edit_paper_tests {
             },
         );
         assert!(matches!(result, Err(PaxError::InvalidCitationKey(_))));
-        assert!(Library::load(&nix::papers_path(&root)).unwrap().find("turing1936").is_some());
+        assert!(
+            Library::load(&nix::papers_path(&root))
+                .unwrap()
+                .find("turing1936")
+                .is_some()
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -814,8 +823,14 @@ mod edit_paper_tests {
 
         let library = Library::load(&nix::papers_path(&root)).unwrap();
         let paper = library.find("turing1936").unwrap();
-        assert_eq!(paper.artifact.source_url.as_deref(), Some("https://example.org/turing.pdf"));
-        assert!(paper.artifact.hash.is_none(), "a changed source invalidates the old hash");
+        assert_eq!(
+            paper.artifact.source_url.as_deref(),
+            Some("https://example.org/turing.pdf")
+        );
+        assert!(
+            paper.artifact.hash.is_none(),
+            "a changed source invalidates the old hash"
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 }
@@ -969,7 +984,10 @@ mod sync_tests {
 
         let reports = sync_library(&root).unwrap();
         assert_eq!(reports.len(), 2);
-        let no_source = reports.iter().find(|r| r.citation_key == "noSource").unwrap();
+        let no_source = reports
+            .iter()
+            .find(|r| r.citation_key == "noSource")
+            .unwrap();
         assert!(matches!(no_source.result, Err(PaxError::NoSourceUrl(_))));
         let already_fetched = reports
             .iter()
@@ -1061,7 +1079,10 @@ mod check_tests {
 
     #[test]
     fn classify_fetch_failure_is_an_error() {
-        let status = classify("sha256-abc", Err(PaxError::Fetch("connection refused".to_string())));
+        let status = classify(
+            "sha256-abc",
+            Err(PaxError::Fetch("connection refused".to_string())),
+        );
         match status {
             CheckStatus::Error(message) => assert_eq!(message, "fetch failed: connection refused"),
             _ => panic!("expected Error"),
@@ -1084,7 +1105,10 @@ pub enum ResolvedArtifact {
 /// attempting a Nix build (which would fail on the `null` hash with an
 /// opaque evaluation error); one with no `source_url` at all is
 /// `NoSourceUrl`, since there's nothing to fetch even automatically.
-pub fn resolve_artifact_path(citation_key: &str, root: &Path) -> Result<ResolvedArtifact, PaxError> {
+pub fn resolve_artifact_path(
+    citation_key: &str,
+    root: &Path,
+) -> Result<ResolvedArtifact, PaxError> {
     let path = nix::papers_path(root);
     let library = Library::load(&path)?;
     let paper = library

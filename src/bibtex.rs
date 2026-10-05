@@ -6,7 +6,11 @@
 use crate::paper::Paper;
 
 pub fn render(papers: &[Paper]) -> String {
-    papers.iter().map(render_entry).collect::<Vec<_>>().join("\n\n")
+    papers
+        .iter()
+        .map(render_entry)
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn render_entry(paper: &Paper) -> String {
@@ -106,10 +110,7 @@ mod tests {
     #[test]
     fn renders_minimal_paper_omitting_absent_fields() {
         let bibtex = render(&[minimal_paper()]);
-        assert_eq!(
-            bibtex,
-            "@article{anon2020,\n  title = {A minimal paper}\n}"
-        );
+        assert_eq!(bibtex, "@article{anon2020,\n  title = {A minimal paper}\n}");
     }
 
     #[test]

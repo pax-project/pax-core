@@ -33,9 +33,16 @@ const RELEASE_TAG: &str = "papers";
 /// Uploads `local_path` as a GitHub Release asset named `<citation_key>.pdf`
 /// on `root`'s own `origin` remote, creating the shared `papers` release
 /// first if it doesn't exist yet. Returns the asset's stable download URL.
-pub fn publish_to_github_release(root: &Path, citation_key: &str, local_path: &Path) -> Result<String, PaxError> {
+pub fn publish_to_github_release(
+    root: &Path,
+    citation_key: &str,
+    local_path: &Path,
+) -> Result<String, PaxError> {
     if !local_path.is_file() {
-        return Err(PaxError::Upload(format!("{}: not a file", local_path.display())));
+        return Err(PaxError::Upload(format!(
+            "{}: not a file",
+            local_path.display()
+        )));
     }
 
     let repo = gh_repo(root)?;
@@ -54,7 +61,14 @@ pub fn publish_to_github_release(root: &Path, citation_key: &str, local_path: &P
 fn gh_repo(root: &Path) -> Result<String, PaxError> {
     let output = run_with_timeout(
         Command::new("gh")
-            .args(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
+            .args([
+                "repo",
+                "view",
+                "--json",
+                "nameWithOwner",
+                "-q",
+                ".nameWithOwner",
+            ])
             .current_dir(root),
         GH_TIMEOUT,
         PaxError::Upload,
@@ -117,7 +131,8 @@ fn upload_asset(repo: &str, citation_key: &str, local_path: &Path) -> Result<(),
     let staging_dir = std::env::temp_dir().join(format!("pax-upload-{}", std::process::id()));
     std::fs::create_dir_all(&staging_dir).map_err(|e| PaxError::Upload(e.to_string()))?;
     let staged_path = staging_dir.join(format!("{citation_key}.pdf"));
-    let staged = std::fs::copy(local_path, &staged_path).map_err(|e| PaxError::Upload(e.to_string()));
+    let staged =
+        std::fs::copy(local_path, &staged_path).map_err(|e| PaxError::Upload(e.to_string()));
 
     let result = staged.and_then(|_| {
         run_with_timeout(
