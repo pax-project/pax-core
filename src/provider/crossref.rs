@@ -28,6 +28,7 @@ impl Provider for CrossrefProvider {
         let works = self
             .client
             .works(query)
+            .await
             .map_err(|e| ProviderError::Request(e.to_string()))?;
         Ok(works.items.into_iter().map(CandidateWork::from).collect())
     }
@@ -36,6 +37,7 @@ impl Provider for CrossrefProvider {
         let work = self
             .client
             .work(native_id)
+            .await
             .map_err(|e| ProviderError::Request(e.to_string()))?;
         Ok(CandidateWork::from(work))
     }

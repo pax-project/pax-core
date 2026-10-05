@@ -1,15 +1,21 @@
-use arxiv_client::{Arxiv, Query, Search};
+use arxiv_tools::{ArXiv, Client, QueryParams};
 
 use super::{CandidateId, CandidateWork, Provider, ProviderError, ProviderId, SEARCH_RESULT_LIMIT};
 
 pub struct ArxivProvider {
-    client: Arxiv,
+    client: Client,
 }
 
 impl ArxivProvider {
     pub fn new(contact: Option<&str>) -> Result<Self, ProviderError> {
-        let client = Arxiv::builder()
-            .contact(contact)
+        let mut builder = Client::builder();
+        if let Some(contact) = contact {
+            builder = builder.user_agent(format!(
+                "pax-core/{} (+{contact})",
+                env!("CARGO_PKG_VERSION")
+            ));
+        }
+        let client = builder
             .build()
             .map_err(|e| ProviderError::Request(e.to_string()))?;
         Ok(ArxivProvider { client })
@@ -22,57 +28,56 @@ impl Provider for ArxivProvider {
     }
 
     async fn search(&self, query: &str) -> Result<Vec<CandidateWork>, ProviderError> {
-        let query = Query::new(Search::title(query.to_string())).max_results(SEARCH_RESULT_LIMIT);
-        let feed = self
+        let query =
+            ArXiv::from_args(QueryParams::title(query)).max_results(SEARCH_RESULT_LIMIT as u64);
+        let papers = self
             .client
-            .search(query)
+            .fetch(&query)
             .await
             .map_err(|e| ProviderError::Request(e.to_string()))?;
-        Ok(feed.entries.into_iter().map(CandidateWork::from).collect())
+        Ok(papers.into_iter().map(CandidateWork::from).collect())
     }
 
     async fn get(&self, native_id: &str) -> Result<CandidateWork, ProviderError> {
-        let entry = self
+        let query = ArXiv::from_id_list([native_id]);
+        let papers = self
             .client
-            .entry(native_id)
+            .fetch(&query)
             .await
             .map_err(|e| ProviderError::Request(e.to_string()))?;
-        Ok(CandidateWork::from(entry))
+        papers
+            .into_iter()
+            .next()
+            .map(CandidateWork::from)
+            .ok_or(ProviderError::NotFound)
     }
 
     async fn search_by_author(&self, author: &str) -> Result<Vec<CandidateWork>, ProviderError> {
-        let query = Query::new(Search::author(author.to_string())).max_results(SEARCH_RESULT_LIMIT);
-        let feed = self
+        let query =
+            ArXiv::from_args(QueryParams::author(author)).max_results(SEARCH_RESULT_LIMIT as u64);
+        let papers = self
             .client
-            .search(query)
+            .fetch(&query)
             .await
             .map_err(|e| ProviderError::Request(e.to_string()))?;
-        Ok(feed.entries.into_iter().map(CandidateWork::from).collect())
+        Ok(papers.into_iter().map(CandidateWork::from).collect())
     }
 }
 
-impl From<arxiv_client::Entry> for CandidateWork {
-    fn from(value: arxiv_client::Entry) -> Self {
+impl From<arxiv_tools::Paper> for CandidateWork {
+    fn from(value: arxiv_tools::Paper) -> Self {
         CandidateWork {
             id: CandidateId {
                 provider: ProviderId::ArXiv,
-                native_id: value.id.to_string(),
+                native_id: value.arxiv_id().to_string(),
             },
             title: value.title,
-            authors: value
-                .authors
-                .into_iter()
-                .map(|author| author.name)
-                .collect(),
-            publish_date: value.published.to_rfc3339(),
-            doi: value.doi,
-            pdf_url: value
-                .links
-                .iter()
-                .find(|link| link.title.as_deref() == Some("pdf"))
-                .map(|link| link.href.clone()),
-            venue: value.journal_ref,
-            abstract_text: Some(value.summary),
+            authors: value.authors,
+            publish_date: value.published,
+            doi: (!value.doi.is_empty()).then_some(value.doi),
+            pdf_url: (!value.pdf_url.is_empty()).then_some(value.pdf_url),
+            venue: (!value.journal_ref.is_empty()).then_some(value.journal_ref),
+            abstract_text: (!value.abstract_text.is_empty()).then_some(value.abstract_text),
         }
     }
 }

@@ -21,9 +21,9 @@ default = ["cli"]
 cli = ["dep:clap", "dep:dotenvy", "dep:tokio"]
 
 [dependencies]
-arxiv-client = "0.2.0"
+arxiv-tools = "2.0.0"
 clap = { version = "4.6.6", features = ["derive"], optional = true }
-crossref = "0.2.2"
+crossref = { package = "crossref-async", version = "0.3.1" }
 dotenvy = { version = "0.15.7", optional = true }
 papers-openalex = "0.3.1"
 semantic-scholar-rs = "0.2.0"
