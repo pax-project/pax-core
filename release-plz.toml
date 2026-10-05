@@ -1,0 +1,17 @@
+[workspace]
+# This org's commit convention is `type(scope): subject` using `feature`
+# (not Conventional Commits' `feat`) for minor bumps; `fix`, `!`, and a
+# `BREAKING CHANGE:` footer already match the Conventional Commits
+# defaults release-plz expects, so only `feature` needs a custom rule.
+custom_minor_increment_regex = "^feature"
+
+[changelog]
+commit_parsers = [
+  { message = "^feature", group = "Features" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^.*", skip = true },
+]
+
+[[package]]
+name = "pax-core-papers"
+changelog_path = "./CHANGELOG.md"
