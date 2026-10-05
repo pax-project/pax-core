@@ -6,6 +6,8 @@ on:
 
 jobs:
   attach-binary:
+    permissions:
+      contents: write
     uses: pax-project/.github/.github/workflows/rust-release-binary.yml@main
     with:
       binary-name: pax
