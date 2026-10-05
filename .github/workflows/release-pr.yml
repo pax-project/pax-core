@@ -1,0 +1,9 @@
+name: Release PR
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release-pr:
+    uses: pax-project/.github/.github/workflows/rust-release-pr.yml@main

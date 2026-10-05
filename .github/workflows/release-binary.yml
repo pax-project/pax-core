@@ -1,0 +1,11 @@
+name: Attach release binary
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  attach-binary:
+    uses: pax-project/.github/.github/workflows/rust-release-binary.yml@main
+    with:
+      binary-name: pax
