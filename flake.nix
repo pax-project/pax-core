@@ -37,6 +37,9 @@
             rustfmt
             clippy
             rust-analyzer
+            # Quality-gate tooling (see justfile): `just` unifies the
+            # calling interface across local dev and CI.
+            just
           ]
           ++ app_deps;
         env.RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
