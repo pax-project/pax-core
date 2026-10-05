@@ -25,6 +25,8 @@
         nativeBuildInputs = [ pkgs.pkg-config ];
       };
 
+      homeModules.default = import ./home-manager-module.nix self;
+
       devShells."x86_64-linux".default = pkgs.mkShell {
         nativeBuildInputs = [ pkgs.pkg-config ];
         buildInputs =
