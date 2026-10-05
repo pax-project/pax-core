@@ -34,7 +34,9 @@ impl Library {
     }
 
     pub fn find(&self, citation_key: &str) -> Option<&Paper> {
-        self.papers.iter().find(|p| p.local.citation_key == citation_key)
+        self.papers
+            .iter()
+            .find(|p| p.local.citation_key == citation_key)
     }
 
     pub fn find_mut(&mut self, citation_key: &str) -> Option<&mut Paper> {
@@ -81,7 +83,9 @@ impl Library {
 
         let tmp_path = path.with_file_name(format!(
             "{}.tmp.{}",
-            path.file_name().and_then(|n| n.to_str()).unwrap_or("papers.nix"),
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("papers.nix"),
             std::process::id()
         ));
         std::fs::write(&tmp_path, out)?;
@@ -139,7 +143,11 @@ fn write_field_int_opt(out: &mut String, key: &str, value: Option<i32>) {
 }
 
 fn write_field_string_list(out: &mut String, key: &str, values: &[String]) {
-    let rendered = values.iter().map(|v| quote(v)).collect::<Vec<_>>().join(" ");
+    let rendered = values
+        .iter()
+        .map(|v| quote(v))
+        .collect::<Vec<_>>()
+        .join(" ");
     let _ = writeln!(out, "    {key} = [ {rendered} ];");
 }
 
@@ -239,7 +247,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, PaxError> {
                 }
                 tokens.push(Token::Str(s));
             }
-            c if c.is_ascii_digit() || (c == '-' && chars.get(i + 1).is_some_and(|c| c.is_ascii_digit())) =>
+            c if c.is_ascii_digit()
+                || (c == '-' && chars.get(i + 1).is_some_and(|c| c.is_ascii_digit())) =>
             {
                 let start = i;
                 if c == '-' {
@@ -256,7 +265,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, PaxError> {
             }
             c if c.is_alphabetic() || c == '_' => {
                 let start = i;
-                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '-')
+                while i < chars.len()
+                    && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '-')
                 {
                     i += 1;
                 }
@@ -378,7 +388,10 @@ impl<'a> TokenParser<'a> {
     }
 }
 
-fn take_string_opt(fields: &mut HashMap<String, Value>, key: &str) -> Result<Option<String>, PaxError> {
+fn take_string_opt(
+    fields: &mut HashMap<String, Value>,
+    key: &str,
+) -> Result<Option<String>, PaxError> {
     match fields.remove(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Str(s)) => Ok(Some(s)),
@@ -403,7 +416,10 @@ fn take_int_opt(fields: &mut HashMap<String, Value>, key: &str) -> Result<Option
     }
 }
 
-fn take_string_list(fields: &mut HashMap<String, Value>, key: &str) -> Result<Vec<String>, PaxError> {
+fn take_string_list(
+    fields: &mut HashMap<String, Value>,
+    key: &str,
+) -> Result<Vec<String>, PaxError> {
     match fields.remove(key) {
         None => Ok(Vec::new()),
         Some(Value::List(items)) => items
@@ -421,7 +437,10 @@ fn take_string_list(fields: &mut HashMap<String, Value>, key: &str) -> Result<Ve
     }
 }
 
-fn paper_from_fields(citation_key: String, mut fields: HashMap<String, Value>) -> Result<Paper, PaxError> {
+fn paper_from_fields(
+    citation_key: String,
+    mut fields: HashMap<String, Value>,
+) -> Result<Paper, PaxError> {
     let doi = take_string_opt(&mut fields, "doi")?;
     let title = take_string(&mut fields, "title")?;
     let authors = take_string_list(&mut fields, "authors")?;
@@ -526,13 +545,21 @@ mod tests {
         // left behind, and the final path always parses back correctly
         // immediately after `save` returns — i.e. the swap really is a
         // single atomic step, not two observable ones.
-        let dir = std::env::temp_dir().join(format!("pax-library-test-atomic-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("pax-library-test-atomic-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("papers.nix");
 
         Library::new(sample_papers()).save(&path).unwrap();
-        let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
-        assert_eq!(entries, vec![std::ffi::OsString::from("papers.nix")], "no stray temp file left behind");
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from("papers.nix")],
+            "no stray temp file left behind"
+        );
         assert_eq!(Library::load(&path).unwrap().papers().len(), 2);
 
         std::fs::remove_dir_all(&dir).ok();
@@ -540,10 +567,7 @@ mod tests {
 
     #[test]
     fn library_round_trips_through_papers_nix() {
-        let dir = std::env::temp_dir().join(format!(
-            "pax-library-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("pax-library-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("papers.nix");
 
@@ -564,7 +588,9 @@ mod tests {
         let library = Library::new(sample_papers());
 
         assert_eq!(
-            library.find("turing1936").map(|p| p.identity.title.as_str()),
+            library
+                .find("turing1936")
+                .map(|p| p.identity.title.as_str()),
             Some("On Computable Numbers")
         );
         assert!(library.find("nonexistent-key").is_none());
@@ -596,10 +622,8 @@ mod tests {
 
     #[test]
     fn empty_library_round_trips() {
-        let dir = std::env::temp_dir().join(format!(
-            "pax-library-test-empty-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("pax-library-test-empty-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("papers.nix");
 

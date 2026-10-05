@@ -121,7 +121,11 @@ pub fn prefetch_file(url: &str, name: &str) -> Result<String, PaxError> {
 fn stage_research_dir(root: &Path) {
     let research_dir = root.join("research");
     let _ = run_with_timeout(
-        Command::new("git").arg("-C").arg(&research_dir).arg("add").arg("-A"),
+        Command::new("git")
+            .arg("-C")
+            .arg(&research_dir)
+            .arg("add")
+            .arg("-A"),
         GIT_ADD_TIMEOUT,
         PaxError::Build,
     );

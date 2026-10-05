@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use pax_core::{
-    normalize_doi, CandidateWork, CheckReport, CheckStatus, FetchOutcome, Paper, ProviderId,
+    CandidateWork, CheckReport, CheckStatus, FetchOutcome, Paper, ProviderId, normalize_doi,
 };
 
 pub trait Sink {

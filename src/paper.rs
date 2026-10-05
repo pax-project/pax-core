@@ -131,8 +131,14 @@ mod tests {
             hash: Some("sha256-old".to_string()),
         };
         apply_artifact_edits(&mut artifact, Some("https://new.example/paper.pdf"));
-        assert_eq!(artifact.source_url, Some("https://new.example/paper.pdf".to_string()));
-        assert!(artifact.hash.is_none(), "a changed source invalidates the old hash");
+        assert_eq!(
+            artifact.source_url,
+            Some("https://new.example/paper.pdf".to_string())
+        );
+        assert!(
+            artifact.hash.is_none(),
+            "a changed source invalidates the old hash"
+        );
     }
 
     #[test]
@@ -186,7 +192,13 @@ mod tests {
             tags: vec!["a".to_string()],
             ..Default::default()
         };
-        apply_local_edits(&mut local, &["b".to_string()], &["a".to_string()], None, None);
+        apply_local_edits(
+            &mut local,
+            &["b".to_string()],
+            &["a".to_string()],
+            None,
+            None,
+        );
         assert_eq!(local.tags, vec!["b".to_string()]);
     }
 

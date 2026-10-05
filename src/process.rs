@@ -42,7 +42,9 @@ pub(crate) fn run_with_timeout(
             Err(e) => return Err(to_error(e.to_string())),
         }
     }
-    child.wait_with_output().map_err(|e| to_error(e.to_string()))
+    child
+        .wait_with_output()
+        .map_err(|e| to_error(e.to_string()))
 }
 
 #[cfg(test)]
@@ -51,7 +53,12 @@ mod tests {
 
     #[test]
     fn run_with_timeout_returns_normal_output_when_the_command_finishes_in_time() {
-        let output = run_with_timeout(Command::new("echo").arg("hi"), Duration::from_secs(5), PaxError::Fetch).unwrap();
+        let output = run_with_timeout(
+            Command::new("echo").arg("hi"),
+            Duration::from_secs(5),
+            PaxError::Fetch,
+        )
+        .unwrap();
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hi");
     }
@@ -59,7 +66,11 @@ mod tests {
     #[test]
     fn run_with_timeout_kills_and_errors_on_a_command_that_outlives_the_deadline() {
         let start = Instant::now();
-        let result = run_with_timeout(Command::new("sleep").arg("30"), Duration::from_millis(300), PaxError::Fetch);
+        let result = run_with_timeout(
+            Command::new("sleep").arg("30"),
+            Duration::from_millis(300),
+            PaxError::Fetch,
+        );
         assert!(matches!(result, Err(PaxError::Fetch(_))));
         assert!(result.unwrap_err().to_string().contains("timed out"));
         // Proves the child was actually killed rather than just abandoned —
