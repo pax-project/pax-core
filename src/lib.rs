@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub use citations::{CITATION_PROVIDERS, CitationError, CitationResults, cited_by, references};
-pub use error::{PaxError, Refusal};
+pub use error::PaxError;
 pub use exclusions::{
     Exclusion, ExclusionStage, Exclusions, UnknownExclusionStage, candidate_exclusion_key,
     doi_exclusion_key, exclusion_key,
@@ -275,10 +275,10 @@ pub async fn resolve_candidate(
 ///
 /// The library is loaded before anything is resolved, so a missing library
 /// fails without a network call. A paper already declared is refused with
-/// [`Refusal::AlreadyDeclared`] (see [`PaxError::refusal`]), naming its
-/// citation key: one with the same DOI, or the same arXiv id in any version
-/// ([`identity_keys`]). A Crossref or arXiv reference names its DOI or arXiv
-/// id itself, so it's checked before it's resolved too.
+/// [`PaxError::AlreadyDeclared`], naming its citation key: one with the same
+/// DOI, or the same arXiv id in any version ([`identity_keys`]). A Crossref
+/// or arXiv reference names its DOI or arXiv id itself, so it's checked
+/// before it's resolved too.
 pub async fn add_candidate(
     id: &CandidateId,
     root: &Path,
@@ -343,11 +343,10 @@ fn refuse_declared(
             .any(|declared| keys.contains(declared))
     });
     match declared {
-        Some(paper) => Err(Refusal::AlreadyDeclared {
+        Some(paper) => Err(PaxError::AlreadyDeclared {
             reference: id.to_string(),
             citation_key: paper.local.citation_key.clone(),
-        }
-        .into()),
+        }),
         None => Ok(()),
     }
 }
@@ -402,9 +401,9 @@ mod refuse_declared_tests {
     fn refused_as(id: &str, keys: &[IdentityKey]) -> Option<String> {
         let id: CandidateId = id.parse().unwrap();
         let error = refuse_declared(&library(), &id, keys).err()?;
-        match error.refusal() {
-            Some(Refusal::AlreadyDeclared { citation_key, .. }) => Some(citation_key.clone()),
-            None => panic!("not a refusal: {error}"),
+        match error {
+            PaxError::AlreadyDeclared { citation_key, .. } => Some(citation_key),
+            _ => panic!("not a refusal: {error}"),
         }
     }
 

@@ -45,45 +45,12 @@ pub enum PaxError {
     ExclusionTitleUnresolved(String, String),
     #[error("{0:?} is declared in the library as {1:?}; remove it before excluding it")]
     ExcludingDeclaredPaper(String, String),
-}
-
-/// Why the library refused an operation, for refusals that have no
-/// [`PaxError`] variant of their own.
-///
-/// [`PaxError`] isn't `#[non_exhaustive]`, so a new variant would break
-/// callers that match it exhaustively. A refusal travels instead as
-/// [`PaxError::Io`] holding an [`std::io::ErrorKind::AlreadyExists`] error
-/// that wraps it, displayed as the refusal itself; [`PaxError::refusal`]
-/// gets it back out.
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum Refusal {
-    /// The paper `reference` resolves to is already declared in the
-    /// library, as `citation_key`: by the same DOI, or the same arXiv id
-    /// in any version.
+    /// The paper `reference` resolves to is already declared in the library,
+    /// as `citation_key`: by the same DOI, or the same arXiv id in any
+    /// version.
     #[error("{reference} is already in the library as {citation_key:?}")]
-    #[non_exhaustive]
     AlreadyDeclared {
         reference: String,
         citation_key: String,
     },
-}
-
-impl From<Refusal> for PaxError {
-    fn from(refusal: Refusal) -> Self {
-        PaxError::Io(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            refusal,
-        ))
-    }
-}
-
-impl PaxError {
-    /// The [`Refusal`] this error carries, if it's one.
-    pub fn refusal(&self) -> Option<&Refusal> {
-        match self {
-            PaxError::Io(e) => e.get_ref()?.downcast_ref(),
-            _ => None,
-        }
-    }
 }

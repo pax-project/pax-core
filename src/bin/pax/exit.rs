@@ -87,8 +87,6 @@ impl fmt::Display for Failure<'_> {
 /// The exit code a failure maps to.
 pub fn code(failure: Failure<'_>) -> Code {
     match failure {
-        // A refusal without a variant of its own, carried as an I/O error.
-        Failure::Pax(e) if e.refusal().is_some() => Code::Refused,
         Failure::Pax(e) => match e {
             PaxError::Provider(e) => code(Failure::Provider(e)),
             // Every I/O error the library returns comes from reading or
@@ -104,6 +102,7 @@ pub fn code(failure: Failure<'_>) -> Code {
             | PaxError::ExclusionTitleUnresolved(..) => Code::NotFound,
             PaxError::CitationKeyExists(_)
             | PaxError::ExcludingDeclaredPaper(..)
+            | PaxError::AlreadyDeclared { .. }
             | PaxError::NoSourceUrl(_) => Code::Refused,
             PaxError::Fetch(_) | PaxError::Build(_) | PaxError::Upload(_) => Code::Failure,
             // A variant added later, until it is mapped here.
@@ -299,6 +298,13 @@ mod tests {
         );
         assert_eq!(
             pax(PaxError::CitationKeyExists("a2020".into())),
+            Code::Refused
+        );
+        assert_eq!(
+            pax(PaxError::AlreadyDeclared {
+                reference: "crossref:10.1/x".into(),
+                citation_key: "a2020".into(),
+            }),
             Code::Refused
         );
         let exists = std::io::Error::from(std::io::ErrorKind::AlreadyExists);
