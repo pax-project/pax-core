@@ -16,6 +16,9 @@ pub trait Sink {
     fn provider_header(&mut self, provider: ProviderId);
     fn page_header(&mut self, provider: ProviderId, page: &SearchPage);
     fn candidates(&mut self, candidates: &[CandidateWork], known_dois: &HashSet<String>);
+    /// A paged result list: its header, then its works, each marked with
+    /// what the page knows about it.
+    fn page(&mut self, provider: ProviderId, page: &SearchPage, known_dois: &HashSet<String>);
     fn candidate(&mut self, candidate: &CandidateWork);
     fn papers(&mut self, papers: &[Paper]);
     fn paper(&mut self, paper: &Paper);
@@ -67,31 +70,23 @@ impl Sink for TextSink {
                 _ => {}
             }
         }
+        let unknown = page.language_unknown.len();
+        if unknown > 0 {
+            println!(
+                "\t{unknown} records have no language, so the language filter couldn't check them; kept and marked [language unknown]"
+            );
+        }
     }
 
     fn candidates(&mut self, candidates: &[CandidateWork], known_dois: &HashSet<String>) {
-        for work in candidates {
-            let in_library = work
-                .doi
-                .as_deref()
-                .is_some_and(|doi| known_dois.contains(normalize_doi(doi)));
-            println!(
-                "\t{}{}",
-                work.title,
-                if in_library { " [in library]" } else { "" }
-            );
-            println!("\t\t{}", work.id);
-            if !work.authors.is_empty() {
-                println!("\t\t{}", work.authors.join(", "));
-            }
-            println!("\t\t{}", work.publish_date);
-            println!("\t\t{}", work.doi.as_deref().unwrap_or("(no doi)"));
-            println!("\t\t{}", work.venue.as_deref().unwrap_or("(no venue)"));
-            println!(
-                "\t\tPDF: {}",
-                if work.pdf_url.is_some() { "✓" } else { "✗" }
-            );
-        }
+        print_candidates(candidates, known_dois, |_| false);
+    }
+
+    fn page(&mut self, provider: ProviderId, page: &SearchPage, known_dois: &HashSet<String>) {
+        self.page_header(provider, page);
+        print_candidates(&page.works, known_dois, |work| {
+            page.is_language_unknown(work)
+        });
     }
 
     fn candidate(&mut self, candidate: &CandidateWork) {
@@ -213,6 +208,41 @@ impl Sink for TextSink {
         println!(
             "{} checked: {reproducible} reproducible, {not_fetched} not fetched, {mismatched} mismatched, {errored} errored",
             reports.len()
+        );
+    }
+}
+
+/// One row per work: its title (with any marks), then its details.
+fn print_candidates(
+    works: &[CandidateWork],
+    known_dois: &HashSet<String>,
+    language_unknown: impl Fn(&CandidateWork) -> bool,
+) {
+    for work in works {
+        let in_library = work
+            .doi
+            .as_deref()
+            .is_some_and(|doi| known_dois.contains(normalize_doi(doi)));
+        println!(
+            "\t{}{}{}",
+            work.title,
+            if in_library { " [in library]" } else { "" },
+            if language_unknown(work) {
+                " [language unknown]"
+            } else {
+                ""
+            }
+        );
+        println!("\t\t{}", work.id);
+        if !work.authors.is_empty() {
+            println!("\t\t{}", work.authors.join(", "));
+        }
+        println!("\t\t{}", work.publish_date);
+        println!("\t\t{}", work.doi.as_deref().unwrap_or("(no doi)"));
+        println!("\t\t{}", work.venue.as_deref().unwrap_or("(no venue)"));
+        println!(
+            "\t\tPDF: {}",
+            if work.pdf_url.is_some() { "✓" } else { "✗" }
         );
     }
 }
