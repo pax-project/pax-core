@@ -45,4 +45,12 @@ pub enum PaxError {
     ExclusionTitleUnresolved(String, String),
     #[error("{0:?} is declared in the library as {1:?}; remove it before excluding it")]
     ExcludingDeclaredPaper(String, String),
+    /// The paper `reference` resolves to is already declared in the library,
+    /// as `citation_key`: by the same DOI, or the same arXiv id in any
+    /// version.
+    #[error("{reference} is already in the library as {citation_key:?}")]
+    AlreadyDeclared {
+        reference: String,
+        citation_key: String,
+    },
 }

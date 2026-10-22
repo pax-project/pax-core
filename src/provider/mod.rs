@@ -351,7 +351,7 @@ pub struct CandidateWork {
     pub abstract_text: Option<String>,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum ProviderError {
     #[error("request failed: {0}")]

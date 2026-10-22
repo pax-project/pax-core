@@ -85,7 +85,7 @@ impl SemanticScholarProvider {
             .fields("paperId,referenceCount,citationCount")
             .send()
             .await
-            .map_err(seed_error)?;
+            .map_err(paper_error)?;
         let total = match list {
             CitationList::References => seed.reference_count,
             CitationList::Citations => seed.citation_count,
@@ -247,9 +247,9 @@ const MAX_CITATIONS_RETRIEVABLE: u64 = 9_999;
 const PAPER_FIELDS: &str =
     "paperId,title,authors,year,publicationDate,externalIds,venue,openAccessPdf,publicationTypes";
 
-/// Maps an error looking up the seed paper: one Semantic Scholar doesn't
-/// have is [`ProviderError::NotFound`].
-fn seed_error(e: ::semantic_scholar::Error) -> ProviderError {
+/// Maps an error looking up one paper (a seed, or `get`'s id or DOI): one
+/// Semantic Scholar doesn't have is [`ProviderError::NotFound`].
+fn paper_error(e: ::semantic_scholar::Error) -> ProviderError {
     match e {
         ::semantic_scholar::Error::Api { status: 404, .. } => ProviderError::NotFound,
         e => ProviderError::Request(e.to_string()),
@@ -353,7 +353,7 @@ impl Provider for SemanticScholarProvider {
             .fields(&format!("{PAPER_FIELDS},abstract"))
             .send()
             .await
-            .map_err(|e| ProviderError::Request(e.to_string()))?;
+            .map_err(paper_error)?;
         Ok(CandidateWork::from(paper))
     }
 
@@ -526,7 +526,7 @@ mod tests {
 
     #[test]
     fn a_missing_seed_is_not_found() {
-        let missing = seed_error(::semantic_scholar::Error::Api {
+        let missing = paper_error(::semantic_scholar::Error::Api {
             status: 404,
             endpoint: "/graph/v1/paper/x".to_string(),
             message: "Paper not found".to_string(),

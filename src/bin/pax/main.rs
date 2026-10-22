@@ -1,11 +1,14 @@
 use std::path::Path;
+use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use pax_core::{
     CandidateId, DocType, ExclusionStage, Filters, Limit, ProviderId, SearchOptions, YearRange,
 };
 
+mod exit;
 mod sink;
+use exit::{Code, Failure};
 use sink::{Sink, TextSink};
 
 #[derive(Subcommand)]
@@ -205,12 +208,42 @@ struct Cli {
     command: Command,
 }
 
-fn open_in_viewer(sink: &mut impl Sink, path: &Path) {
+/// Reports `failure` and returns the exit code it maps to.
+fn fail<'a>(sink: &mut impl Sink, failure: impl Into<Failure<'a>>) -> Code {
+    let failure = failure.into();
+    sink.error(&failure.to_string());
+    exit::code(failure)
+}
+
+fn open_in_viewer(sink: &mut impl Sink, path: &Path) -> Code {
     let viewer = std::env::var("PAX_PDF_VIEWER").unwrap_or_else(|_| "xdg-open".to_string());
     match std::process::Command::new(&viewer).arg(path).status() {
-        Ok(status) if status.success() => {}
-        Ok(status) => sink.error(&format!("{viewer} exited with {status}")),
-        Err(e) => sink.error(&format!("failed to launch {viewer}: {e}")),
+        Ok(status) if status.success() => Code::Success,
+        Ok(status) => fail(
+            sink,
+            Failure::Other(&format!("{viewer} exited with {status}")),
+        ),
+        Err(e) => fail(
+            sink,
+            Failure::Other(&format!("failed to launch {viewer}: {e}")),
+        ),
+    }
+}
+
+/// Reports a provider that returned no list. One that has no record of the
+/// seed or DOI has answered, so while another provider returned a list,
+/// that's a note rather than an error.
+fn provider_failed<'a>(
+    sink: &mut impl Sink,
+    provider: ProviderId,
+    failure: impl Into<Failure<'a>>,
+    another_listed: bool,
+) {
+    let failure = failure.into();
+    if another_listed && exit::is_answer(failure) {
+        sink.provider_note(provider, &failure.to_string());
+    } else {
+        sink.provider_error(provider, &failure.to_string());
     }
 }
 
@@ -219,41 +252,81 @@ fn open_in_viewer(sink: &mut impl Sink, path: &Path) {
 fn show_citations(
     sink: &mut impl Sink,
     results: Result<pax_core::CitationResults, pax_core::PaxError>,
-) {
+) -> Code {
     let results = match results {
         Ok(results) => results,
-        Err(e) => {
-            sink.error(&e.to_string());
-            return;
-        }
+        Err(e) => return fail(sink, &e),
     };
     let known_dois = pax_core::known_dois(Path::new("."));
+    let listed = results.values().any(Result::is_ok);
     for provider in pax_core::CITATION_PROVIDERS {
         match results.get(&provider) {
             Some(Ok(page)) => sink.page(provider, page, &known_dois),
-            Some(Err(e)) => {
-                sink.provider_header(provider);
-                sink.error(&e.to_string());
-            }
+            Some(Err(e)) => provider_failed(sink, provider, e, listed),
             None => {}
         }
     }
+    exit::provider_results(results.values())
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     dotenvy::dotenv().ok();
     let cli = Cli::parse();
-    let mut sink = TextSink;
     let config = pax_core::Config {
         semantic_scholar_api_key: std::env::var("SEMANTIC_SCHOLAR_API_KEY").ok(),
         arxiv_contact: std::env::var("ARXIV_CONTACT").ok(),
     };
+    run(cli.command, &mut TextSink, &config).await.into()
+}
 
-    match cli.command {
+/// Whether `command` reads or writes the library in the current directory.
+/// A `show`, `refs` or `cited-by` reference with a `:` is a provider
+/// reference, which needs no library; without one it's a citation key.
+/// `search --local` is checked after its arguments are.
+fn needs_library(command: &Command) -> bool {
+    match command {
+        Command::Init | Command::Search { .. } => false,
+        Command::Show { reference }
+        | Command::Refs { reference, .. }
+        | Command::CitedBy { reference, .. } => !reference.contains(':'),
+        Command::Add { .. }
+        | Command::List { .. }
+        | Command::Remove { .. }
+        | Command::Exclude { .. }
+        | Command::Edit { .. }
+        | Command::Export { .. }
+        | Command::Fetch { .. }
+        | Command::Check
+        | Command::Open { .. }
+        | Command::Sync => true,
+    }
+}
+
+/// Fails with a clear message when there's no library in the current
+/// directory, before a command that needs one does anything else, e.g. `add`
+/// resolving its reference over the network.
+fn require_library(sink: &mut impl Sink) -> Result<(), Code> {
+    if pax_core::nix::papers_path(Path::new(".")).exists() {
+        Ok(())
+    } else {
+        Err(fail(sink, Failure::NoLibrary))
+    }
+}
+
+async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) -> Code {
+    if needs_library(&command)
+        && let Err(code) = require_library(sink)
+    {
+        return code;
+    }
+    match command {
         Command::Init => match pax_core::init_library(Path::new(".")) {
-            Ok(()) => sink.message("Library created"),
-            Err(e) => sink.error(&e.to_string()),
+            Ok(()) => {
+                sink.message("Library created");
+                Code::Success
+            }
+            Err(e) => fail(sink, Failure::Init(&e)),
         },
         Command::Search {
             query,
@@ -269,19 +342,26 @@ async fn main() {
                 local.is_some(),
             ];
             if modes.iter().filter(|set| **set).count() != 1 {
-                sink.error("specify exactly one of QUERY, --author, --doi, or --local");
-                return;
+                return fail(
+                    sink,
+                    Failure::Usage("specify exactly one of QUERY, --author, --doi, or --local"),
+                );
             }
             if paging.is_set() && (doi.is_some() || local.is_some()) {
-                sink.error(
-                    "--limit, --all, --year, --type, and --lang only apply to QUERY and --author searches",
+                return fail(
+                    sink,
+                    Failure::Usage(
+                        "--limit, --all, --year, --type, and --lang only apply to QUERY and --author searches",
+                    ),
                 );
-                return;
             }
 
             if let Some(query) = &local {
+                if let Err(code) = require_library(sink) {
+                    return code;
+                }
                 sink.papers(&pax_core::search_local(query, Path::new(".")));
-                return;
+                return Code::Success;
             }
 
             let known_dois = pax_core::known_dois(Path::new("."));
@@ -293,37 +373,37 @@ async fn main() {
             ];
 
             if let Some(doi) = &doi {
-                let results = pax_core::search_by_doi(doi, &config).await;
+                let results = pax_core::search_by_doi(doi, config).await;
+                let listed = results.values().any(Result::is_ok);
                 // arXiv has no DOI lookup.
                 for provider in [
                     ProviderId::OpenAlex,
                     ProviderId::Crossref,
                     ProviderId::SemanticScholar,
                 ] {
-                    sink.provider_header(provider);
                     match results.get(&provider) {
-                        Some(Ok(works)) => sink.candidates(works, &known_dois),
-                        Some(Err(e)) => sink.error(&e.to_string()),
+                        Some(Ok(works)) => {
+                            sink.provider_header(provider);
+                            sink.candidates(works, &known_dois);
+                        }
+                        Some(Err(e)) => provider_failed(sink, provider, e, listed),
                         None => {}
                     }
                 }
-                return;
+                return exit::provider_results(results.values());
             }
 
             let options = paging.options();
             let results = if let Some(author) = &author {
-                pax_core::search_by_author_paged(author, &options, &config).await
+                pax_core::search_by_author_paged(author, &options, config).await
             } else {
-                pax_core::search_all_paged(query.as_deref().unwrap_or_default(), &options, &config)
+                pax_core::search_all_paged(query.as_deref().unwrap_or_default(), &options, config)
                     .await
             };
             for provider in ALL_PROVIDERS {
                 match results.get(&provider) {
                     Some(Ok(page)) => sink.page_header(provider, page),
-                    Some(Err(e)) => {
-                        sink.provider_header(provider);
-                        sink.error(&e.to_string());
-                    }
+                    Some(Err(e)) => sink.provider_error(provider, &e.to_string()),
                     None => {}
                 }
             }
@@ -338,57 +418,62 @@ async fn main() {
                 &known_dois,
                 &language_unknown,
             );
+            exit::provider_results(results.values())
         }
         Command::Refs { reference, paging } => {
             let options = paging.options();
-            let results = pax_core::references(&reference, &options, Path::new("."), &config).await;
-            show_citations(&mut sink, results);
+            let results = pax_core::references(&reference, &options, Path::new("."), config).await;
+            show_citations(sink, results)
         }
         Command::CitedBy { reference, paging } => {
             let options = paging.options();
-            let results = pax_core::cited_by(&reference, &options, Path::new("."), &config).await;
-            show_citations(&mut sink, results);
+            let results = pax_core::cited_by(&reference, &options, Path::new("."), config).await;
+            show_citations(sink, results)
         }
         Command::Show { reference } => {
-            match pax_core::show_reference(&reference, Path::new("."), &config).await {
+            match pax_core::show_reference(&reference, Path::new("."), config).await {
                 Ok(pax_core::ShowResult::Declared(paper)) => sink.paper(&paper),
                 Ok(pax_core::ShowResult::Candidate(work)) => sink.candidate(&work),
-                Err(e) => sink.error(&e.to_string()),
+                Err(e) => return fail(sink, &e),
             }
+            Code::Success
         }
         Command::Add { reference } => {
             let id: CandidateId = match reference.parse() {
                 Ok(id) => id,
-                Err(e) => {
-                    sink.error(&e.to_string());
-                    return;
-                }
+                Err(e) => return fail(sink, &pax_core::PaxError::InvalidReference(e)),
             };
-            match pax_core::add_candidate(&id, Path::new("."), &config).await {
+            match pax_core::add_candidate(&id, Path::new("."), config).await {
                 Ok(paper_ref) => sink.message(&format!("Added {}", paper_ref.0)),
-                Err(e) => sink.error(&e.to_string()),
+                Err(e) => return fail(sink, &e),
             }
+            Code::Success
         }
         Command::List { author, year, tag } => {
-            match pax_core::Library::load(&pax_core::nix::papers_path(Path::new("."))) {
-                Ok(library) if library.papers().is_empty() => sink.message("Library is empty"),
-                Ok(library) => {
-                    let filter = pax_core::ListFilter { author, year, tag };
-                    let papers = pax_core::filter_papers(library.papers(), &filter);
-                    if papers.is_empty() {
-                        sink.message("No papers match the given filters");
-                    } else {
-                        sink.papers(&papers);
-                    }
+            let library = match pax_core::Library::load(&pax_core::nix::papers_path(Path::new(".")))
+            {
+                Ok(library) => library,
+                Err(e) => return fail(sink, &e),
+            };
+            if library.papers().is_empty() {
+                sink.message("Library is empty");
+            } else {
+                let filter = pax_core::ListFilter { author, year, tag };
+                let papers = pax_core::filter_papers(library.papers(), &filter);
+                if papers.is_empty() {
+                    sink.message("No papers match the given filters");
+                } else {
+                    sink.papers(&papers);
                 }
-                Err(e) => sink.error(&e.to_string()),
             }
+            Code::Success
         }
         Command::Remove { citation_key } => {
             match pax_core::remove_paper(&citation_key, Path::new(".")) {
                 Ok(()) => sink.message(&format!("Removed {citation_key}")),
-                Err(e) => sink.error(&e.to_string()),
+                Err(e) => return fail(sink, &e),
             }
+            Code::Success
         }
         Command::Exclude {
             reference,
@@ -403,18 +488,22 @@ async fn main() {
                 stage,
                 title.as_deref(),
                 Path::new("."),
-                &config,
+                config,
             )
             .await
             {
-                Ok(exclusion) => sink.message(&format!(
-                    "Excluded {} ({}): {}",
-                    exclusion.key, exclusion.stage, exclusion.title
-                )),
-                Err(e @ pax_core::PaxError::ExclusionTitleUnresolved(..)) => {
-                    sink.error(&format!("{e} with --title"))
+                Ok(exclusion) => {
+                    sink.message(&format!(
+                        "Excluded {} ({}): {}",
+                        exclusion.key, exclusion.stage, exclusion.title
+                    ));
+                    Code::Success
                 }
-                Err(e) => sink.error(&e.to_string()),
+                Err(e @ pax_core::PaxError::ExclusionTitleUnresolved(..)) => {
+                    sink.error(&format!("{e} with --title"));
+                    exit::code(Failure::Pax(&e))
+                }
+                Err(e) => fail(sink, &e),
             }
         }
         Command::Edit {
@@ -446,23 +535,31 @@ async fn main() {
             };
             match pax_core::edit_paper(&citation_key, Path::new("."), &edits) {
                 Ok(()) => sink.message(&format!("Updated {citation_key}")),
-                Err(e) => sink.error(&e.to_string()),
+                Err(e) => return fail(sink, &e),
             }
+            Code::Success
         }
         Command::Export {
             format: ExportFormat::Bibtex,
         } => match pax_core::Library::load(&pax_core::nix::papers_path(Path::new("."))) {
-            Ok(library) => sink.export(&pax_core::bibtex::render(library.papers())),
-            Err(e) => sink.error(&e.to_string()),
+            Ok(library) => {
+                sink.export(&pax_core::bibtex::render(library.papers()));
+                Code::Success
+            }
+            Err(e) => fail(sink, &e),
         },
         Command::Fetch { citation_key } => {
             match pax_core::fetch_paper(&citation_key, Path::new(".")) {
                 Ok(outcome) => sink.fetched(&citation_key, &outcome),
-                Err(e) => sink.error(&e.to_string()),
+                Err(e) => return fail(sink, &e),
             }
+            Code::Success
         }
         Command::Check => match pax_core::check_library(Path::new(".")) {
-            Ok(reports) if reports.is_empty() => sink.message("Library is empty"),
+            Ok(reports) if reports.is_empty() => {
+                sink.message("Library is empty");
+                Code::Success
+            }
             Ok(reports) => {
                 let failed = reports.iter().any(|r| {
                     matches!(
@@ -471,11 +568,9 @@ async fn main() {
                     )
                 });
                 sink.checked(&reports);
-                if failed {
-                    std::process::exit(1);
-                }
+                if failed { Code::Failure } else { Code::Success }
             }
-            Err(e) => sink.error(&e.to_string()),
+            Err(e) => fail(sink, &e),
         },
         Command::Open { citation_key } => {
             let root = Path::new(".");
@@ -487,21 +582,26 @@ async fn main() {
                 other => other,
             };
             match resolved {
-                Ok(pax_core::ResolvedArtifact::Path(path)) => open_in_viewer(&mut sink, &path),
+                Ok(pax_core::ResolvedArtifact::Path(path)) => open_in_viewer(sink, &path),
                 Ok(pax_core::ResolvedArtifact::NoSourceUrl) => {
                     sink.error(&format!(
                         "{citation_key:?} has no PDF source recorded — the provider found no \
                          open-access copy when it was added, so there's nothing to fetch"
                     ));
+                    exit::code(Failure::Pax(&pax_core::PaxError::NoSourceUrl(citation_key)))
                 }
-                Ok(pax_core::ResolvedArtifact::NotFetched) => {
-                    sink.error("fetched, but the artifact still couldn't be resolved");
-                }
-                Err(e) => sink.error(&e.to_string()),
+                Ok(pax_core::ResolvedArtifact::NotFetched) => fail(
+                    sink,
+                    Failure::Other("fetched, but the artifact still couldn't be resolved"),
+                ),
+                Err(e) => fail(sink, &e),
             }
         }
         Command::Sync => match pax_core::sync_library(Path::new(".")) {
-            Ok(reports) if reports.is_empty() => sink.message("Library is empty"),
+            Ok(reports) if reports.is_empty() => {
+                sink.message("Library is empty");
+                Code::Success
+            }
             Ok(reports) => {
                 let failed = reports.iter().any(|r| r.result.is_err());
                 for report in &reports {
@@ -510,11 +610,9 @@ async fn main() {
                         Err(e) => sink.error(&format!("{}: {e}", report.citation_key)),
                     }
                 }
-                if failed {
-                    std::process::exit(1);
-                }
+                if failed { Code::Failure } else { Code::Success }
             }
-            Err(e) => sink.error(&e.to_string()),
+            Err(e) => fail(sink, &e),
         },
     }
 }

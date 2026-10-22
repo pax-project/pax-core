@@ -2,6 +2,9 @@
 //! `Sink` instead of calling `println!` directly, so a future alternate
 //! output mode (e.g. JSON, for an external adapter UI) is a new `Sink` impl
 //! rather than a rewrite of every command handler.
+//!
+//! Results go to stdout; errors and warnings go to stderr, so redirecting
+//! stdout (`pax search … > results.txt`) captures the results alone.
 
 use std::collections::HashSet;
 
@@ -13,6 +16,14 @@ use pax_core::{
 pub trait Sink {
     fn message(&mut self, message: &str);
     fn error(&mut self, message: &str);
+    /// A note about the results that isn't itself a result, e.g. a filter
+    /// a provider couldn't apply.
+    fn warning(&mut self, message: &str);
+    /// A provider that failed while the others may still have answered.
+    fn provider_error(&mut self, provider: ProviderId, message: &str);
+    /// A provider that has no record of the seed or DOI asked about, while
+    /// another provider answered: an answer, not a failure.
+    fn provider_note(&mut self, provider: ProviderId, message: &str);
     fn provider_header(&mut self, provider: ProviderId);
     fn page_header(&mut self, provider: ProviderId, page: &SearchPage);
     fn candidates(&mut self, candidates: &[CandidateWork], known_dois: &HashSet<String>);
@@ -44,7 +55,19 @@ impl Sink for TextSink {
     }
 
     fn error(&mut self, message: &str) {
-        println!("Error: {message}");
+        eprintln!("Error: {message}");
+    }
+
+    fn warning(&mut self, message: &str) {
+        eprintln!("Warning: {message}");
+    }
+
+    fn provider_error(&mut self, provider: ProviderId, message: &str) {
+        eprintln!("Error: {provider}: {message}");
+    }
+
+    fn provider_note(&mut self, provider: ProviderId, message: &str) {
+        eprintln!("Note: {provider}: {message}");
     }
 
     fn provider_header(&mut self, provider: ProviderId) {
@@ -59,35 +82,39 @@ impl Sink for TextSink {
         };
         let scanned = page.scanned;
         let skipped = scanned.saturating_sub(retrieved as u64);
-        let note = if page.is_complete() && skipped > 0 && !page.has_post_retrieval_filter() {
-            // e.g. references Semantic Scholar couldn't match to a paper.
-            format!(" ({skipped} entries without a {provider} record skipped)")
-        } else if page.is_complete() {
-            String::new()
+        println!("{provider}: retrieved {retrieved} of {total}");
+        if page.is_complete() {
+            if skipped > 0 && !page.has_post_retrieval_filter() {
+                // e.g. references Semantic Scholar couldn't match to a paper.
+                self.warning(&format!(
+                    "{provider}: {skipped} entries without a {provider} record skipped"
+                ));
+            }
         } else if let Some(max) = page.max_retrievable.filter(|&max| scanned >= max) {
-            format!(" ({provider} serves at most {max} per query)")
+            self.warning(&format!("{provider} serves at most {max} per query"));
         } else {
-            " (use --limit N or --all for more)".to_string()
-        };
-        println!("{provider}: retrieved {retrieved} of {total}{note}");
+            self.warning(&format!(
+                "{provider}: more results available; use --limit N or --all for more"
+            ));
+        }
         for filter in &page.filters {
             match filter.application {
-                FilterApplication::PostRetrieval => println!(
-                    "\t{} filter applied post-retrieval to the {scanned} records fetched; the total counts records before it",
+                FilterApplication::PostRetrieval => self.warning(&format!(
+                    "{provider}: {} filter applied post-retrieval to the {scanned} records fetched; the total counts records before it",
                     filter.kind
-                ),
-                FilterApplication::NotApplied => println!(
-                    "\t{} filter not applied: {provider} has no such data, so these results ignore it",
+                )),
+                FilterApplication::NotApplied => self.warning(&format!(
+                    "{provider}: {} filter not applied: {provider} has no such data, so these results ignore it",
                     filter.kind
-                ),
+                )),
                 _ => {}
             }
         }
         let unknown = page.language_unknown.len();
         if unknown > 0 {
-            println!(
-                "\t{unknown} records have no language, so the language filter couldn't check them; kept and marked [language unknown]"
-            );
+            self.warning(&format!(
+                "{provider}: {unknown} records have no language, so the language filter couldn't check them; kept and marked [language unknown]"
+            ));
         }
     }
 

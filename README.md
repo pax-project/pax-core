@@ -75,7 +75,7 @@ pax export bibtex
 
 `pax search` queries OpenAlex, Crossref, Semantic Scholar, and arXiv, reports how much of each provider's result set it retrieved (`retrieved 50 of 1284`; `--limit N` or `--all` for more), and merges records that are the same paper into one row listing every provider's reference (`merged: 112 → 97 (15 duplicates, 2 unmatched)`). Records count as the same paper when they share a DOI or arXiv id, or an exact title and year without conflicting DOIs. Each merged row shows the published version when there is one (a record with a venue, or a DOI that isn't an arXiv DOI) rather than a preprint, then the most complete record, so its reference is the one to cite and `pax add`.
 
-`pax add <result>` declares a search result in `research/papers.nix`, recording its open PDF link as `source_url` for `pax fetch`. If the resolved record has no PDF but has a DOI, `add` looks the DOI up in the other providers and takes a PDF link from them: an arXiv-hosted PDF if any provider has one, otherwise the first PDF link it finds (OpenAlex, then Crossref, then Semantic Scholar). If none has one, or the lookup fails, `source_url` stays unset and can be set later with `pax edit`.
+`pax add <result>` declares a search result in `research/papers.nix`, recording its open PDF link as `source_url` for `pax fetch`. If the resolved record has no PDF but has a DOI, `add` looks the DOI up in the other providers and takes a PDF link from them: an arXiv-hosted PDF if any provider has one, otherwise the first PDF link it finds (OpenAlex, then Crossref, then Semantic Scholar). If none has one, or the lookup fails, `source_url` stays unset and can be set later with `pax edit`. A paper already in the library, by DOI or by arXiv id in any version, isn't added again: `add` refuses it and names its citation key.
 
 ### Search filters
 
@@ -142,6 +142,23 @@ The reference is a DOI or a `search` result. pax looks up the title, and keys th
 ```
 
 The flake never reads `excluded.nix`, and a library without it simply has no exclusions.
+
+## Scripting
+
+`pax` writes results to stdout, and errors and warnings to stderr: a provider that failed or was rate limited, a filter a provider couldn't apply, skipped entries, records kept as `[language unknown]`, a hint that more results are available. So `pax search "actor model" > results.txt` captures only the results, while the notes still reach the terminal.
+
+Every command exits with a code a script can branch on:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success. |
+| 1 | Any other failure, e.g. `nix` failing to fetch or build; also `check` or `sync` finding problems in the library. |
+| 2 | Wrong arguments: an unknown command or flag, a malformed `provider:id` or citation key, or flags that can't be combined. |
+| 3 | Partial: in `search`, `refs` or `cited-by`, at least one provider failed (network, rate limit, provider error) while others answered, so the results are incomplete. A provider that has no record of the seed or DOI isn't a failure: it answered, so when the others returned results `pax` exits 0 and notes it on stderr. |
+| 4 | Not found: a reference, seed or citation key doesn't resolve, e.g. no provider has a record of the `refs` / `cited-by` seed or the `search --doi` DOI. |
+| 5 | Refused: the library rejected the operation, e.g. adding or excluding a paper already declared, renaming to a citation key in use, fetching a paper with no PDF source, or `init` where a library exists. |
+| 6 | Every provider failed (network, rate limit, provider error). |
+| 7 | The library is missing, not initialized, or unreadable. A command that needs a library checks for `research/papers.nix` before doing anything else, so `add` fails before any network call, and so do a citation key given to `show`, `refs` or `cited-by` and `search --local`; a `provider:id` reference and a plain `search` work without one. |
 
 ## License
 

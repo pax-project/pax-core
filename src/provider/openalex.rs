@@ -56,11 +56,12 @@ impl OpenAlexProvider {
         if is_work_id(work) {
             return Ok(work.to_string());
         }
-        match self.client.get_work(work, &GetParams::default()).await {
-            Ok(found) => Ok(CandidateWork::from(found).id.native_id),
-            Err(OpenAlexError::Api { status: 404, .. }) => Err(ProviderError::NotFound),
-            Err(e) => Err(ProviderError::Request(e.to_string())),
-        }
+        let found = self
+            .client
+            .get_work(work, &GetParams::default())
+            .await
+            .map_err(work_error)?;
+        Ok(CandidateWork::from(found).id.native_id)
     }
 
     /// Pages through `list_works` for `params` (a search or filter with no
@@ -173,7 +174,7 @@ impl Provider for OpenAlexProvider {
             .client
             .get_work(native_id, &GetParams::default())
             .await
-            .map_err(|e| ProviderError::Request(e.to_string()))?;
+            .map_err(work_error)?;
         Ok(CandidateWork::from(work))
     }
 
@@ -209,6 +210,15 @@ impl Provider for OpenAlexProvider {
         // would otherwise be read as an extra path segment (`/works/10.1145/x`
         // looks like two segments, not one opaque id) and 404s.
         self.get(&format!("doi:{doi}")).await
+    }
+}
+
+/// Maps an error fetching one work (by id or DOI): one OpenAlex doesn't
+/// have is [`ProviderError::NotFound`].
+fn work_error(e: OpenAlexError) -> ProviderError {
+    match e {
+        OpenAlexError::Api { status: 404, .. } => ProviderError::NotFound,
+        e => ProviderError::Request(e.to_string()),
     }
 }
 
@@ -254,6 +264,20 @@ impl From<papers_openalex::Work> for CandidateWork {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_work_is_not_found() {
+        let missing = work_error(OpenAlexError::Api {
+            status: 404,
+            message: "Not Found".to_string(),
+        });
+        assert!(matches!(missing, ProviderError::NotFound));
+        let failed = work_error(OpenAlexError::Api {
+            status: 500,
+            message: "oops".to_string(),
+        });
+        assert!(matches!(failed, ProviderError::Request(_)));
+    }
 
     #[test]
     fn work_missing_title_date_and_author_names_still_converts() {
