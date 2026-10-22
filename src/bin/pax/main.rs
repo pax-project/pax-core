@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use pax_core::{CandidateId, DocType, Filters, Limit, ProviderId, SearchOptions, YearRange};
 
 mod sink;
@@ -23,22 +23,8 @@ enum Command {
         /// Search only the local library, without querying any provider
         #[arg(long)]
         local: Option<String>,
-        /// Retrieve at most this many results per provider (default 50)
-        #[arg(long, conflicts_with = "all")]
-        limit: Option<usize>,
-        /// Retrieve every result each provider serves (can be slow)
-        #[arg(long)]
-        all: bool,
-        /// Publication year: YYYY, or an inclusive range YYYY-YYYY, YYYY- or -YYYY
-        #[arg(long, allow_hyphen_values = true)]
-        year: Option<YearRange>,
-        /// Document type: journal-article, conference-paper, preprint, review,
-        /// book, book-chapter, thesis, or dataset
-        #[arg(long = "type")]
-        doc_type: Option<DocType>,
-        /// Language, as an ISO 639-1 code (e.g. en)
-        #[arg(long)]
-        lang: Option<String>,
+        #[command(flatten)]
+        paging: PageArgs,
     },
     ///Inspect a search result before adding it
     Show {
@@ -121,6 +107,58 @@ enum Command {
     Sync,
 }
 
+/// How many results to retrieve per provider, and the filters to apply.
+#[derive(Args)]
+struct PageArgs {
+    /// Retrieve at most this many results per provider (default 50)
+    #[arg(long, conflicts_with = "all")]
+    limit: Option<usize>,
+    /// Retrieve every result each provider serves (can be slow)
+    #[arg(long)]
+    all: bool,
+    /// Publication year: YYYY, or an inclusive range YYYY-YYYY, YYYY- or -YYYY
+    #[arg(long, allow_hyphen_values = true)]
+    year: Option<YearRange>,
+    /// Document type: journal-article, conference-paper, preprint, review,
+    /// book, book-chapter, thesis, or dataset
+    #[arg(long = "type")]
+    doc_type: Option<DocType>,
+    /// Language, as an ISO 639-1 code (e.g. en)
+    #[arg(long)]
+    lang: Option<String>,
+}
+
+impl PageArgs {
+    /// Whether any flag is set.
+    fn is_set(&self) -> bool {
+        self.limit.is_some()
+            || self.all
+            || self.year.is_some()
+            || self.doc_type.is_some()
+            || self.lang.is_some()
+    }
+
+    fn options(self) -> SearchOptions {
+        let defaults = SearchOptions::default();
+        let limit = match (self.all, self.limit) {
+            (true, _) => Limit::All,
+            (false, Some(n)) => Limit::Count(n),
+            (false, None) => defaults.limit,
+        };
+        let mut filters = Filters::default();
+        if let Some(year) = self.year {
+            filters = filters.with_years(year);
+        }
+        if let Some(doc_type) = self.doc_type {
+            filters = filters.with_doc_type(doc_type);
+        }
+        if let Some(lang) = self.lang {
+            filters = filters.with_language(lang);
+        }
+        defaults.with_limit(limit).with_filters(filters)
+    }
+}
+
 #[derive(Subcommand)]
 enum ExportFormat {
     ///Export as BibTeX
@@ -163,11 +201,7 @@ async fn main() {
             author,
             doi,
             local,
-            limit,
-            all,
-            year,
-            doc_type,
-            lang,
+            paging,
         } => {
             let modes = [
                 query.is_some(),
@@ -179,9 +213,7 @@ async fn main() {
                 sink.error("specify exactly one of QUERY, --author, --doi, or --local");
                 return;
             }
-            let paged_only =
-                limit.is_some() || all || year.is_some() || doc_type.is_some() || lang.is_some();
-            if paged_only && (doi.is_some() || local.is_some()) {
+            if paging.is_set() && (doi.is_some() || local.is_some()) {
                 sink.error(
                     "--limit, --all, --year, --type, and --lang only apply to QUERY and --author searches",
                 );
@@ -219,22 +251,7 @@ async fn main() {
                 return;
             }
 
-            let options = SearchOptions::default().with_limit(match (all, limit) {
-                (true, _) => Limit::All,
-                (false, Some(n)) => Limit::Count(n),
-                (false, None) => SearchOptions::default().limit,
-            });
-            let mut filters = Filters::default();
-            if let Some(year) = year {
-                filters = filters.with_years(year);
-            }
-            if let Some(doc_type) = doc_type {
-                filters = filters.with_doc_type(doc_type);
-            }
-            if let Some(lang) = lang {
-                filters = filters.with_language(lang);
-            }
-            let options = options.with_filters(filters);
+            let options = paging.options();
             let results = if let Some(author) = &author {
                 pax_core::search_by_author_paged(author, &options, &config).await
             } else {
