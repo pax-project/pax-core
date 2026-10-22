@@ -10,6 +10,7 @@ use thiserror::Error;
 
 use crate::error::PaxError;
 use crate::library::Library;
+use crate::paper::Paper;
 use crate::provider::{
     CandidateId, OpenAlexProvider, ProviderError, ProviderId, SearchOptions, SearchPage,
     SemanticScholarProvider,
@@ -21,8 +22,16 @@ use crate::{Config, nix, normalize_doi, resolve_candidate};
 #[non_exhaustive]
 pub enum CitationError {
     /// The seed had no identifier this provider can look a paper up by.
-    #[error("can't look the seed up in {provider}: no {provider} id, DOI, or arXiv id is known")]
-    Unresolvable { provider: ProviderId },
+    /// `lookup_error` says why, when fetching the seed from its own provider
+    /// to learn its DOI failed.
+    #[error(
+        "can't look the seed up in {provider}: no {provider} id, DOI, or arXiv id is known{}",
+        lookup_error.as_ref().map(|e| format!(" (fetching the seed's DOI failed: {e})")).unwrap_or_default()
+    )]
+    Unresolvable {
+        provider: ProviderId,
+        lookup_error: Option<String>,
+    },
     /// The provider has no record of the seed under `key`.
     #[error("{provider} has no record of the seed (looked up as {key})")]
     SeedNotFound { provider: ProviderId, key: String },
@@ -83,6 +92,7 @@ async fn citation_lists(
 
     let openalex = match ids.openalex_key() {
         None => Err(CitationError::Unresolvable {
+            lookup_error: ids.lookup_error.clone(),
             provider: ProviderId::OpenAlex,
         }),
         Some(key) => {
@@ -98,6 +108,7 @@ async fn citation_lists(
 
     let semantic_scholar = match ids.semantic_scholar_key() {
         None => Err(CitationError::Unresolvable {
+            lookup_error: ids.lookup_error.clone(),
             provider: ProviderId::SemanticScholar,
         }),
         Some(key) => {
@@ -138,6 +149,8 @@ struct SeedIds {
     doi: Option<String>,
     /// Without a version suffix, e.g. `1706.03762`.
     arxiv: Option<String>,
+    /// Why fetching a `provider:id` seed to learn its DOI failed, if it did.
+    lookup_error: Option<String>,
 }
 
 impl SeedIds {
@@ -153,7 +166,7 @@ impl SeedIds {
             let paper = library
                 .find(seed)
                 .ok_or_else(|| PaxError::NoSuchPaper(seed.to_string()))?;
-            return Ok(Self::from_doi(paper.identity.doi.as_deref()));
+            return Ok(Self::from_paper(paper));
         }
 
         let id: CandidateId = seed.parse()?;
@@ -172,8 +185,9 @@ impl SeedIds {
                 ..SeedIds::default()
             },
         };
-        if let Ok(work) = resolve_candidate(&id, config).await {
-            ids.doi = work.doi.map(|doi| normalize_doi(&doi).to_string());
+        match resolve_candidate(&id, config).await {
+            Ok(work) => ids.doi = work.doi.map(|doi| normalize_doi(&doi).to_string()),
+            Err(e) => ids.lookup_error = Some(format!("{}: {e}", id.provider)),
         }
         Ok(ids)
     }
@@ -190,6 +204,22 @@ impl SeedIds {
             arxiv,
             ..SeedIds::default()
         }
+    }
+
+    /// From a declared paper: its DOI, and its arXiv id when the DOI is
+    /// arXiv's own or the PDF source is on arXiv — a paper added from arXiv
+    /// often has no DOI at all.
+    fn from_paper(paper: &Paper) -> Self {
+        let mut ids = Self::from_doi(paper.identity.doi.as_deref());
+        if ids.arxiv.is_none() {
+            ids.arxiv = paper
+                .artifact
+                .source_url
+                .as_deref()
+                .and_then(arxiv_id_from_url)
+                .map(str::to_string);
+        }
+        ids
     }
 
     /// The key `OpenAlexProvider` looks the seed up by.
@@ -223,6 +253,18 @@ fn arxiv_id_from_doi(doi: &str) -> Option<&str> {
         .eq_ignore_ascii_case(ARXIV_DOI_PREFIX)
         .then(|| &doi[ARXIV_DOI_PREFIX.len()..])
         .filter(|id| !id.is_empty())
+}
+
+/// The arXiv id in an `arxiv.org/abs/…` or `arxiv.org/pdf/…` URL, without
+/// version or `.pdf` suffix.
+fn arxiv_id_from_url(url: &str) -> Option<&str> {
+    let (_, rest) = url.split_once("arxiv.org/")?;
+    let id = rest
+        .strip_prefix("abs/")
+        .or_else(|| rest.strip_prefix("pdf/"))?;
+    let id = id.split(['?', '#']).next()?;
+    let id = id.strip_suffix(".pdf").unwrap_or(id);
+    Some(strip_arxiv_version(id)).filter(|id| !id.is_empty())
 }
 
 /// `1706.03762v7` → `1706.03762`: the providers index the paper, not a
@@ -299,6 +341,50 @@ mod tests {
         let ids = SeedIds::from_doi(None);
         assert_eq!(ids.openalex_key(), None);
         assert_eq!(ids.semantic_scholar_key(), None);
+    }
+
+    #[test]
+    fn a_declared_paper_without_a_doi_falls_back_to_its_arxiv_source() {
+        let paper = Paper {
+            identity: crate::paper::Identity {
+                doi: None,
+                title: "Attention Is All You Need".to_string(),
+                authors: Vec::new(),
+                year: Some(2017),
+                venue: None,
+            },
+            artifact: crate::paper::Artifact {
+                source_url: Some("https://arxiv.org/pdf/1706.03762v7".to_string()),
+                hash: None,
+            },
+            local: crate::paper::Local {
+                citation_key: "vaswani2017".to_string(),
+                tags: Vec::new(),
+                notes: None,
+            },
+        };
+        let ids = SeedIds::from_paper(&paper);
+        assert_eq!(
+            ids.semantic_scholar_key().as_deref(),
+            Some("ARXIV:1706.03762")
+        );
+    }
+
+    #[test]
+    fn arxiv_ids_are_read_from_abs_and_pdf_urls() {
+        for url in [
+            "https://arxiv.org/abs/1706.03762",
+            "https://arxiv.org/pdf/1706.03762v7",
+            "http://arxiv.org/pdf/1706.03762v7.pdf",
+        ] {
+            assert_eq!(arxiv_id_from_url(url), Some("1706.03762"), "{url}");
+        }
+        assert_eq!(
+            arxiv_id_from_url("https://arxiv.org/abs/cs/0112017v1"),
+            Some("cs/0112017")
+        );
+        assert_eq!(arxiv_id_from_url("https://example.org/paper.pdf"), None);
+        assert_eq!(arxiv_id_from_url("https://arxiv.org/list/cs.DC"), None);
     }
 
     #[test]
