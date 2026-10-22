@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use ::crossref::query::ResultControl;
 use ::crossref::{
     Crossref, CrossrefQuery, Type, WorkListQuery, WorkResultControl, Works, WorksFilter, WorksQuery,
@@ -72,6 +74,8 @@ impl Provider for CrossrefProvider {
         options: &SearchOptions,
     ) -> Result<SearchPage, ProviderError> {
         let plan = FilterPlan::new(&options.filters);
+        // Works the language filter kept without a language to check.
+        let language_unknown = RefCell::new(Vec::new());
         let page = collect_pages(
             options,
             MAX_PAGE_SIZE,
@@ -86,15 +90,22 @@ impl Provider for CrossrefProvider {
                 }
                 let query = WorkListQuery::from(works_query);
                 let plan = &plan;
+                let language_unknown = &language_unknown;
                 async move {
                     let list: WorkList = self.fetch_message(&query).await?;
                     let fetched = list.items.len();
-                    let works = list
-                        .items
-                        .into_iter()
-                        .filter(|work| plan.keeps(work))
-                        .map(CandidateWork::from)
-                        .collect();
+                    let mut works = Vec::new();
+                    for work in list.items {
+                        let verdict = plan.verdict(&work);
+                        if verdict == Verdict::Drop {
+                            continue;
+                        }
+                        let work = CandidateWork::from(work);
+                        if verdict == Verdict::KeepLanguageUnknown {
+                            language_unknown.borrow_mut().push(work.id.clone());
+                        }
+                        works.push(work);
+                    }
                     Ok(RawPage {
                         works,
                         total: list.total_results,
@@ -104,7 +115,12 @@ impl Provider for CrossrefProvider {
             },
         )
         .await?;
-        Ok(page.with_filters(plan.applied))
+        let mut language_unknown = language_unknown.into_inner();
+        // Paging may have truncated the last page's works.
+        language_unknown.retain(|id| page.works.iter().any(|work| &work.id == id));
+        Ok(page
+            .with_filters(plan.applied)
+            .with_language_unknown(language_unknown))
     }
 
     async fn get(&self, native_id: &str) -> Result<CandidateWork, ProviderError> {
@@ -189,14 +205,27 @@ impl FilterPlan {
     }
 
     /// Whether `work` passes the post-retrieval filters. A record with no
-    /// `language` doesn't match a language filter.
-    fn keeps(&self, work: &Work) -> bool {
-        self.language.as_ref().is_none_or(|wanted| {
-            work.language
-                .as_deref()
-                .is_some_and(|language| language.eq_ignore_ascii_case(wanted))
-        })
+    /// `language` is kept but marked: proceedings papers never carry one, so
+    /// dropping them would silently exclude every conference paper.
+    fn verdict(&self, work: &Work) -> Verdict {
+        let Some(wanted) = &self.language else {
+            return Verdict::Keep;
+        };
+        match work.language.as_deref() {
+            None => Verdict::KeepLanguageUnknown,
+            Some(language) if language.eq_ignore_ascii_case(wanted) => Verdict::Keep,
+            Some(_) => Verdict::Drop,
+        }
     }
+}
+
+/// What the post-retrieval filters make of one record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Keep,
+    /// Kept, though the record has no language to check the filter against.
+    KeepLanguageUnknown,
+    Drop,
 }
 
 /// Parses a Crossref response body into its `message`. Crossref answers an
@@ -381,8 +410,17 @@ mod tests {
             language: Some("EN".to_string()),
             ..Work::default()
         };
-        assert!(plan.keeps(&english));
-        assert!(!plan.keeps(&Work::default()), "no language never matches");
+        assert_eq!(plan.verdict(&english), Verdict::Keep);
+        let french = Work {
+            language: Some("fr".to_string()),
+            ..Work::default()
+        };
+        assert_eq!(plan.verdict(&french), Verdict::Drop);
+        assert_eq!(
+            plan.verdict(&Work::default()),
+            Verdict::KeepLanguageUnknown,
+            "a record with no language is kept, marked unknown"
+        );
     }
 
     #[test]
@@ -402,7 +440,11 @@ mod tests {
                 .iter()
                 .all(|f| f.application == FilterApplication::Server)
         );
-        assert!(plan.keeps(&Work::default()), "no post-retrieval filter");
+        assert_eq!(
+            plan.verdict(&Work::default()),
+            Verdict::Keep,
+            "no post-retrieval filter"
+        );
     }
 
     #[test]
