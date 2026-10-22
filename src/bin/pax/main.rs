@@ -232,8 +232,7 @@ fn show_citations(
         match results.get(&provider) {
             Some(Ok(page)) => sink.page(provider, page, &known_dois),
             Some(Err(e)) => {
-                sink.provider_header(provider);
-                sink.error(&e.to_string());
+                sink.provider_error(provider, &e.to_string());
             }
             None => {}
         }
@@ -300,10 +299,12 @@ async fn main() {
                     ProviderId::Crossref,
                     ProviderId::SemanticScholar,
                 ] {
-                    sink.provider_header(provider);
                     match results.get(&provider) {
-                        Some(Ok(works)) => sink.candidates(works, &known_dois),
-                        Some(Err(e)) => sink.error(&e.to_string()),
+                        Some(Ok(works)) => {
+                            sink.provider_header(provider);
+                            sink.candidates(works, &known_dois);
+                        }
+                        Some(Err(e)) => sink.provider_error(provider, &e.to_string()),
                         None => {}
                     }
                 }
@@ -321,8 +322,7 @@ async fn main() {
                 match results.get(&provider) {
                     Some(Ok(page)) => sink.page_header(provider, page),
                     Some(Err(e)) => {
-                        sink.provider_header(provider);
-                        sink.error(&e.to_string());
+                        sink.provider_error(provider, &e.to_string());
                     }
                     None => {}
                 }
