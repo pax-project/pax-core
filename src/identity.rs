@@ -55,8 +55,7 @@ impl fmt::Display for IdentityKey {
 /// Every identity key `work` has, strongest first (DOI, arXiv id,
 /// title+year). Empty when the record has none — it can't be matched.
 pub fn identity_keys(work: &CandidateWork) -> Vec<IdentityKey> {
-    let arxiv_id = (work.id.provider == ProviderId::ArXiv).then_some(work.id.native_id.as_str());
-    let mut keys = id_keys(work.doi.as_deref(), arxiv_id, work.pdf_url.as_deref());
+    let mut keys = work_id_keys(work);
 
     let title = normalize_title(&work.title);
     if let (false, Some(year)) = (title.is_empty(), year_from_publish_date(&work.publish_date)) {
@@ -79,6 +78,18 @@ pub(crate) fn paper_id_keys(paper: &Paper) -> Vec<IdentityKey> {
         None,
         paper.artifact.source_url.as_deref(),
     )
+}
+
+/// The key a bare DOI yields: a DOI key, or an arXiv key for an arXiv DOI.
+/// Empty for a blank DOI.
+pub(crate) fn doi_id_keys(doi: &str) -> Vec<IdentityKey> {
+    id_keys(Some(doi), None, None)
+}
+
+/// A record's DOI and arXiv keys: [`identity_keys`] without title+year.
+pub(crate) fn work_id_keys(work: &CandidateWork) -> Vec<IdentityKey> {
+    let arxiv_id = (work.id.provider == ProviderId::ArXiv).then_some(work.id.native_id.as_str());
+    id_keys(work.doi.as_deref(), arxiv_id, work.pdf_url.as_deref())
 }
 
 /// The DOI and arXiv keys a `provider:id` reference carries by itself,

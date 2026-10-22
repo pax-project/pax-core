@@ -42,6 +42,7 @@ src/
     filter.rs     # Filters (year/type/language) and AppliedFilter: how each provider applied each one
   paper.rs        # Paper, Identity, Artifact, Local, PaperRef (citation key)
   library.rs      # Library::load()/save() against research/papers.nix
+  library_index.rs # LibraryIndex: is a result declared or excluded, matched by DOI/arXiv identity key
   identity.rs     # IdentityKey (DOI → arXiv id → title+year) + group(): which records are the same paper
   merge.rs        # merge_works/merge_pages: duplicates collapsed into MergedWork, with before/after/unmatched counts
   exclusions.rs   # Exclusions::load()/save() against research/excluded.nix; exclusion_key()

@@ -11,6 +11,7 @@ pub mod exclusions;
 pub mod github;
 pub mod identity;
 pub mod library;
+pub mod library_index;
 pub mod merge;
 pub mod nix;
 mod nix_attrs;
@@ -32,6 +33,7 @@ pub use exclusions::{
 pub use github::publish_to_github_release;
 pub use identity::{IdentityKey, identity_key, identity_keys};
 pub use library::Library;
+pub use library_index::LibraryIndex;
 pub use merge::{MergeReport, MergedWork, merge_pages, merge_works};
 pub use nix::init_library;
 use paper::year_from_publish_date;
