@@ -3,6 +3,7 @@ use thiserror::Error;
 use crate::provider::{CandidateIdParseError, ProviderError};
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum PaxError {
     #[error(transparent)]
     Provider(#[from] ProviderError),

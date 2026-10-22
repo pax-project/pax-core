@@ -245,6 +245,7 @@ where
 
 /// Which external metadata source a [`CandidateId`] or [`CandidateWork`] came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ProviderId {
     OpenAlex,
     Crossref,
@@ -302,6 +303,7 @@ pub struct CandidateId {
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CandidateIdParseError {
     #[error("candidate reference must be in the form 'provider:id', got: {0:?}")]
     MissingSeparator(String),
@@ -350,6 +352,7 @@ pub struct CandidateWork {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ProviderError {
     #[error("request failed: {0}")]
     Request(String),
