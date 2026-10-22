@@ -1,6 +1,9 @@
-use arxiv_tools::{ArXiv, Client, QueryParams};
+use arxiv_tools::{ArXiv, Client, MAX_RESULTS_PER_REQUEST, QueryParams};
 
-use super::{CandidateId, CandidateWork, Provider, ProviderError, ProviderId, SEARCH_RESULT_LIMIT};
+use super::{
+    CandidateId, CandidateWork, Provider, ProviderError, ProviderId, SearchOptions, SearchPage,
+    collect_pages,
+};
 
 pub struct ArxivProvider {
     client: Client,
@@ -20,6 +23,34 @@ impl ArxivProvider {
             .map_err(|e| ProviderError::Request(e.to_string()))?;
         Ok(ArxivProvider { client })
     }
+
+    /// Pages through `query`'s results. arXiv reports no ceiling of its own;
+    /// the client spaces requests per arXiv's terms of use, so a large
+    /// [`Limit::All`](super::Limit::All) search is slow by design.
+    async fn query_page(
+        &self,
+        query: ArXiv,
+        options: &SearchOptions,
+    ) -> Result<SearchPage, ProviderError> {
+        collect_pages(
+            options,
+            MAX_RESULTS_PER_REQUEST as usize,
+            None,
+            |offset, size| {
+                let query = query.clone().start(offset as u64).max_results(size as u64);
+                async move {
+                    let page = self
+                        .client
+                        .fetch_page(&query)
+                        .await
+                        .map_err(|e| ProviderError::Request(e.to_string()))?;
+                    let works = page.papers.into_iter().map(CandidateWork::from).collect();
+                    Ok((works, page.total_results))
+                }
+            },
+        )
+        .await
+    }
 }
 
 impl Provider for ArxivProvider {
@@ -28,14 +59,26 @@ impl Provider for ArxivProvider {
     }
 
     async fn search(&self, query: &str) -> Result<Vec<CandidateWork>, ProviderError> {
-        let query =
-            ArXiv::from_args(QueryParams::title(query)).max_results(SEARCH_RESULT_LIMIT as u64);
-        let papers = self
-            .client
-            .fetch(&query)
+        let page = self.search_page(query, &SearchOptions::default()).await?;
+        Ok(page.works)
+    }
+
+    async fn search_page(
+        &self,
+        query: &str,
+        options: &SearchOptions,
+    ) -> Result<SearchPage, ProviderError> {
+        self.query_page(ArXiv::from_args(QueryParams::title(query)), options)
             .await
-            .map_err(|e| ProviderError::Request(e.to_string()))?;
-        Ok(papers.into_iter().map(CandidateWork::from).collect())
+    }
+
+    async fn search_by_author_page(
+        &self,
+        author: &str,
+        options: &SearchOptions,
+    ) -> Result<SearchPage, ProviderError> {
+        self.query_page(ArXiv::from_args(QueryParams::author(author)), options)
+            .await
     }
 
     async fn get(&self, native_id: &str) -> Result<CandidateWork, ProviderError> {
@@ -53,14 +96,10 @@ impl Provider for ArxivProvider {
     }
 
     async fn search_by_author(&self, author: &str) -> Result<Vec<CandidateWork>, ProviderError> {
-        let query =
-            ArXiv::from_args(QueryParams::author(author)).max_results(SEARCH_RESULT_LIMIT as u64);
-        let papers = self
-            .client
-            .fetch(&query)
-            .await
-            .map_err(|e| ProviderError::Request(e.to_string()))?;
-        Ok(papers.into_iter().map(CandidateWork::from).collect())
+        let page = self
+            .search_by_author_page(author, &SearchOptions::default())
+            .await?;
+        Ok(page.works)
     }
 }
 

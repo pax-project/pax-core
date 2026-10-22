@@ -1,6 +1,16 @@
 use ::semantic_scholar::SemanticScholar;
 
-use super::{CandidateId, CandidateWork, Provider, ProviderError, ProviderId, SEARCH_RESULT_LIMIT};
+use super::{
+    CandidateId, CandidateWork, Provider, ProviderError, ProviderId, SearchOptions, SearchPage,
+    collect_pages,
+};
+
+/// Semantic Scholar's relevance search serves at most 100 papers per request.
+const MAX_PAGE_SIZE: usize = 100;
+
+/// Relevance search requires `offset + limit <= 1000`: nothing past the
+/// first 1,000 matches is reachable, however far it's paged.
+const MAX_RETRIEVABLE: u64 = 1000;
 
 pub struct SemanticScholarProvider {
     client: SemanticScholar,
@@ -23,14 +33,33 @@ impl Provider for SemanticScholarProvider {
     }
 
     async fn search(&self, query: &str) -> Result<Vec<CandidateWork>, ProviderError> {
-        let result = self
-            .client
-            .search_papers(query)
-            .limit(SEARCH_RESULT_LIMIT as u32)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Request(e.to_string()))?;
-        Ok(result.data.into_iter().map(CandidateWork::from).collect())
+        let page = self.search_page(query, &SearchOptions::default()).await?;
+        Ok(page.works)
+    }
+
+    async fn search_page(
+        &self,
+        query: &str,
+        options: &SearchOptions,
+    ) -> Result<SearchPage, ProviderError> {
+        collect_pages(
+            options,
+            MAX_PAGE_SIZE,
+            Some(MAX_RETRIEVABLE),
+            |offset, limit| async move {
+                let result = self
+                    .client
+                    .search_papers(query)
+                    .offset(offset as u32)
+                    .limit(limit as u32)
+                    .send()
+                    .await
+                    .map_err(|e| ProviderError::Request(e.to_string()))?;
+                let works = result.data.into_iter().map(CandidateWork::from).collect();
+                Ok((works, result.total))
+            },
+        )
+        .await
     }
 
     async fn get(&self, native_id: &str) -> Result<CandidateWork, ProviderError> {

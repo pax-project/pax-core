@@ -23,8 +23,8 @@ pub use nix::init_library;
 use paper::year_from_publish_date;
 pub use paper::{Artifact, Identity, Local, Paper, PaperRef};
 pub use provider::{
-    ArxivProvider, CandidateId, CandidateWork, CrossrefProvider, OpenAlexProvider, Provider,
-    ProviderError, ProviderId, SemanticScholarProvider,
+    ArxivProvider, CandidateId, CandidateWork, CrossrefProvider, Limit, OpenAlexProvider, Provider,
+    ProviderError, ProviderId, SearchOptions, SearchPage, SemanticScholarProvider,
 };
 
 /// Per-installation settings a caller (e.g. the CLI, reading `.env`) supplies
@@ -38,50 +38,14 @@ pub struct Config {
     pub arxiv_contact: Option<String>,
 }
 
-/// Searches every configured provider and aggregates results by provider.
-/// A failing provider doesn't fail the whole search — its error is reported
-/// alongside whatever providers did succeed, so callers (e.g. the CLI) can
-/// decide how to surface it.
+/// Searches every configured provider and aggregates results by provider,
+/// retrieving up to the default limit from each. See [`search_all_paged`] for
+/// a chosen limit and each provider's total.
 pub async fn search_all(
     query: &str,
     config: &Config,
 ) -> HashMap<ProviderId, Result<Vec<CandidateWork>, ProviderError>> {
-    let mut results = HashMap::new();
-
-    let openalex = OpenAlexProvider::new();
-    results.insert(ProviderId::OpenAlex, openalex.search(query).await);
-
-    match CrossrefProvider::new() {
-        Ok(crossref) => {
-            results.insert(ProviderId::Crossref, crossref.search(query).await);
-        }
-        Err(e) => {
-            results.insert(ProviderId::Crossref, Err(e));
-        }
-    }
-
-    match SemanticScholarProvider::new(config.semantic_scholar_api_key.as_deref()) {
-        Ok(semantic_scholar) => {
-            results.insert(
-                ProviderId::SemanticScholar,
-                semantic_scholar.search(query).await,
-            );
-        }
-        Err(e) => {
-            results.insert(ProviderId::SemanticScholar, Err(e));
-        }
-    }
-
-    match ArxivProvider::new(config.arxiv_contact.as_deref()) {
-        Ok(arxiv) => {
-            results.insert(ProviderId::ArXiv, arxiv.search(query).await);
-        }
-        Err(e) => {
-            results.insert(ProviderId::ArXiv, Err(e));
-        }
-    }
-
-    results
+    works_only(search_all_paged(query, &SearchOptions::default(), config).await)
 }
 
 /// Same shape as [`search_all`], but scoped to an author name — each provider's
@@ -91,19 +55,33 @@ pub async fn search_by_author(
     author: &str,
     config: &Config,
 ) -> HashMap<ProviderId, Result<Vec<CandidateWork>, ProviderError>> {
+    works_only(search_by_author_paged(author, &SearchOptions::default(), config).await)
+}
+
+/// Searches every configured provider, paging each up to `options.limit`,
+/// and aggregates results by provider. A failing provider doesn't fail the
+/// whole search — its error is reported alongside whatever providers did
+/// succeed, so callers (e.g. the CLI) can decide how to surface it. Each
+/// [`SearchPage`] carries the provider's total, so a caller can always say
+/// how much of the result set it retrieved.
+pub async fn search_all_paged(
+    query: &str,
+    options: &SearchOptions,
+    config: &Config,
+) -> HashMap<ProviderId, Result<SearchPage, ProviderError>> {
     let mut results = HashMap::new();
 
     let openalex = OpenAlexProvider::new();
     results.insert(
         ProviderId::OpenAlex,
-        openalex.search_by_author(author).await,
+        openalex.search_page(query, options).await,
     );
 
     match CrossrefProvider::new() {
         Ok(crossref) => {
             results.insert(
                 ProviderId::Crossref,
-                crossref.search_by_author(author).await,
+                crossref.search_page(query, options).await,
             );
         }
         Err(e) => {
@@ -115,7 +93,7 @@ pub async fn search_by_author(
         Ok(semantic_scholar) => {
             results.insert(
                 ProviderId::SemanticScholar,
-                semantic_scholar.search_by_author(author).await,
+                semantic_scholar.search_page(query, options).await,
             );
         }
         Err(e) => {
@@ -125,7 +103,7 @@ pub async fn search_by_author(
 
     match ArxivProvider::new(config.arxiv_contact.as_deref()) {
         Ok(arxiv) => {
-            results.insert(ProviderId::ArXiv, arxiv.search_by_author(author).await);
+            results.insert(ProviderId::ArXiv, arxiv.search_page(query, options).await);
         }
         Err(e) => {
             results.insert(ProviderId::ArXiv, Err(e));
@@ -133,6 +111,72 @@ pub async fn search_by_author(
     }
 
     results
+}
+
+/// Same shape as [`search_all_paged`], but scoped to an author name, the way
+/// [`search_by_author`] is.
+pub async fn search_by_author_paged(
+    author: &str,
+    options: &SearchOptions,
+    config: &Config,
+) -> HashMap<ProviderId, Result<SearchPage, ProviderError>> {
+    let mut results = HashMap::new();
+
+    let openalex = OpenAlexProvider::new();
+    results.insert(
+        ProviderId::OpenAlex,
+        openalex.search_by_author_page(author, options).await,
+    );
+
+    match CrossrefProvider::new() {
+        Ok(crossref) => {
+            results.insert(
+                ProviderId::Crossref,
+                crossref.search_by_author_page(author, options).await,
+            );
+        }
+        Err(e) => {
+            results.insert(ProviderId::Crossref, Err(e));
+        }
+    }
+
+    match SemanticScholarProvider::new(config.semantic_scholar_api_key.as_deref()) {
+        Ok(semantic_scholar) => {
+            results.insert(
+                ProviderId::SemanticScholar,
+                semantic_scholar
+                    .search_by_author_page(author, options)
+                    .await,
+            );
+        }
+        Err(e) => {
+            results.insert(ProviderId::SemanticScholar, Err(e));
+        }
+    }
+
+    match ArxivProvider::new(config.arxiv_contact.as_deref()) {
+        Ok(arxiv) => {
+            results.insert(
+                ProviderId::ArXiv,
+                arxiv.search_by_author_page(author, options).await,
+            );
+        }
+        Err(e) => {
+            results.insert(ProviderId::ArXiv, Err(e));
+        }
+    }
+
+    results
+}
+
+/// Drops the paging counts, for the unpaged `search_*` functions.
+fn works_only(
+    pages: HashMap<ProviderId, Result<SearchPage, ProviderError>>,
+) -> HashMap<ProviderId, Result<Vec<CandidateWork>, ProviderError>> {
+    pages
+        .into_iter()
+        .map(|(provider, page)| (provider, page.map(|page| page.works)))
+        .collect()
 }
 
 /// Resolves a DOI directly against every provider that supports it. Same
