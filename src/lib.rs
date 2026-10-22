@@ -5,6 +5,7 @@
 
 pub mod bibtex;
 mod citation_key;
+mod citations;
 pub mod error;
 pub mod github;
 pub mod library;
@@ -16,6 +17,7 @@ pub mod provider;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+pub use citations::{CITATION_PROVIDERS, CitationError, CitationResults, cited_by, references};
 pub use error::PaxError;
 pub use github::publish_to_github_release;
 pub use library::Library;
