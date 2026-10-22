@@ -21,7 +21,9 @@ pub mod provider;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-pub use citations::{CITATION_PROVIDERS, CitationError, CitationResults, cited_by, references};
+pub use citations::{
+    CITATION_PROVIDERS, CitationError, CitationResults, SeedLookupError, cited_by, references,
+};
 pub use error::PaxError;
 pub use exclusions::{
     Exclusion, ExclusionStage, Exclusions, UnknownExclusionStage, candidate_exclusion_key,

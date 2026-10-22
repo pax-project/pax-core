@@ -30,13 +30,24 @@ pub enum CitationError {
     )]
     Unresolvable {
         provider: ProviderId,
-        lookup_error: Option<String>,
+        lookup_error: Option<SeedLookupError>,
     },
     /// The provider has no record of the seed under `key`.
     #[error("{provider} has no record of the seed (looked up as {key})")]
     SeedNotFound { provider: ProviderId, key: String },
     #[error(transparent)]
     Provider(#[from] ProviderError),
+}
+
+/// Fetching a `provider:id` seed from its own provider, to learn its DOI,
+/// failed. `error` tells a provider with no such work
+/// ([`ProviderError::NotFound`]) from a request that failed.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{provider}: {error}")]
+pub struct SeedLookupError {
+    /// The seed's own provider, the one it was fetched from.
+    pub provider: ProviderId,
+    pub error: ProviderError,
 }
 
 /// Each citation provider's list, by provider. A provider's own failure —
@@ -150,7 +161,7 @@ struct SeedIds {
     /// Without a version suffix, e.g. `1706.03762`.
     arxiv: Option<String>,
     /// Why fetching a `provider:id` seed to learn its DOI failed, if it did.
-    lookup_error: Option<String>,
+    lookup_error: Option<SeedLookupError>,
 }
 
 impl SeedIds {
@@ -187,7 +198,12 @@ impl SeedIds {
         };
         match resolve_candidate(&id, config).await {
             Ok(work) => ids.doi = work.doi.map(|doi| normalize_doi(&doi).to_string()),
-            Err(e) => ids.lookup_error = Some(format!("{}: {e}", id.provider)),
+            Err(error) => {
+                ids.lookup_error = Some(SeedLookupError {
+                    provider: id.provider,
+                    error,
+                })
+            }
         }
         Ok(ids)
     }
