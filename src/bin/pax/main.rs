@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use clap::{Args, Parser, Subcommand};
-use pax_core::{CandidateId, DocType, Filters, Limit, ProviderId, SearchOptions, YearRange};
+use pax_core::{
+    CandidateId, DocType, ExclusionStage, Filters, Limit, ProviderId, SearchOptions, YearRange,
+};
 
 mod sink;
 use sink::{Sink, TextSink};
@@ -68,6 +70,21 @@ enum Command {
     Remove {
         /// The paper's citation key, e.g. turing1936
         citation_key: String,
+    },
+    ///Exclude a paper: record it in research/excluded.nix with a reason and stage
+    Exclude {
+        /// A DOI, or a reference from `search`, e.g. openalex:W2072794470
+        reference: String,
+        /// Why it was excluded, e.g. "not empirical"
+        #[arg(long)]
+        reason: String,
+        /// Where in screening it was excluded
+        #[arg(long, value_parser = ["screening", "full-text"])]
+        stage: String,
+        /// Title to record; overrides the provider's, and is required if the
+        /// reference can't be resolved
+        #[arg(long)]
+        title: Option<String>,
     },
     ///Modify a declared paper's tags, notes, citation key, or metadata
     Edit {
@@ -370,6 +387,33 @@ async fn main() {
         Command::Remove { citation_key } => {
             match pax_core::remove_paper(&citation_key, Path::new(".")) {
                 Ok(()) => sink.message(&format!("Removed {citation_key}")),
+                Err(e) => sink.error(&e.to_string()),
+            }
+        }
+        Command::Exclude {
+            reference,
+            reason,
+            stage,
+            title,
+        } => {
+            let stage: ExclusionStage = stage.parse().expect("clap restricts --stage");
+            match pax_core::exclude_paper(
+                &reference,
+                &reason,
+                stage,
+                title.as_deref(),
+                Path::new("."),
+                &config,
+            )
+            .await
+            {
+                Ok(exclusion) => sink.message(&format!(
+                    "Excluded {} ({}): {}",
+                    exclusion.key, exclusion.stage, exclusion.title
+                )),
+                Err(e @ pax_core::PaxError::ExclusionTitleUnresolved(..)) => {
+                    sink.error(&format!("{e} with --title"))
+                }
                 Err(e) => sink.error(&e.to_string()),
             }
         }
