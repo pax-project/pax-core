@@ -243,10 +243,7 @@ async fn main() {
             };
             for provider in ALL_PROVIDERS {
                 match results.get(&provider) {
-                    Some(Ok(page)) => {
-                        sink.page_header(provider, page);
-                        sink.candidates(&page.works, &known_dois);
-                    }
+                    Some(Ok(page)) => sink.page(provider, page, &known_dois),
                     Some(Err(e)) => {
                         sink.provider_header(provider);
                         sink.error(&e.to_string());
