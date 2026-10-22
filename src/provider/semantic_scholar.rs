@@ -55,7 +55,7 @@ impl From<::semantic_scholar::Paper> for CandidateWork {
                 provider: ProviderId::SemanticScholar,
                 native_id: value.paper_id.clone(),
             },
-            title: value.title.expect("Paper does not have title!"),
+            title: value.title.unwrap_or_default(),
             authors: value
                 .authors
                 .unwrap_or_default()

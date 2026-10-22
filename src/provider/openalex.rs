@@ -87,16 +87,16 @@ impl From<papers_openalex::Work> for CandidateWork {
                 provider: ProviderId::OpenAlex,
                 native_id,
             },
-            title: value.title.expect("OpenAlex Work with no title found"),
+            // Deep result pages include records missing any of these fields;
+            // an empty value keeps the record visible instead of failing the search.
+            title: value.title.unwrap_or_default(),
             authors: value
                 .authorships
                 .unwrap_or_default()
                 .into_iter()
-                .map(|author| author.raw_author_name.expect("OpenAlex Author has no name"))
+                .filter_map(|author| author.raw_author_name)
                 .collect(),
-            publish_date: value
-                .publication_date
-                .expect("OpenAlex Paper has no publication date"),
+            publish_date: value.publication_date.unwrap_or_default(),
             doi: value.doi,
             pdf_url: value
                 .best_oa_location
@@ -109,5 +109,26 @@ impl From<papers_openalex::Work> for CandidateWork {
                 .and_then(|source| source.display_name),
             abstract_text: value.abstract_text,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn work_missing_title_date_and_author_names_still_converts() {
+        let work: papers_openalex::Work = serde_json::from_str(
+            r#"{
+                "id": "https://openalex.org/W1",
+                "authorships": [{"author_position": "first"}]
+            }"#,
+        )
+        .unwrap();
+        let candidate = CandidateWork::from(work);
+        assert_eq!(candidate.id.native_id, "W1");
+        assert_eq!(candidate.title, "");
+        assert_eq!(candidate.publish_date, "");
+        assert!(candidate.authors.is_empty());
     }
 }
