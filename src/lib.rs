@@ -727,6 +727,150 @@ mod excluded_keys_tests {
 }
 
 #[cfg(test)]
+mod exclude_paper_tests {
+    use super::*;
+    use std::fs;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
+    /// Polls a future that never waits: these tests only take the paths that
+    /// need no network (a bare DOI with a title, or an early error).
+    fn block_on<F: Future>(future: F) -> F::Output {
+        match pin!(future)
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("exclude_paper unexpectedly waited on the network"),
+        }
+    }
+
+    fn library(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("pax-exclude-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("research")).unwrap();
+        fs::write(
+            nix::papers_path(&root),
+            r#"{
+  lamport1978 = {
+    doi = "10.1145/359545.359563";
+    title = "Time, Clocks, and the Ordering of Events in a Distributed System";
+    authors = [ "Leslie Lamport" ];
+    year = 1978;
+    source_url = null;
+    hash = null;
+    tags = [ ];
+    notes = null;
+  };
+}
+"#,
+        )
+        .unwrap();
+        root
+    }
+
+    fn exclude(
+        root: &Path,
+        reference: &str,
+        reason: &str,
+        stage: ExclusionStage,
+        title: Option<&str>,
+    ) -> Result<Exclusion, PaxError> {
+        block_on(exclude_paper(
+            reference,
+            reason,
+            stage,
+            title,
+            root,
+            &Config::default(),
+        ))
+    }
+
+    #[test]
+    fn a_doi_with_a_title_is_excluded_without_the_network_and_re_excluding_updates_it() {
+        let root = library("doi");
+        let first = exclude(
+            &root,
+            "https://doi.org/10.1000/ABC",
+            "not empirical",
+            ExclusionStage::Screening,
+            Some("Some paper"),
+        )
+        .unwrap();
+        assert_eq!(first.key, "10.1000/abc");
+
+        exclude(
+            &root,
+            "10.1000/abc",
+            "wrong domain",
+            ExclusionStage::FullText,
+            Some("Some paper"),
+        )
+        .unwrap();
+        let exclusions = Exclusions::load(&nix::excluded_path(&root)).unwrap();
+        assert_eq!(exclusions.entries().len(), 1);
+        let entry = exclusions.get("10.1000/abc").unwrap();
+        assert_eq!(entry.reason, "wrong domain");
+        assert_eq!(entry.stage, ExclusionStage::FullText);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_declared_paper_cannot_be_excluded() {
+        let root = library("declared");
+        let result = exclude(
+            &root,
+            "10.1145/359545.359563",
+            "duplicate",
+            ExclusionStage::Screening,
+            Some("Time, Clocks"),
+        );
+        assert!(matches!(
+            result,
+            Err(PaxError::ExcludingDeclaredPaper(_, key)) if key == "lamport1978"
+        ));
+        assert!(!nix::excluded_path(&root).exists());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_empty_reason_is_refused() {
+        let root = library("no-reason");
+        assert!(matches!(
+            exclude(&root, "10.1/x", "  ", ExclusionStage::Screening, Some("T")),
+            Err(PaxError::MissingExclusionReason)
+        ));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn free_text_is_not_a_reference() {
+        let root = library("free-text");
+        assert!(matches!(
+            exclude(
+                &root,
+                "actor model",
+                "R",
+                ExclusionStage::Screening,
+                Some("T")
+            ),
+            Err(PaxError::InvalidExclusionReference(_))
+        ));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn titles_match_regardless_of_case_and_punctuation() {
+        assert_eq!(
+            normalized_title("Time, Clocks — and the  Ordering"),
+            normalized_title("time clocks and the ordering")
+        );
+    }
+}
+
+#[cfg(test)]
 mod local_filter_tests {
     use super::*;
     use std::fs;
@@ -888,6 +1032,177 @@ pub async fn show_reference(
     let id: CandidateId = reference.parse()?;
     let work = resolve_candidate(&id, config).await?;
     Ok(ShowResult::Candidate(work))
+}
+
+/// Excludes a paper: records it in `research/excluded.nix` with `reason` and
+/// `stage`, replacing any earlier exclusion of the same paper.
+///
+/// `reference` is a DOI (bare or `https://doi.org/…`) or a provider
+/// reference (`openalex:W…`). The entry's title comes from the provider —
+/// a DOI is looked up across providers, a reference resolved directly — and
+/// a provider reference whose work has a DOI is keyed by that DOI, so the
+/// exclusion matches the paper from any provider ([`exclusion_key`]).
+/// `title`, when given, overrides the resolved title and is the fallback if
+/// resolution fails; a bare DOI with a `title` needs no network at all.
+///
+/// Refuses a paper already declared in `papers.nix` — matched by DOI, or
+/// for a work without one, by normalized title and year — since a paper
+/// can't be both included and excluded.
+pub async fn exclude_paper(
+    reference: &str,
+    reason: &str,
+    stage: ExclusionStage,
+    title: Option<&str>,
+    root: &Path,
+    config: &Config,
+) -> Result<Exclusion, PaxError> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(PaxError::MissingExclusionReason);
+    }
+    let title = title.map(str::trim).filter(|t| !t.is_empty());
+    let library = Library::load(&nix::papers_path(root))?;
+
+    let reference = reference.trim();
+    let resolved = if doi_exclusion_key(reference).starts_with("10.") {
+        resolve_doi_for_exclusion(reference, title, config).await?
+    } else {
+        let id: CandidateId = reference
+            .parse()
+            .map_err(|_| PaxError::InvalidExclusionReference(reference.to_string()))?;
+        match resolve_candidate(&id, config).await {
+            Ok(work) => ResolvedExclusion {
+                key: exclusion_key(&work),
+                title: title
+                    .map(str::to_string)
+                    .or_else(|| (!work.title.is_empty()).then(|| work.title.clone()))
+                    .ok_or_else(|| {
+                        PaxError::ExclusionTitleUnresolved(
+                            reference.to_string(),
+                            "the provider returned no title".to_string(),
+                        )
+                    })?,
+                doi: work.doi.clone(),
+                year: year_from_publish_date(&work.publish_date),
+            },
+            Err(e) => match title {
+                Some(title) => ResolvedExclusion {
+                    key: id.to_string(),
+                    title: title.to_string(),
+                    doi: None,
+                    year: None,
+                },
+                None => {
+                    return Err(PaxError::ExclusionTitleUnresolved(
+                        reference.to_string(),
+                        e.to_string(),
+                    ));
+                }
+            },
+        }
+    };
+
+    if let Some(paper) = declared_match(&library, &resolved) {
+        return Err(PaxError::ExcludingDeclaredPaper(
+            reference.to_string(),
+            paper.local.citation_key.clone(),
+        ));
+    }
+
+    let path = nix::excluded_path(root);
+    let mut exclusions = Exclusions::load(&path)?;
+    let exclusion = Exclusion::new(resolved.key, resolved.title, reason.to_string(), stage);
+    exclusions.upsert(exclusion.clone());
+    exclusions.save(&path)?;
+    Ok(exclusion)
+}
+
+/// What [`exclude_paper`] learned about the paper it's excluding.
+struct ResolvedExclusion {
+    key: String,
+    title: String,
+    doi: Option<String>,
+    year: Option<i32>,
+}
+
+/// A DOI's exclusion: keyed by the DOI itself; the title from `title` if
+/// given, otherwise from the first provider that resolves the DOI.
+async fn resolve_doi_for_exclusion(
+    doi: &str,
+    title: Option<&str>,
+    config: &Config,
+) -> Result<ResolvedExclusion, PaxError> {
+    let key = doi_exclusion_key(doi);
+    if let Some(title) = title {
+        return Ok(ResolvedExclusion {
+            key: key.clone(),
+            title: title.to_string(),
+            doi: Some(key),
+            year: None,
+        });
+    }
+
+    let mut results = search_by_doi(&key, config).await;
+    let mut errors = Vec::new();
+    for provider in [
+        ProviderId::OpenAlex,
+        ProviderId::Crossref,
+        ProviderId::SemanticScholar,
+    ] {
+        match results.remove(&provider) {
+            Some(Ok(works)) => {
+                if let Some(work) = works.into_iter().find(|w| !w.title.is_empty()) {
+                    return Ok(ResolvedExclusion {
+                        key: key.clone(),
+                        title: work.title,
+                        doi: Some(key),
+                        year: year_from_publish_date(&work.publish_date),
+                    });
+                }
+            }
+            Some(Err(e)) => errors.push(format!("{provider}: {e}")),
+            None => {}
+        }
+    }
+    let detail = if errors.is_empty() {
+        "no provider returned a title".to_string()
+    } else {
+        errors.join("; ")
+    };
+    Err(PaxError::ExclusionTitleUnresolved(doi.to_string(), detail))
+}
+
+/// The declared paper `resolved` refers to, if any: same DOI when both have
+/// one, otherwise same normalized title and the same year where both are
+/// known.
+fn declared_match<'a>(library: &'a Library, resolved: &ResolvedExclusion) -> Option<&'a Paper> {
+    library.papers().iter().find(|paper| {
+        match (resolved.doi.as_deref(), paper.identity.doi.as_deref()) {
+            (Some(excluded), Some(declared)) => {
+                doi_exclusion_key(excluded) == doi_exclusion_key(declared)
+            }
+            _ => {
+                let same_title =
+                    normalized_title(&paper.identity.title) == normalized_title(&resolved.title);
+                let same_year = match (resolved.year, paper.identity.year) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => true,
+                };
+                same_title && same_year
+            }
+        }
+    })
+}
+
+/// Lowercased alphanumeric words, single-spaced — so case, punctuation, and
+/// spacing differences between providers don't hide a match.
+fn normalized_title(title: &str) -> String {
+    title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Removes a declared paper from the local library at `root`. Only the
