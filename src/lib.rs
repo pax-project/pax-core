@@ -257,15 +257,29 @@ pub async fn resolve_candidate(
 }
 
 /// Resolves a candidate and declares it in the local library at `root`
-/// (`research/papers.nix`) — metadata only. `Artifact.source_url`/`hash`
-/// stay unset; fetching bytes and computing a Nix hash is `fetch`'s job,
-/// not `add`'s (lazy materialization, see `docs/mvp.md` at tag `1.0.0`).
+/// (`research/papers.nix`) — metadata only. `Artifact.source_url` is the
+/// resolved record's open PDF link; when it has none but has a DOI, the
+/// other providers are asked for that DOI ([`search_by_doi`]) and one of
+/// their PDF links is used instead: an arXiv-hosted PDF if any provider has
+/// one, otherwise the first PDF link in [`merge::PROVIDER_ORDER`] (see
+/// [`first_pdf_url`]). Errors in that fallback don't fail the
+/// add — they just leave `source_url` unset. `hash` stays unset: fetching
+/// bytes and computing a Nix hash is `fetch`'s job, not `add`'s (lazy
+/// materialization, see `docs/mvp.md` at tag `1.0.0`).
 pub async fn add_candidate(
     id: &CandidateId,
     root: &Path,
     config: &Config,
 ) -> Result<PaperRef, PaxError> {
     let work = resolve_candidate(id, config).await?;
+    let source_url = match (&work.pdf_url, &work.doi) {
+        (Some(pdf_url), _) => Some(pdf_url.clone()),
+        (None, Some(doi)) => first_pdf_url(
+            &search_by_doi(normalize_doi(doi), config).await,
+            id.provider,
+        ),
+        (None, None) => None,
+    };
     let path = nix::papers_path(root);
     let mut library = Library::load(&path)?;
 
@@ -285,7 +299,7 @@ pub async fn add_candidate(
             venue: work.venue.clone(),
         },
         artifact: Artifact {
-            source_url: work.pdf_url.clone(),
+            source_url,
             hash: None,
         },
         local: Local {
@@ -297,6 +311,202 @@ pub async fn add_candidate(
     library.save(&path)?;
 
     Ok(PaperRef(citation_key))
+}
+
+/// The open PDF link `add` falls back to, among `results` from providers
+/// other than `skip` (the one `add` already resolved against). An
+/// arXiv-hosted PDF ([`is_arxiv_pdf`]) is preferred, since other providers'
+/// links are sometimes landing pages rather than PDFs; otherwise the first
+/// PDF link wins. Both passes take providers in [`merge::PROVIDER_ORDER`].
+/// Failed providers are skipped.
+fn first_pdf_url(
+    results: &HashMap<ProviderId, Result<Vec<CandidateWork>, ProviderError>>,
+    skip: ProviderId,
+) -> Option<String> {
+    let pdf_urls = || {
+        merge::PROVIDER_ORDER
+            .iter()
+            .filter(|provider| **provider != skip)
+            .filter_map(|provider| results.get(provider)?.as_ref().ok())
+            .flatten()
+            .filter_map(|work| work.pdf_url.as_deref())
+    };
+    pdf_urls()
+        .find(|url| is_arxiv_pdf(url))
+        .or_else(|| pdf_urls().next())
+        .map(str::to_string)
+}
+
+/// Whether `url` is a PDF served by arXiv: host `arxiv.org` or
+/// `export.arxiv.org`, path under `/pdf/` (not an `/abs/` landing page).
+fn is_arxiv_pdf(url: &str) -> bool {
+    let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "arxiv.org" | "export.arxiv.org"
+    ) && path.starts_with("/pdf/")
+}
+
+#[cfg(test)]
+mod first_pdf_url_tests {
+    use super::*;
+
+    fn work(provider: ProviderId, pdf_url: Option<&str>) -> CandidateWork {
+        CandidateWork {
+            id: CandidateId {
+                provider,
+                native_id: "x".to_string(),
+            },
+            title: "A Study".to_string(),
+            authors: Vec::new(),
+            publish_date: "2020".to_string(),
+            doi: Some("10.1/a".to_string()),
+            pdf_url: pdf_url.map(str::to_string),
+            venue: None,
+            abstract_text: None,
+        }
+    }
+
+    #[test]
+    fn takes_the_first_pdf_in_provider_order() {
+        let mut results = HashMap::new();
+        results.insert(
+            ProviderId::SemanticScholar,
+            Ok(vec![work(
+                ProviderId::SemanticScholar,
+                Some("https://s2/a.pdf"),
+            )]),
+        );
+        results.insert(
+            ProviderId::Crossref,
+            Ok(vec![work(
+                ProviderId::Crossref,
+                Some("https://crossref/a.pdf"),
+            )]),
+        );
+        results.insert(
+            ProviderId::OpenAlex,
+            Ok(vec![work(ProviderId::OpenAlex, None)]),
+        );
+        assert_eq!(
+            first_pdf_url(&results, ProviderId::ArXiv).as_deref(),
+            Some("https://crossref/a.pdf")
+        );
+    }
+
+    #[test]
+    fn skips_the_resolving_provider_and_failed_providers() {
+        let mut results = HashMap::new();
+        results.insert(
+            ProviderId::OpenAlex,
+            Ok(vec![work(
+                ProviderId::OpenAlex,
+                Some("https://openalex/a.pdf"),
+            )]),
+        );
+        results.insert(ProviderId::Crossref, Err(ProviderError::NotFound));
+        results.insert(
+            ProviderId::SemanticScholar,
+            Ok(vec![work(
+                ProviderId::SemanticScholar,
+                Some("https://s2/a.pdf"),
+            )]),
+        );
+        assert_eq!(
+            first_pdf_url(&results, ProviderId::OpenAlex).as_deref(),
+            Some("https://s2/a.pdf")
+        );
+    }
+
+    #[test]
+    fn no_pdf_anywhere_gives_none() {
+        let mut results = HashMap::new();
+        results.insert(ProviderId::OpenAlex, Err(ProviderError::NotFound));
+        results.insert(
+            ProviderId::Crossref,
+            Ok(vec![work(ProviderId::Crossref, None)]),
+        );
+        assert_eq!(first_pdf_url(&results, ProviderId::SemanticScholar), None);
+        assert_eq!(first_pdf_url(&HashMap::new(), ProviderId::OpenAlex), None);
+    }
+
+    #[test]
+    fn prefers_an_arxiv_pdf_from_a_later_provider() {
+        let mut results = HashMap::new();
+        results.insert(
+            ProviderId::OpenAlex,
+            Ok(vec![work(
+                ProviderId::OpenAlex,
+                Some("https://repository.example/handle/123"),
+            )]),
+        );
+        results.insert(
+            ProviderId::SemanticScholar,
+            Ok(vec![work(
+                ProviderId::SemanticScholar,
+                Some("https://arxiv.org/pdf/1512.03385"),
+            )]),
+        );
+        assert_eq!(
+            first_pdf_url(&results, ProviderId::Crossref).as_deref(),
+            Some("https://arxiv.org/pdf/1512.03385")
+        );
+    }
+
+    #[test]
+    fn without_an_arxiv_pdf_provider_order_applies() {
+        let mut results = HashMap::new();
+        results.insert(
+            ProviderId::OpenAlex,
+            Ok(vec![work(
+                ProviderId::OpenAlex,
+                Some("https://openalex/a.pdf"),
+            )]),
+        );
+        results.insert(
+            ProviderId::SemanticScholar,
+            Ok(vec![work(
+                ProviderId::SemanticScholar,
+                Some("https://s2/a.pdf"),
+            )]),
+        );
+        assert_eq!(
+            first_pdf_url(&results, ProviderId::Crossref).as_deref(),
+            Some("https://openalex/a.pdf")
+        );
+    }
+
+    #[test]
+    fn an_arxiv_abstract_page_is_not_an_arxiv_pdf() {
+        let mut results = HashMap::new();
+        results.insert(
+            ProviderId::OpenAlex,
+            Ok(vec![work(
+                ProviderId::OpenAlex,
+                Some("https://openalex/a.pdf"),
+            )]),
+        );
+        results.insert(
+            ProviderId::SemanticScholar,
+            Ok(vec![work(
+                ProviderId::SemanticScholar,
+                Some("https://arxiv.org/abs/1512.03385"),
+            )]),
+        );
+        assert_eq!(
+            first_pdf_url(&results, ProviderId::Crossref).as_deref(),
+            Some("https://openalex/a.pdf")
+        );
+        assert!(!is_arxiv_pdf("https://arxiv.org/abs/1512.03385"));
+        assert!(is_arxiv_pdf("http://export.arxiv.org/pdf/1512.03385v1"));
+        assert!(!is_arxiv_pdf("https://notarxiv.org/pdf/1512.03385"));
+    }
 }
 
 /// Strips a leading `https://doi.org/` from a DOI, if present. Providers
