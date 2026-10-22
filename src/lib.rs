@@ -678,6 +678,9 @@ pub fn normalize_doi(doi: &str) -> &str {
 /// rather than an error when the library can't be loaded (e.g. `search`
 /// before `init`) — search should still work, just with nothing marked as
 /// declared.
+#[deprecated(
+    note = "matches by DOI only; use `LibraryIndex::load(root).contains(work)`, which also matches a paper by its version-less arXiv id"
+)]
 pub fn known_dois(root: &Path) -> HashSet<String> {
     Library::load(&nix::papers_path(root))
         .map(|library| {
@@ -696,6 +699,9 @@ pub fn known_dois(root: &Path) -> HashSet<String> {
 /// [`exclusion_key`]`(work)` is in this set. Like [`known_dois`], returns an
 /// empty set rather than an error when the file is missing or unreadable, so
 /// a search still works with nothing marked.
+#[deprecated(
+    note = "matches one exact key; use `LibraryIndex::load(root).is_excluded(work)`, which matches every version of a paper and the paper from every provider"
+)]
 pub fn excluded_keys(root: &Path) -> HashSet<String> {
     Exclusions::load(&nix::excluded_path(root))
         .map(|exclusions| exclusions.entries().iter().map(|e| e.key.clone()).collect())
@@ -703,6 +709,7 @@ pub fn excluded_keys(root: &Path) -> HashSet<String> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod known_dois_tests {
     use super::*;
     use std::fs;
@@ -838,6 +845,7 @@ pub fn filter_papers(papers: &[Paper], filter: &ListFilter) -> Vec<Paper> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod excluded_keys_tests {
     use super::*;
     use std::fs;
