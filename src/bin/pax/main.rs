@@ -278,6 +278,39 @@ fn show_citations(
     exit::provider_results(results.values())
 }
 
+/// [`show_citations`] for a logged lookup, then [`report_log`].
+fn show_logged_citations(
+    sink: &mut impl Sink,
+    logged: Result<pax_core::Logged<pax_core::CitationResults>, pax_core::PaxError>,
+) -> Code {
+    match logged {
+        Ok(pax_core::Logged { results, log, .. }) => {
+            let code = show_citations(sink, Ok(results));
+            report_log(sink, log, code)
+        }
+        Err(e) => show_citations(sink, Err(e)),
+    }
+}
+
+/// Notes on stderr when a search wasn't logged, and fails a search whose
+/// log couldn't be written (see [`exit::log_failed`]).
+fn report_log(sink: &mut impl Sink, log: pax_core::LogOutcome, code: Code) -> Code {
+    match log {
+        pax_core::LogOutcome::NoLibrary => {
+            sink.warning("not in a pax library, so this search isn't recorded in a search log");
+            code
+        }
+        pax_core::LogOutcome::Failed(e) => {
+            sink.warning(&format!(
+                "couldn't write {}: {e}",
+                pax_core::search_log::search_log_path(Path::new(".")).display()
+            ));
+            exit::log_failed(code)
+        }
+        _ => code,
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     dotenvy::dotenv().ok();
@@ -403,11 +436,12 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             }
 
             let options = paging.options();
-            let results = if let Some(author) = &author {
-                pax_core::search_by_author_paged(author, &options, config).await
+            let root = Path::new(".");
+            let pax_core::Logged { results, log, .. } = if let Some(author) = &author {
+                pax_core::search_by_author_logged(author, &options, root, config).await
             } else {
-                pax_core::search_all_paged(query.as_deref().unwrap_or_default(), &options, config)
-                    .await
+                let query = query.as_deref().unwrap_or_default();
+                pax_core::search_all_logged(query, &options, root, config).await
             };
             for provider in ALL_PROVIDERS {
                 match results.get(&provider) {
@@ -423,17 +457,19 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                     .any(|page| page.is_language_unknown(work))
             };
             sink.merged(&pax_core::merge_pages(&results), &index, &language_unknown);
-            exit::provider_results(results.values())
+            report_log(sink, log, exit::provider_results(results.values()))
         }
         Command::Refs { reference, paging } => {
             let options = paging.options();
-            let results = pax_core::references(&reference, &options, Path::new("."), config).await;
-            show_citations(sink, results)
+            let results =
+                pax_core::references_logged(&reference, &options, Path::new("."), config).await;
+            show_logged_citations(sink, results)
         }
         Command::CitedBy { reference, paging } => {
             let options = paging.options();
-            let results = pax_core::cited_by(&reference, &options, Path::new("."), config).await;
-            show_citations(sink, results)
+            let results =
+                pax_core::cited_by_logged(&reference, &options, Path::new("."), config).await;
+            show_logged_citations(sink, results)
         }
         Command::Show { reference } => {
             match pax_core::show_reference(&reference, Path::new("."), config).await {
