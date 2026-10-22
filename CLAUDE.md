@@ -9,9 +9,9 @@ PAX is a Rust project for discovering, declaring, managing, and reproducibly acq
 - PAX handles: academic search, metadata resolution, source resolution, paper declarations, local organization, bibliography export.
 - Nix handles: fetching, hashing, verification, caching, storage, garbage collection.
 
-Intended workflow: `Search → Select → Declare → Fetch → Manage → Reproduce` (see [the org's `mvp.md`](https://github.com/pax-project/.github/blob/main/docs/pax-core/mvp.md) for the full command surface and design philosophy, and [`status.md`](https://github.com/pax-project/.github/blob/main/docs/pax-core/status.md) for which parts of it are actually implemented — the full mvp.md §4 command surface is now built; what's left there is independent gaps like the DBLP provider, not more commands).
+Intended workflow: `Search → Select → Declare → Fetch → Manage → Reproduce` (see [`mvp.md` at tag `1.0.0`](https://github.com/pax-project/pax-core/blob/1.0.0/docs/mvp.md) for the original command surface and design philosophy — its full §4 command surface is built; ongoing work is tracked in this repo's Issues, see "Known gaps" below).
 
-**This repository's primary artifact is `pax-core`, a library — not a CLI tool that happens to have a core module.** The `pax` binary (`src/bin/pax/main.rs`) is a thin, optional client of that library, gated behind the `cli` Cargo feature; [`lazypax`](https://github.com/pax-project/lazy-pax) is a separate repo that's just another client of the same library — README.md itself doesn't mention it, since lazy-pax depends on pax-core and not the other way around. The [org's `mvp.md`](https://github.com/pax-project/.github/blob/main/docs/pax-core/mvp.md) is the original, pre-implementation spec for the full command surface — don't assume a command or flag exists just because it's documented there. **[`status.md`](https://github.com/pax-project/.github/blob/main/docs/pax-core/status.md) tracks exactly which parts of that spec are implemented today vs. still missing** — check it before assuming something is done or not done; keep it updated when you close or reopen an item. Neither file lives in this repo — see "Known gaps" below for why.
+**This repository's primary artifact is `pax-core`, a library — not a CLI tool that happens to have a core module.** The `pax` binary (`src/bin/pax/main.rs`) is a thin, optional client of that library, gated behind the `cli` Cargo feature; [`lazypax`](https://github.com/pax-project/lazy-pax) is a separate repo that's just another client of the same library — README.md itself doesn't mention it, since lazy-pax depends on pax-core and not the other way around. [`mvp.md`](https://github.com/pax-project/pax-core/blob/1.0.0/docs/mvp.md) is the original, pre-implementation spec for the full command surface — don't assume a command or flag exists just because it's documented there. **Planned and in-progress work is tracked in this repo's [Issues](https://github.com/pax-project/pax-core/issues) and the org's [pax Project](https://github.com/orgs/pax-project/projects/2)** — check them before assuming something is done or not done. `mvp.md` and the 1.0.0-era `status.md` survive only at tag `1.0.0` — see "Known gaps" below.
 
 ## Environment
 
@@ -54,7 +54,7 @@ src/
 
 **Reference types — the load-bearing design decision in this codebase:** `add`/`show` and `search` operate on fundamentally different address spaces, so they use different types:
 - **`CandidateId`** (`provider/mod.rs`) — a fully-qualified `provider:native_id` reference (e.g. `openalex:W2741809807`, `arxiv:2301.01234`) to a single, unresolved search hit. Its `FromStr` impl is deliberately strict: it rejects a bare DOI, a title, or free text (see `provider::tests` for the exact rejected/accepted cases). This makes "search returned two results, which one did you mean?" structurally impossible at the `add`/`show` argument boundary — disambiguation is `search`'s job (it already returns a list); `add`/`show` only ever accept a reference that is already unambiguous.
-- **`PaperRef`** (`paper.rs`) — a citation key (e.g. `turing1936`) addressing the closed set of papers already declared in the local library. Used by `remove`/`edit`/`fetch`/`open` (`sync` operates on the whole library rather than a single `PaperRef`, but reuses `fetch_paper` per key internally — see the org's `status.md`).
+- **`PaperRef`** (`paper.rs`) — a citation key (e.g. `turing1936`) addressing the closed set of papers already declared in the local library. Used by `remove`/`edit`/`fetch`/`open` (`sync` operates on the whole library rather than a single `PaperRef`, but reuses `fetch_paper` per key internally — see #7).
 
 **`Provider` trait** (`provider/mod.rs`) — `fn id()`, `async fn search(query)`, `async fn get(native_id)`. One implementation per provider module (`openalex.rs`, `crossref.rs`, `semantic_scholar.rs`, `arxiv.rs`), each also providing `From<ProviderNativeType> for CandidateWork`. `get()` is implemented for all four today (`OpenAlexClient::get_work`, `Crossref::work`, `SemanticScholar::get_paper`, `Arxiv::entry`).
 
@@ -64,14 +64,14 @@ src/
 
 **`pax init`** (`nix.rs::init_library`) materializes `research/flake.nix` + an empty `research/papers.nix` from embedded templates (`include_str!` from `templates/flake.nix.template` / `templates/papers.nix.template`). The `research/` directory is gitignored; the top-level `research/flake.nix` / `research/papers.nix` checked into *this* repo are a working example of that generated structure, not the templates themselves.
 
-**A real user's research library is expected to be its own git repo** (mvp.md §6: `git clone <research-library>; cd <research-library>; nix build`), and Nix flakes only evaluate files that are tracked by git — an untracked `flake.nix` fails outright with "not tracked by Git" (confirmed: this is stock Nix behavior, not a PAX bug). So in a library that's already a git repo, `research/flake.nix`/`research/papers.nix` need at least `git add` (staged, not necessarily committed) before `pax open`/any other command that calls `nix build` will work — see `status.md`'s reproducibility-proof section for how this was found.
+**A real user's research library is expected to be its own git repo** (`mvp.md` §6: `git clone <research-library>; cd <research-library>; nix build`), and Nix flakes only evaluate files that are tracked by git — an untracked `flake.nix` fails outright with "not tracked by Git" (confirmed: this is stock Nix behavior, not a PAX bug). So in a library that's already a git repo, `research/flake.nix`/`research/papers.nix` need at least `git add` (staged, not necessarily committed) before `pax open`/any other command that calls `nix build` will work — see #7's reproducibility-proof section for how this was found.
 
 ## Known gaps
 
-[`status.md`](https://github.com/pax-project/.github/blob/main/docs/pax-core/status.md)
-in the `pax-project` org's `.github` repo is the single, kept-current source
-of truth for what's implemented vs. missing against
-[`mvp.md`](https://github.com/pax-project/.github/blob/main/docs/pax-core/mvp.md)'s
-target command surface — check it rather than this file, so gap status
-never has to be kept in sync in two places. Both live in the org repo, not
-here, so this repo's own docs never drift into describing a moving target.
+This repo's [Issues](https://github.com/pax-project/pax-core/issues) (grouped
+by milestone) and the org-wide [pax Project](https://github.com/orgs/pax-project/projects/2)
+are the single, kept-current source of truth for what's planned, in progress,
+or done — check them rather than this file, so gap status never has to be
+kept in sync in two places, and this repo's own docs never drift into
+describing a moving target. The MVP-era checklist and the design gotchas
+found while building it live in #7.
