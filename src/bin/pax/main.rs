@@ -302,7 +302,7 @@ async fn main() {
             };
             for provider in ALL_PROVIDERS {
                 match results.get(&provider) {
-                    Some(Ok(page)) => sink.page(provider, page, &known_dois),
+                    Some(Ok(page)) => sink.page_header(provider, page),
                     Some(Err(e)) => {
                         sink.provider_header(provider);
                         sink.error(&e.to_string());
@@ -310,6 +310,17 @@ async fn main() {
                     None => {}
                 }
             }
+            let language_unknown = |work: &pax_core::CandidateWork| {
+                results
+                    .values()
+                    .flatten()
+                    .any(|page| page.is_language_unknown(work))
+            };
+            sink.merged(
+                &pax_core::merge_pages(&results),
+                &known_dois,
+                &language_unknown,
+            );
         }
         Command::Refs { reference, paging } => {
             let options = paging.options();

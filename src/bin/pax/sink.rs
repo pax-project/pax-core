@@ -6,8 +6,8 @@
 use std::collections::HashSet;
 
 use pax_core::{
-    CandidateWork, CheckReport, CheckStatus, FetchOutcome, FilterApplication, Paper, ProviderId,
-    SearchPage, normalize_doi,
+    CandidateWork, CheckReport, CheckStatus, FetchOutcome, FilterApplication, MergeReport, Paper,
+    ProviderId, SearchPage, normalize_doi,
 };
 
 pub trait Sink {
@@ -19,6 +19,15 @@ pub trait Sink {
     /// A paged result list: its header, then its works, each marked with
     /// what the page knows about it.
     fn page(&mut self, provider: ProviderId, page: &SearchPage, known_dois: &HashSet<String>);
+    /// Search results merged across providers. `language_unknown` says
+    /// whether a record's language couldn't be checked by the filter; a
+    /// merged row is marked only if that holds for every record in it.
+    fn merged(
+        &mut self,
+        report: &MergeReport,
+        known_dois: &HashSet<String>,
+        language_unknown: &dyn Fn(&CandidateWork) -> bool,
+    );
     fn candidate(&mut self, candidate: &CandidateWork);
     fn papers(&mut self, papers: &[Paper]);
     fn paper(&mut self, paper: &Paper);
@@ -83,14 +92,47 @@ impl Sink for TextSink {
     }
 
     fn candidates(&mut self, candidates: &[CandidateWork], known_dois: &HashSet<String>) {
-        print_candidates(candidates, known_dois, |_| false);
+        for work in candidates {
+            print_work(
+                work,
+                &work.id.to_string(),
+                in_library(work, known_dois),
+                false,
+            );
+        }
     }
 
     fn page(&mut self, provider: ProviderId, page: &SearchPage, known_dois: &HashSet<String>) {
         self.page_header(provider, page);
-        print_candidates(&page.works, known_dois, |work| {
-            page.is_language_unknown(work)
-        });
+        for work in &page.works {
+            print_work(
+                work,
+                &work.id.to_string(),
+                in_library(work, known_dois),
+                page.is_language_unknown(work),
+            );
+        }
+    }
+
+    fn merged(
+        &mut self,
+        report: &MergeReport,
+        known_dois: &HashSet<String>,
+        language_unknown: &dyn Fn(&CandidateWork) -> bool,
+    ) {
+        println!(
+            "merged: {} → {} ({} duplicates, {} unmatched)",
+            report.before,
+            report.after,
+            report.duplicates(),
+            report.unmatched
+        );
+        for merged in &report.works {
+            let ids: Vec<String> = merged.ids().iter().map(|id| id.to_string()).collect();
+            let in_library = merged.records().any(|work| in_library(work, known_dois));
+            let unknown = merged.records().all(language_unknown);
+            print_work(&merged.work, &ids.join(" · "), in_library, unknown);
+        }
     }
 
     fn candidate(&mut self, candidate: &CandidateWork) {
@@ -216,37 +258,35 @@ impl Sink for TextSink {
     }
 }
 
-/// One row per work: its title (with any marks), then its details.
-fn print_candidates(
-    works: &[CandidateWork],
-    known_dois: &HashSet<String>,
-    language_unknown: impl Fn(&CandidateWork) -> bool,
-) {
-    for work in works {
-        let in_library = work
-            .doi
-            .as_deref()
-            .is_some_and(|doi| known_dois.contains(normalize_doi(doi)));
-        println!(
-            "\t{}{}{}",
-            work.title,
-            if in_library { " [in library]" } else { "" },
-            if language_unknown(work) {
-                " [language unknown]"
-            } else {
-                ""
-            }
-        );
-        println!("\t\t{}", work.id);
-        if !work.authors.is_empty() {
-            println!("\t\t{}", work.authors.join(", "));
+/// Whether a paper with `work`'s DOI is already declared in the library.
+fn in_library(work: &CandidateWork, known_dois: &HashSet<String>) -> bool {
+    work.doi
+        .as_deref()
+        .is_some_and(|doi| known_dois.contains(normalize_doi(doi)))
+}
+
+/// One result row: the title with any marks, then its details. `ids` is the
+/// record's reference, or every merged record's reference for a merged row.
+fn print_work(work: &CandidateWork, ids: &str, in_library: bool, language_unknown: bool) {
+    println!(
+        "\t{}{}{}",
+        work.title,
+        if in_library { " [in library]" } else { "" },
+        if language_unknown {
+            " [language unknown]"
+        } else {
+            ""
         }
-        println!("\t\t{}", work.publish_date);
-        println!("\t\t{}", work.doi.as_deref().unwrap_or("(no doi)"));
-        println!("\t\t{}", work.venue.as_deref().unwrap_or("(no venue)"));
-        println!(
-            "\t\tPDF: {}",
-            if work.pdf_url.is_some() { "✓" } else { "✗" }
-        );
+    );
+    println!("\t\t{ids}");
+    if !work.authors.is_empty() {
+        println!("\t\t{}", work.authors.join(", "));
     }
+    println!("\t\t{}", work.publish_date);
+    println!("\t\t{}", work.doi.as_deref().unwrap_or("(no doi)"));
+    println!("\t\t{}", work.venue.as_deref().unwrap_or("(no venue)"));
+    println!(
+        "\t\tPDF: {}",
+        if work.pdf_url.is_some() { "✓" } else { "✗" }
+    );
 }

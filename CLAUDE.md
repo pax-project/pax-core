@@ -42,6 +42,8 @@ src/
     filter.rs     # Filters (year/type/language) and AppliedFilter: how each provider applied each one
   paper.rs        # Paper, Identity, Artifact, Local, PaperRef (citation key)
   library.rs      # Library::load()/save() against research/papers.nix
+  identity.rs     # IdentityKey (DOI → arXiv id → title+year) + group(): which records are the same paper
+  merge.rs        # merge_works/merge_pages: duplicates collapsed into MergedWork, with before/after/unmatched counts
   nix.rs          # init_library(): scaffolds research/flake.nix + research/papers.nix from templates/
   citation_key.rs # generates a citation key for a newly declared paper (surname+year, disambiguated)
   bibtex.rs       # renders declared papers as BibTeX (bibtex::render)
