@@ -18,6 +18,7 @@ mod nix_attrs;
 pub mod paper;
 mod process;
 pub mod provider;
+pub mod search_log;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -43,6 +44,10 @@ pub use provider::{
     FilterApplication, FilterKind, Filters, Limit, OpenAlexProvider, Provider, ProviderError,
     ProviderId, SearchOptions, SearchPage, SemanticScholarProvider, UnknownDocType, YearRange,
     YearRangeParseError,
+};
+pub use search_log::{
+    LogOutcome, Logged, SearchCommand, SearchLog, SearchLogEntry, cited_by_logged, log_results,
+    references_logged, search_all_logged, search_by_author_logged,
 };
 
 /// Per-installation settings a caller (e.g. the CLI, reading `.env`) supplies
