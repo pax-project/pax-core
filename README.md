@@ -73,6 +73,8 @@ pax open <paper>
 pax export bibtex
 ```
 
+`pax search` queries OpenAlex, Crossref, Semantic Scholar, and arXiv, reports how much of each provider's result set it retrieved (`retrieved 50 of 1284`; `--limit N` or `--all` for more), and merges records that are the same paper into one row listing every provider's reference (`merged: 112 → 97 (15 duplicates, 2 unmatched)`). Records count as the same paper when they share a DOI or arXiv id, or an exact title and year without conflicting DOIs.
+
 ### Search filters
 
 `pax search` (a query or `--author`) can narrow results by publication year, document type, and language:
