@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use clap::{Parser, Subcommand};
-use pax_core::{CandidateId, ProviderId};
+use pax_core::{CandidateId, Limit, ProviderId, SearchOptions};
 
 mod sink;
 use sink::{Sink, TextSink};
@@ -23,6 +23,12 @@ enum Command {
         /// Search only the local library, without querying any provider
         #[arg(long)]
         local: Option<String>,
+        /// Retrieve at most this many results per provider (default 50)
+        #[arg(long, conflicts_with = "all")]
+        limit: Option<usize>,
+        /// Retrieve every result each provider serves (can be slow)
+        #[arg(long)]
+        all: bool,
     },
     ///Inspect a search result before adding it
     Show {
@@ -147,6 +153,8 @@ async fn main() {
             author,
             doi,
             local,
+            limit,
+            all,
         } => {
             let modes = [
                 query.is_some(),
@@ -158,6 +166,10 @@ async fn main() {
                 sink.error("specify exactly one of QUERY, --author, --doi, or --local");
                 return;
             }
+            if (limit.is_some() || all) && (doi.is_some() || local.is_some()) {
+                sink.error("--limit and --all only apply to QUERY and --author searches");
+                return;
+            }
 
             if let Some(query) = &local {
                 sink.papers(&pax_core::search_local(query, Path::new(".")));
@@ -165,41 +177,52 @@ async fn main() {
             }
 
             let known_dois = pax_core::known_dois(Path::new("."));
-            let (results, providers): (_, &[ProviderId]) = if let Some(author) = &author {
-                (
-                    pax_core::search_by_author(author, &config).await,
-                    &[
-                        ProviderId::OpenAlex,
-                        ProviderId::Crossref,
-                        ProviderId::SemanticScholar,
-                        ProviderId::ArXiv,
-                    ],
-                )
-            } else if let Some(doi) = &doi {
-                (
-                    pax_core::search_by_doi(doi, &config).await,
-                    &[
-                        ProviderId::OpenAlex,
-                        ProviderId::Crossref,
-                        ProviderId::SemanticScholar,
-                    ],
-                )
+            const ALL_PROVIDERS: [ProviderId; 4] = [
+                ProviderId::OpenAlex,
+                ProviderId::Crossref,
+                ProviderId::SemanticScholar,
+                ProviderId::ArXiv,
+            ];
+
+            if let Some(doi) = &doi {
+                let results = pax_core::search_by_doi(doi, &config).await;
+                // arXiv has no DOI lookup.
+                for provider in [
+                    ProviderId::OpenAlex,
+                    ProviderId::Crossref,
+                    ProviderId::SemanticScholar,
+                ] {
+                    sink.provider_header(provider);
+                    match results.get(&provider) {
+                        Some(Ok(works)) => sink.candidates(works, &known_dois),
+                        Some(Err(e)) => sink.error(&e.to_string()),
+                        None => {}
+                    }
+                }
+                return;
+            }
+
+            let options = SearchOptions::default().with_limit(match (all, limit) {
+                (true, _) => Limit::All,
+                (false, Some(n)) => Limit::Count(n),
+                (false, None) => SearchOptions::default().limit,
+            });
+            let results = if let Some(author) = &author {
+                pax_core::search_by_author_paged(author, &options, &config).await
             } else {
-                (
-                    pax_core::search_all(query.as_deref().unwrap_or_default(), &config).await,
-                    &[
-                        ProviderId::OpenAlex,
-                        ProviderId::Crossref,
-                        ProviderId::SemanticScholar,
-                        ProviderId::ArXiv,
-                    ],
-                )
+                pax_core::search_all_paged(query.as_deref().unwrap_or_default(), &options, &config)
+                    .await
             };
-            for provider in providers {
-                sink.provider_header(*provider);
-                match results.get(provider) {
-                    Some(Ok(works)) => sink.candidates(works, &known_dois),
-                    Some(Err(e)) => sink.error(&e.to_string()),
+            for provider in ALL_PROVIDERS {
+                match results.get(&provider) {
+                    Some(Ok(page)) => {
+                        sink.page_header(provider, page);
+                        sink.candidates(&page.works, &known_dois);
+                    }
+                    Some(Err(e)) => {
+                        sink.provider_header(provider);
+                        sink.error(&e.to_string());
+                    }
                     None => {}
                 }
             }

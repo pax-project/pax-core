@@ -1,7 +1,17 @@
 use ::crossref::query::ResultControl;
 use ::crossref::{Crossref, WorkResultControl, WorksQuery};
 
-use super::{CandidateId, CandidateWork, Provider, ProviderError, ProviderId, SEARCH_RESULT_LIMIT};
+use super::{
+    CandidateId, CandidateWork, Provider, ProviderError, ProviderId, SearchOptions, SearchPage,
+    collect_pages,
+};
+
+/// Crossref serves at most 1,000 rows per request.
+const MAX_PAGE_SIZE: usize = 1000;
+
+/// Crossref rejects offsets past 10,000; going deeper needs cursor paging,
+/// which offset-based [`collect_pages`] doesn't drive.
+const MAX_RETRIEVABLE: u64 = 10_000;
 
 pub struct CrossrefProvider {
     client: Crossref,
@@ -22,15 +32,38 @@ impl Provider for CrossrefProvider {
     }
 
     async fn search(&self, query: &str) -> Result<Vec<CandidateWork>, ProviderError> {
-        let query = WorksQuery::new(query).result_control(WorkResultControl::Standard(
-            ResultControl::Rows(SEARCH_RESULT_LIMIT),
-        ));
-        let works = self
-            .client
-            .works(query)
-            .await
-            .map_err(|e| ProviderError::Request(e.to_string()))?;
-        Ok(works.items.into_iter().map(CandidateWork::from).collect())
+        let page = self.search_page(query, &SearchOptions::default()).await?;
+        Ok(page.works)
+    }
+
+    async fn search_page(
+        &self,
+        query: &str,
+        options: &SearchOptions,
+    ) -> Result<SearchPage, ProviderError> {
+        collect_pages(
+            options,
+            MAX_PAGE_SIZE,
+            Some(MAX_RETRIEVABLE),
+            |offset, rows| {
+                let query = WorksQuery::new(query).result_control(WorkResultControl::Standard(
+                    ResultControl::RowsOffset { rows, offset },
+                ));
+                async move {
+                    let works = self
+                        .client
+                        .works(query)
+                        .await
+                        .map_err(|e| ProviderError::Request(e.to_string()))?;
+                    let total = works.total_results as u64;
+                    Ok((
+                        works.items.into_iter().map(CandidateWork::from).collect(),
+                        total,
+                    ))
+                }
+            },
+        )
+        .await
     }
 
     async fn get(&self, native_id: &str) -> Result<CandidateWork, ProviderError> {

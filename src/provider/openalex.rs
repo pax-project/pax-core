@@ -1,6 +1,16 @@
 use papers_openalex::{GetParams, ListParams, OpenAlexClient};
 
-use super::{CandidateId, CandidateWork, Provider, ProviderError, ProviderId, SEARCH_RESULT_LIMIT};
+use super::{
+    CandidateId, CandidateWork, Provider, ProviderError, ProviderId, SearchOptions, SearchPage,
+    collect_pages,
+};
+
+/// OpenAlex serves at most 200 works per page.
+const MAX_PAGE_SIZE: usize = 200;
+
+/// Page-number paging stops at 10,000 results; going deeper needs cursor
+/// paging, which offset-based [`collect_pages`] doesn't drive.
+const MAX_RETRIEVABLE: u64 = 10_000;
 
 pub struct OpenAlexProvider {
     client: OpenAlexClient,
@@ -11,6 +21,40 @@ impl OpenAlexProvider {
         OpenAlexProvider {
             client: OpenAlexClient::new(),
         }
+    }
+
+    /// Pages through `list_works` for `params` (a search or filter with no
+    /// paging set yet).
+    async fn list_works_page(
+        &self,
+        params: ListParams,
+        options: &SearchOptions,
+    ) -> Result<SearchPage, ProviderError> {
+        collect_pages(
+            options,
+            MAX_PAGE_SIZE,
+            Some(MAX_RETRIEVABLE),
+            |offset, size| {
+                let mut params = params.clone();
+                params.per_page = Some(size as u32);
+                params.page = Some((offset / size + 1) as u32);
+                async move {
+                    let response = self
+                        .client
+                        .list_works(&params)
+                        .await
+                        .map_err(|e| ProviderError::Request(e.to_string()))?;
+                    let total = u64::try_from(response.meta.count).unwrap_or(0);
+                    let works = response
+                        .results
+                        .into_iter()
+                        .map(CandidateWork::from)
+                        .collect();
+                    Ok((works, total))
+                }
+            },
+        )
+        .await
     }
 }
 
@@ -26,20 +70,8 @@ impl Provider for OpenAlexProvider {
     }
 
     async fn search(&self, query: &str) -> Result<Vec<CandidateWork>, ProviderError> {
-        let params = ListParams::builder()
-            .search(query.to_string())
-            .per_page(SEARCH_RESULT_LIMIT as u32)
-            .build();
-        let response = self
-            .client
-            .list_works(&params)
-            .await
-            .map_err(|e| ProviderError::Request(e.to_string()))?;
-        Ok(response
-            .results
-            .into_iter()
-            .map(CandidateWork::from)
-            .collect())
+        let page = self.search_page(query, &SearchOptions::default()).await?;
+        Ok(page.works)
     }
 
     async fn get(&self, native_id: &str) -> Result<CandidateWork, ProviderError> {
@@ -52,20 +84,30 @@ impl Provider for OpenAlexProvider {
     }
 
     async fn search_by_author(&self, author: &str) -> Result<Vec<CandidateWork>, ProviderError> {
+        let page = self
+            .search_by_author_page(author, &SearchOptions::default())
+            .await?;
+        Ok(page.works)
+    }
+
+    async fn search_page(
+        &self,
+        query: &str,
+        options: &SearchOptions,
+    ) -> Result<SearchPage, ProviderError> {
+        let params = ListParams::builder().search(query.to_string()).build();
+        self.list_works_page(params, options).await
+    }
+
+    async fn search_by_author_page(
+        &self,
+        author: &str,
+        options: &SearchOptions,
+    ) -> Result<SearchPage, ProviderError> {
         let params = ListParams::builder()
             .filter(format!("raw_author_name.search:{author}"))
-            .per_page(SEARCH_RESULT_LIMIT as u32)
             .build();
-        let response = self
-            .client
-            .list_works(&params)
-            .await
-            .map_err(|e| ProviderError::Request(e.to_string()))?;
-        Ok(response
-            .results
-            .into_iter()
-            .map(CandidateWork::from)
-            .collect())
+        self.list_works_page(params, options).await
     }
 
     async fn get_by_doi(&self, doi: &str) -> Result<CandidateWork, ProviderError> {
@@ -87,16 +129,16 @@ impl From<papers_openalex::Work> for CandidateWork {
                 provider: ProviderId::OpenAlex,
                 native_id,
             },
-            title: value.title.expect("OpenAlex Work with no title found"),
+            // Deep result pages include records missing any of these fields;
+            // an empty value keeps the record visible instead of failing the search.
+            title: value.title.unwrap_or_default(),
             authors: value
                 .authorships
                 .unwrap_or_default()
                 .into_iter()
-                .map(|author| author.raw_author_name.expect("OpenAlex Author has no name"))
+                .filter_map(|author| author.raw_author_name)
                 .collect(),
-            publish_date: value
-                .publication_date
-                .expect("OpenAlex Paper has no publication date"),
+            publish_date: value.publication_date.unwrap_or_default(),
             doi: value.doi,
             pdf_url: value
                 .best_oa_location
@@ -109,5 +151,26 @@ impl From<papers_openalex::Work> for CandidateWork {
                 .and_then(|source| source.display_name),
             abstract_text: value.abstract_text,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn work_missing_title_date_and_author_names_still_converts() {
+        let work: papers_openalex::Work = serde_json::from_str(
+            r#"{
+                "id": "https://openalex.org/W1",
+                "authorships": [{"author_position": "first"}]
+            }"#,
+        )
+        .unwrap();
+        let candidate = CandidateWork::from(work);
+        assert_eq!(candidate.id.native_id, "W1");
+        assert_eq!(candidate.title, "");
+        assert_eq!(candidate.publish_date, "");
+        assert!(candidate.authors.is_empty());
     }
 }
