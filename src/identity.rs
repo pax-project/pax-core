@@ -172,6 +172,12 @@ fn normalize_doi_key(doi: &str) -> String {
     stripped.trim().to_string()
 }
 
+/// Whether a DOI, in any of the forms providers return, is an arXiv DOI
+/// (`10.48550/arXiv.*`) — i.e. names a preprint, not a published version.
+pub(crate) fn is_arxiv_doi(doi: &str) -> bool {
+    arxiv_id_from_doi(&normalize_doi_key(doi)).is_some()
+}
+
 /// `10.48550/arxiv.2301.01234` → `2301.01234` (expects a normalized DOI).
 fn arxiv_id_from_doi(doi: &str) -> Option<String> {
     doi.strip_prefix("10.48550/arxiv.")

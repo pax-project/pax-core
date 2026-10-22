@@ -21,8 +21,11 @@ pub const PROVIDER_ORDER: [ProviderId; 4] = [
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MergedWork {
-    /// The representative record: the most complete one in the group (most of
-    /// DOI, PDF link, abstract, venue, authors, date present), ties going to
+    /// The representative record: a published one if the group has any (a
+    /// record with a venue, or with a DOI that isn't an arXiv
+    /// `10.48550/arXiv.*` DOI), since that's the version `add` declares and
+    /// users cite. Within the same class the most complete record wins (most
+    /// of DOI, PDF link, abstract, venue, authors, date, title present), then
     /// the earlier record — with [`merge_pages`], the earlier provider in
     /// [`PROVIDER_ORDER`]. Kept exactly as its provider returned it, so its
     /// `id` still resolves with `show`/`add`.
@@ -132,7 +135,7 @@ fn merge_group(mut records: Vec<(CandidateWork, Vec<IdentityKey>)>) -> MergedWor
         .iter()
         .enumerate()
         .rev()
-        .max_by_key(|(_, (work, _))| completeness(work))
+        .max_by_key(|(_, (work, _))| (is_published(work), completeness(work)))
         .map(|(index, _)| index)
         .unwrap_or(0);
     let (work, _) = records.remove(representative);
@@ -149,6 +152,15 @@ fn key_strength(key: &IdentityKey) -> u8 {
         IdentityKey::Arxiv(_) => 1,
         _ => 2,
     }
+}
+
+/// A published version: has a venue, or a DOI that isn't an arXiv DOI.
+fn is_published(work: &CandidateWork) -> bool {
+    work.venue.is_some()
+        || work
+            .doi
+            .as_deref()
+            .is_some_and(|doi| !identity::is_arxiv_doi(doi))
 }
 
 fn completeness(work: &CandidateWork) -> usize {
@@ -235,6 +247,46 @@ mod tests {
             report.works[0].duplicates[0].id.provider,
             ProviderId::OpenAlex
         );
+    }
+
+    #[test]
+    fn published_record_beats_a_more_complete_preprint() {
+        let mut preprint = work(
+            ProviderId::ArXiv,
+            "2001.00001",
+            "A Study",
+            Some("10.48550/arXiv.2001.00001"),
+        );
+        preprint.pdf_url = Some("https://arxiv.org/pdf/2001.00001".into());
+        preprint.abstract_text = Some("…".into());
+        let published = work(ProviderId::Crossref, "10.1/a", "A Study", Some("10.1/a"));
+        let report = merge_works([preprint, published]);
+        assert_eq!(report.after, 1);
+        assert_eq!(report.works[0].work.id.provider, ProviderId::Crossref);
+    }
+
+    #[test]
+    fn more_complete_published_record_wins_among_published() {
+        let sparse = work(ProviderId::OpenAlex, "W1", "A Study", Some("10.1/a"));
+        let mut rich = work(ProviderId::Crossref, "10.1/a", "A Study", Some("10.1/a"));
+        rich.pdf_url = Some("https://example.org/a.pdf".into());
+        let report = merge_works([sparse, rich]);
+        assert_eq!(report.works[0].work.id.provider, ProviderId::Crossref);
+    }
+
+    #[test]
+    fn more_complete_record_wins_when_none_is_published() {
+        let sparse = work(ProviderId::OpenAlex, "W1", "A Study", None);
+        let mut rich = work(
+            ProviderId::ArXiv,
+            "2001.00001",
+            "A Study",
+            Some("10.48550/arXiv.2001.00001"),
+        );
+        rich.pdf_url = Some("https://arxiv.org/pdf/2001.00001".into());
+        let report = merge_works([sparse, rich]);
+        assert_eq!(report.after, 1);
+        assert_eq!(report.works[0].work.id.provider, ProviderId::ArXiv);
     }
 
     #[test]
