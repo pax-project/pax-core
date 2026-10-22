@@ -185,7 +185,8 @@ impl RawPage {
 /// total or `max_retrievable` raw records are consumed, or a page comes back
 /// short.
 ///
-/// Every request uses the same page size, so offsets stay multiples of it —
+/// Every request uses the same page size — bar a last one shrunk to end at
+/// `max_retrievable` — so offsets stay multiples of it,
 /// which providers that page by page number (OpenAlex) rely on. With
 /// `post_filtered` set, that size is always `max_page_size`: a post-retrieval
 /// filter may keep few records per page, and small pages would then take
@@ -216,13 +217,23 @@ where
     let mut works = Vec::new();
     let mut consumed = 0;
     let total = loop {
-        let page = fetch_page(consumed, page_size).await?;
+        // The last request shrinks to fit under the ceiling, for providers
+        // that reject a request reaching past it rather than serving a
+        // short page (Semantic Scholar's citation lists).
+        let size = max_retrievable.map_or(page_size, |max| {
+            page_size.min(
+                usize::try_from(max)
+                    .unwrap_or(usize::MAX)
+                    .saturating_sub(consumed),
+            )
+        });
+        let page = fetch_page(consumed, size).await?;
         consumed += page.fetched;
         works.extend(page.works);
 
         let raw_ceiling = max_retrievable.map_or(page.total, |max| max.min(page.total));
         let have_enough = wanted.is_some_and(|n| works.len() >= n);
-        if page.fetched < page_size || have_enough || consumed as u64 >= raw_ceiling {
+        if page.fetched < size || have_enough || consumed as u64 >= raw_ceiling {
             break page.total;
         }
     };
@@ -495,6 +506,15 @@ mod tests {
         assert_eq!(page.max_retrievable, Some(300));
         assert!(!page.is_complete());
         assert_eq!(requests.len(), 3);
+    }
+
+    #[test]
+    fn collect_pages_shrinks_the_last_request_to_end_at_the_ceiling() {
+        // Semantic Scholar's citation lists reject offset + limit >= 10,000.
+        let options = SearchOptions::default().with_limit(Limit::All);
+        let (page, requests) = page_through(options, 1000, Some(2999), 5000, 5000);
+        assert_eq!(requests, vec![(0, 1000), (1000, 1000), (2000, 999)]);
+        assert_eq!(page.retrieved(), 2999);
     }
 
     #[test]

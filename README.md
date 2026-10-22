@@ -95,6 +95,20 @@ Each provider applies a filter in its own query where its API supports it, so it
 
 Crossref records often carry no language (proceedings papers never do), so its language filter can't check them. Rather than silently dropping every conference paper, pax keeps them, marks each such row `[language unknown]`, and says under Crossref's count how many it kept that way.
 
+### Citation graph
+
+`pax refs` lists the papers a paper cites; `pax cited-by` lists the papers citing it. Both read real citation edges from OpenAlex and Semantic Scholar (Crossref's publisher-deposited reference lists are often incomplete, and it has no forward citations):
+
+```Bash
+pax refs openalex:W3137220996
+pax cited-by arxiv:1706.03762 --limit 200
+pax cited-by vaswani2017 --year 2023- --type journal-article
+```
+
+The paper can be any `provider:id` reference from `search`, or the citation key of a paper in your library. pax looks it up in each provider by that provider's own id when it has one, otherwise by DOI, otherwise by arXiv id (for a library paper without a DOI, read from an arxiv.org source URL); a provider it can't be found in says so, and the other still answers.
+
+Each provider's list is shown separately, with the same `retrieved N of M` counts as `search`, and papers already in your library are marked `[in library]`. They take the same `--limit`, `--all`, `--year`, `--type` and `--lang` flags. OpenAlex applies the filters server-side; Semantic Scholar's citation lists take no filters, so year and type are applied there after retrieval, and language not at all. Semantic Scholar serves at most 9,999 entries of a list, and skips references it couldn't match to a paper.
+
 The project is designed to be:
 - local-first
 - reproducible

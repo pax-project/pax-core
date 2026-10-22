@@ -49,7 +49,11 @@ impl Sink for TextSink {
             return;
         };
         let scanned = page.scanned;
-        let note = if page.is_complete() {
+        let skipped = scanned.saturating_sub(retrieved as u64);
+        let note = if page.is_complete() && skipped > 0 && !page.has_post_retrieval_filter() {
+            // e.g. references Semantic Scholar couldn't match to a paper.
+            format!(" ({skipped} entries without a {provider} record skipped)")
+        } else if page.is_complete() {
             String::new()
         } else if let Some(max) = page.max_retrievable.filter(|&max| scanned >= max) {
             format!(" ({provider} serves at most {max} per query)")
