@@ -111,7 +111,7 @@ pax cited-by vaswani2017 --year 2023- --type journal-article
 
 The paper can be any `provider:id` reference from `search`, or the citation key of a paper in your library. pax looks it up in each provider by that provider's own id when it has one, otherwise by DOI, otherwise by arXiv id (for a library paper without a DOI, read from an arxiv.org source URL); a provider it can't be found in says so, and the other still answers.
 
-Each provider's list is shown separately, with the same `retrieved N of M` counts as `search`, and papers already in your library are marked `[in library]`. They take the same `--limit`, `--all`, `--year`, `--type` and `--lang` flags. OpenAlex applies the filters server-side; Semantic Scholar's citation lists take no filters, so year and type are applied there after retrieval, and language not at all. Semantic Scholar serves at most 9,999 entries of a list, and skips references it couldn't match to a paper.
+Like `search`, each provider reports its `retrieved N of M` count, then the two lists are merged into one, with the same `merged: X → Y (Z duplicates, U unmatched)` line and one row per paper listing every provider's reference. Papers already in your library are marked `[in library]`. They take the same `--limit`, `--all`, `--year`, `--type` and `--lang` flags. OpenAlex applies the filters server-side; Semantic Scholar's citation lists take no filters, so year and type are applied there after retrieval, and language not at all. Semantic Scholar serves at most 9,999 entries of a list, and skips references it couldn't match to a paper.
 
 The project is designed to be:
 - local-first

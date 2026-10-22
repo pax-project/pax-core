@@ -27,10 +27,7 @@ pub trait Sink {
     fn provider_header(&mut self, provider: ProviderId);
     fn page_header(&mut self, provider: ProviderId, page: &SearchPage);
     fn candidates(&mut self, candidates: &[CandidateWork], known_dois: &HashSet<String>);
-    /// A paged result list: its header, then its works, each marked with
-    /// what the page knows about it.
-    fn page(&mut self, provider: ProviderId, page: &SearchPage, known_dois: &HashSet<String>);
-    /// Search results merged across providers. `language_unknown` says
+    /// Search or citation results merged across providers.`language_unknown` says
     /// whether a record's language couldn't be checked by the filter; a
     /// merged row is marked only if that holds for every record in it.
     fn merged(
@@ -125,18 +122,6 @@ impl Sink for TextSink {
                 &work.id.to_string(),
                 in_library(work, known_dois),
                 false,
-            );
-        }
-    }
-
-    fn page(&mut self, provider: ProviderId, page: &SearchPage, known_dois: &HashSet<String>) {
-        self.page_header(provider, page);
-        for work in &page.works {
-            print_work(
-                work,
-                &work.id.to_string(),
-                in_library(work, known_dois),
-                page.is_language_unknown(work),
             );
         }
     }

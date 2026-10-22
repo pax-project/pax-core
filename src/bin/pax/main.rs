@@ -247,8 +247,8 @@ fn provider_failed<'a>(
     }
 }
 
-/// Prints each citation provider's list, the way `search` prints each
-/// provider's results.
+/// Prints each citation provider's count, then one list merged across them,
+/// the way `search` does.
 fn show_citations(
     sink: &mut impl Sink,
     results: Result<pax_core::CitationResults, pax_core::PaxError>,
@@ -261,10 +261,23 @@ fn show_citations(
     let listed = results.values().any(Result::is_ok);
     for provider in pax_core::CITATION_PROVIDERS {
         match results.get(&provider) {
-            Some(Ok(page)) => sink.page(provider, page, &known_dois),
+            Some(Ok(page)) => sink.page_header(provider, page),
             Some(Err(e)) => provider_failed(sink, provider, e, listed),
             None => {}
         }
+    }
+    if listed {
+        let language_unknown = |work: &pax_core::CandidateWork| {
+            results
+                .values()
+                .flatten()
+                .any(|page| page.is_language_unknown(work))
+        };
+        sink.merged(
+            &pax_core::merge_pages(&results),
+            &known_dois,
+            &language_unknown,
+        );
     }
     exit::provider_results(results.values())
 }

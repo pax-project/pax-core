@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use crate::identity::{self, IdentityKey};
-use crate::provider::{CandidateId, CandidateWork, ProviderError, ProviderId, SearchPage};
+use crate::provider::{CandidateId, CandidateWork, ProviderId, SearchPage};
 
 /// Provider order used when merging per-provider results: the order results
 /// are reported in, and the tie-break for which record represents a group.
@@ -108,12 +108,11 @@ pub fn merge_works(works: impl IntoIterator<Item = CandidateWork>) -> MergeRepor
 }
 
 /// Merges the successful pages of a paged search (e.g.
-/// [`crate::search_all_paged`]), taking providers in [`PROVIDER_ORDER`].
-/// Failed providers contribute nothing; their errors stay in `results` for
-/// the caller to report.
-pub fn merge_pages(
-    results: &HashMap<ProviderId, Result<SearchPage, ProviderError>>,
-) -> MergeReport {
+/// [`crate::search_all_paged`]) or of a citation lookup
+/// ([`crate::references`], [`crate::cited_by`]), taking providers in
+/// [`PROVIDER_ORDER`]. Failed providers contribute nothing; their errors stay
+/// in `results` for the caller to report.
+pub fn merge_pages<E>(results: &HashMap<ProviderId, Result<SearchPage, E>>) -> MergeReport {
     merge_works(
         PROVIDER_ORDER
             .iter()
@@ -181,6 +180,7 @@ fn completeness(work: &CandidateWork) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ProviderError;
 
     fn work(
         provider: ProviderId,
