@@ -234,11 +234,14 @@ impl From<papers_openalex::Work> for CandidateWork {
                 .collect(),
             publish_date: value.publication_date.unwrap_or_default(),
             doi: value.doi,
+            // Only a location's `pdf_url` is a PDF; `open_access.oa_url` is
+            // often a repository landing page, which `fetch` would hash as
+            // the paper.
             pdf_url: value
                 .best_oa_location
-                .as_ref()
-                .and_then(|loc| loc.pdf_url.clone())
-                .or_else(|| value.open_access.as_ref().and_then(|oa| oa.oa_url.clone())),
+                .into_iter()
+                .chain(value.locations.into_iter().flatten())
+                .find_map(|loc| loc.pdf_url),
             venue: value
                 .primary_location
                 .and_then(|loc| loc.source)
@@ -266,6 +269,54 @@ mod tests {
         assert_eq!(candidate.title, "");
         assert_eq!(candidate.publish_date, "");
         assert!(candidate.authors.is_empty());
+    }
+
+    #[test]
+    fn a_landing_page_as_the_only_open_access_url_is_no_pdf() {
+        let work: papers_openalex::Work = serde_json::from_str(
+            r#"{
+                "id": "https://openalex.org/W2",
+                "open_access": {
+                    "is_oa": true,
+                    "oa_url": "https://repositorio.unal.edu.co/handle/unal/81443"
+                },
+                "best_oa_location": {
+                    "is_oa": true,
+                    "landing_page_url": "https://repositorio.unal.edu.co/handle/unal/81443"
+                },
+                "locations": [{
+                    "is_oa": true,
+                    "landing_page_url": "https://repositorio.unal.edu.co/handle/unal/81443"
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(CandidateWork::from(work).pdf_url, None);
+    }
+
+    #[test]
+    fn a_pdf_in_a_location_other_than_the_best_is_used() {
+        let work: papers_openalex::Work = serde_json::from_str(
+            r#"{
+                "id": "https://openalex.org/W3",
+                "open_access": {"is_oa": true, "oa_url": "https://hal.science/hal-1"},
+                "best_oa_location": {
+                    "is_oa": true,
+                    "landing_page_url": "https://hal.science/hal-1"
+                },
+                "locations": [
+                    {"is_oa": false, "landing_page_url": "https://doi.org/10.1/x"},
+                    {"is_oa": true, "landing_page_url": "https://hal.science/hal-1"},
+                    {"is_oa": true, "pdf_url": "https://arxiv.org/pdf/1703.06870"},
+                    {"is_oa": true, "pdf_url": "https://example.org/later.pdf"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            CandidateWork::from(work).pdf_url.as_deref(),
+            Some("https://arxiv.org/pdf/1703.06870")
+        );
     }
 
     #[test]
