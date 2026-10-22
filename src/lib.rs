@@ -7,6 +7,7 @@ pub mod bibtex;
 mod citation_key;
 mod citations;
 pub mod error;
+pub mod exclusions;
 pub mod github;
 pub mod identity;
 pub mod library;
@@ -22,6 +23,9 @@ use std::path::{Path, PathBuf};
 
 pub use citations::{CITATION_PROVIDERS, CitationError, CitationResults, cited_by, references};
 pub use error::PaxError;
+pub use exclusions::{
+    Exclusion, ExclusionStage, Exclusions, UnknownExclusionStage, doi_exclusion_key, exclusion_key,
+};
 pub use github::publish_to_github_release;
 pub use identity::{IdentityKey, identity_key, identity_keys};
 pub use library::Library;
@@ -538,6 +542,17 @@ pub fn known_dois(root: &Path) -> HashSet<String> {
         .unwrap_or_default()
 }
 
+/// The exclusion keys in the library's `research/excluded.nix`, used to mark
+/// results already excluded: a work is excluded when
+/// [`exclusion_key`]`(work)` is in this set. Like [`known_dois`], returns an
+/// empty set rather than an error when the file is missing or unreadable, so
+/// a search still works with nothing marked.
+pub fn excluded_keys(root: &Path) -> HashSet<String> {
+    Exclusions::load(&nix::excluded_path(root))
+        .map(|exclusions| exclusions.entries().iter().map(|e| e.key.clone()).collect())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod known_dois_tests {
     use super::*;
@@ -671,6 +686,44 @@ pub fn filter_papers(papers: &[Paper], filter: &ListFilter) -> Vec<Paper> {
         })
         .cloned()
         .collect()
+}
+
+#[cfg(test)]
+mod excluded_keys_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn excluded_keys_reads_excluded_nix_and_matches_exclusion_key() {
+        let root =
+            std::env::temp_dir().join(format!("pax-excluded-keys-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("research")).unwrap();
+        assert!(excluded_keys(&root).is_empty());
+
+        fs::write(
+            nix::excluded_path(&root),
+            r#"{
+  "10.1145/abc" = { title = "T"; reason = "R"; stage = "screening"; };
+}
+"#,
+        )
+        .unwrap();
+        let keys = excluded_keys(&root);
+        let work = CandidateWork {
+            id: "openalex:W1".parse().unwrap(),
+            title: "T".to_string(),
+            authors: Vec::new(),
+            publish_date: String::new(),
+            doi: Some("https://doi.org/10.1145/ABC".to_string()),
+            pdf_url: None,
+            venue: None,
+            abstract_text: None,
+        };
+        assert!(keys.contains(&exclusion_key(&work)));
+
+        fs::remove_dir_all(&root).ok();
+    }
 }
 
 #[cfg(test)]

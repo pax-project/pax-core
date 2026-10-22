@@ -17,6 +17,26 @@ use crate::error::PaxError;
 // Writing
 // ---------------------------------------------------------------------------
 
+/// Whether `s` can be written as a bare Nix attribute name per this module's
+/// own tokenizer grammar — `(alpha|_)(alnum|_|-)*`, excluding `null`, which
+/// the tokenizer reads as a value.
+fn is_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    s != "null"
+        && matches!(chars.next(), Some(c) if c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Renders an entry key: bare when it's a valid identifier, quoted otherwise
+/// (DOIs and `provider:id` keys contain `/`, `.`, and `:`).
+pub(crate) fn format_key(key: &str) -> String {
+    if is_identifier(key) {
+        key.to_string()
+    } else {
+        quote(key)
+    }
+}
+
 pub(crate) fn write_field_string(out: &mut String, key: &str, value: &str) {
     let _ = writeln!(out, "    {key} = {};", quote(value));
 }
