@@ -105,7 +105,7 @@ impl SemanticScholarProvider {
                     let query = [
                         ("offset", offset.to_string()),
                         ("limit", limit.to_string()),
-                        ("fields", CITATION_FIELDS.to_string()),
+                        ("fields", PAPER_FIELDS.to_string()),
                     ];
                     let response: ListResponse = self.get_json(&path, &query).await?;
                     let entries = response.data.ok_or_else(|| {
@@ -241,8 +241,10 @@ const MAX_CITATION_PAGE_SIZE: usize = 1000;
 /// The reference and citation endpoints require `offset + limit < 10000`.
 const MAX_CITATIONS_RETRIEVABLE: u64 = 9_999;
 
-/// Every field `CandidateWork` reads, plus what post-retrieval filters need.
-const CITATION_FIELDS: &str =
+/// Every field `CandidateWork` reads (but the abstract, which only `get`
+/// asks for), plus what post-retrieval filters need. Without it the client
+/// asks for its own defaults, which leave out the DOI, date, venue and PDF.
+const PAPER_FIELDS: &str =
     "paperId,title,authors,year,publicationDate,externalIds,venue,openAccessPdf,publicationTypes";
 
 /// Maps an error looking up the seed paper: one Semantic Scholar doesn't
@@ -322,7 +324,8 @@ impl Provider for SemanticScholarProvider {
                     .client
                     .search_papers(query)
                     .offset(offset as u32)
-                    .limit(limit as u32);
+                    .limit(limit as u32)
+                    .fields(PAPER_FIELDS);
                 if let Some(years) = &years {
                     request = request.year(years);
                 }
@@ -347,6 +350,7 @@ impl Provider for SemanticScholarProvider {
         let paper = self
             .client
             .get_paper(native_id)
+            .fields(&format!("{PAPER_FIELDS},abstract"))
             .send()
             .await
             .map_err(|e| ProviderError::Request(e.to_string()))?;
