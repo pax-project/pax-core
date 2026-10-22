@@ -143,6 +143,23 @@ The reference is a DOI or a `search` result. pax looks up the title, and keys th
 
 The flake never reads `excluded.nix`, and a library without it simply has no exclusions.
 
+## Scripting
+
+`pax` writes results to stdout, and errors and warnings to stderr: a provider that failed or was rate limited, a filter a provider couldn't apply, skipped entries, records kept as `[language unknown]`, a hint that more results are available. So `pax search "actor model" > results.txt` captures only the results, while the notes still reach the terminal.
+
+Every command exits with a code a script can branch on:
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success. |
+| 1 | Any other failure, e.g. `nix` failing to fetch or build; also `check` or `sync` finding problems in the library. |
+| 2 | Wrong arguments: an unknown command or flag, a malformed `provider:id` or citation key, or flags that can't be combined. |
+| 3 | Partial: in `search`, `refs` or `cited-by`, at least one provider failed while others answered, so the results are incomplete. |
+| 4 | Not found: a reference, seed or citation key doesn't resolve. |
+| 5 | Refused: the library rejected the operation, e.g. excluding a paper already declared, renaming to a citation key in use, fetching a paper with no PDF source, or `init` where a library exists. |
+| 6 | Every provider failed (network, rate limit, provider error). |
+| 7 | The library is missing, not initialized, or unreadable. |
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
