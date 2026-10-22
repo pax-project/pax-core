@@ -21,6 +21,9 @@ pub trait Sink {
     fn warning(&mut self, message: &str);
     /// A provider that failed while the others may still have answered.
     fn provider_error(&mut self, provider: ProviderId, message: &str);
+    /// A provider that has no record of the seed or DOI asked about, while
+    /// another provider answered: an answer, not a failure.
+    fn provider_note(&mut self, provider: ProviderId, message: &str);
     fn provider_header(&mut self, provider: ProviderId);
     fn page_header(&mut self, provider: ProviderId, page: &SearchPage);
     fn candidates(&mut self, candidates: &[CandidateWork], known_dois: &HashSet<String>);
@@ -61,6 +64,10 @@ impl Sink for TextSink {
 
     fn provider_error(&mut self, provider: ProviderId, message: &str) {
         eprintln!("Error: {provider}: {message}");
+    }
+
+    fn provider_note(&mut self, provider: ProviderId, message: &str) {
+        eprintln!("Note: {provider}: {message}");
     }
 
     fn provider_header(&mut self, provider: ProviderId) {

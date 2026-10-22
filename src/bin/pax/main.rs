@@ -230,6 +230,23 @@ fn open_in_viewer(sink: &mut impl Sink, path: &Path) -> Code {
     }
 }
 
+/// Reports a provider that returned no list. One that has no record of the
+/// seed or DOI has answered, so while another provider returned a list,
+/// that's a note rather than an error.
+fn provider_failed<'a>(
+    sink: &mut impl Sink,
+    provider: ProviderId,
+    failure: impl Into<Failure<'a>>,
+    another_listed: bool,
+) {
+    let failure = failure.into();
+    if another_listed && exit::is_answer(failure) {
+        sink.provider_note(provider, &failure.to_string());
+    } else {
+        sink.provider_error(provider, &failure.to_string());
+    }
+}
+
 /// Prints each citation provider's list, the way `search` prints each
 /// provider's results.
 fn show_citations(
@@ -241,10 +258,11 @@ fn show_citations(
         Err(e) => return fail(sink, &e),
     };
     let known_dois = pax_core::known_dois(Path::new("."));
+    let listed = results.values().any(Result::is_ok);
     for provider in pax_core::CITATION_PROVIDERS {
         match results.get(&provider) {
             Some(Ok(page)) => sink.page(provider, page, &known_dois),
-            Some(Err(e)) => sink.provider_error(provider, &e.to_string()),
+            Some(Err(e)) => provider_failed(sink, provider, e, listed),
             None => {}
         }
     }
@@ -314,6 +332,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
 
             if let Some(doi) = &doi {
                 let results = pax_core::search_by_doi(doi, config).await;
+                let listed = results.values().any(Result::is_ok);
                 // arXiv has no DOI lookup.
                 for provider in [
                     ProviderId::OpenAlex,
@@ -325,7 +344,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                             sink.provider_header(provider);
                             sink.candidates(works, &known_dois);
                         }
-                        Some(Err(e)) => sink.provider_error(provider, &e.to_string()),
+                        Some(Err(e)) => provider_failed(sink, provider, e, listed),
                         None => {}
                     }
                 }

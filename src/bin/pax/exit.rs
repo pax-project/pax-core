@@ -36,6 +36,7 @@ impl From<Code> for std::process::ExitCode {
 }
 
 /// Something that made a command fail, from the library or the CLI itself.
+#[derive(Clone, Copy)]
 pub enum Failure<'a> {
     Pax(&'a PaxError),
     Provider(&'a ProviderError),
@@ -121,23 +122,32 @@ pub fn code(failure: Failure<'_>) -> Code {
     }
 }
 
+/// Whether a provider's failure is really an answer: it has no record of the
+/// seed or DOI it was asked about. Unlike a network failure, a rate limit or
+/// a provider error, that leaves nothing missing from the results.
+pub fn is_answer(failure: Failure<'_>) -> bool {
+    code(failure) == Code::NotFound
+}
+
 /// The exit code of a command that asked several providers, from each one's
-/// outcome: success if all answered, partial if some failed, and if none
-/// answered, not found when each said so, otherwise every provider failed.
+/// outcome. A provider that doesn't know the seed or DOI has answered (see
+/// [`is_answer`]), so: not found if every provider said so, success if no
+/// provider failed, every provider failed if none answered at all, and
+/// partial if some failed while others answered.
 pub fn providers<'a>(outcomes: impl IntoIterator<Item = Result<(), Failure<'a>>>) -> Code {
-    let (mut answered, mut not_found, mut failed) = (0u32, 0u32, 0u32);
+    let (mut listed, mut not_found, mut failed) = (0u32, 0u32, 0u32);
     for outcome in outcomes {
-        match outcome.map_err(code) {
-            Ok(()) => answered += 1,
-            Err(Code::NotFound) => not_found += 1,
+        match outcome {
+            Ok(()) => listed += 1,
+            Err(failure) if is_answer(failure) => not_found += 1,
             Err(_) => failed += 1,
         }
     }
-    match (answered, not_found, failed) {
-        (_, 0, 0) => Code::Success,
-        (1.., _, _) => Code::Partial,
-        (0, _, 0) => Code::NotFound,
-        (0, _, _) => Code::ProvidersFailed,
+    match (listed, not_found, failed) {
+        (0, 1.., 0) => Code::NotFound,
+        (_, _, 0) => Code::Success,
+        (0, 0, _) => Code::ProvidersFailed,
+        _ => Code::Partial,
     }
 }
 
@@ -188,15 +198,61 @@ mod tests {
             providers([Ok(()), Err(Failure::Provider(&failed))]),
             Code::Partial
         );
+        assert_eq!(providers([Ok(()), Ok(())]), Code::Success);
+    }
+
+    #[test]
+    fn a_provider_not_knowing_the_seed_or_doi_is_an_answer() {
         let unknown_seed = CitationError::SeedNotFound {
             provider: ProviderId::SemanticScholar,
             key: "DOI:10.1/x".into(),
         };
+        let unresolvable = CitationError::Unresolvable {
+            provider: ProviderId::OpenAlex,
+            lookup_error: None,
+        };
+        let unknown_doi = ProviderError::NotFound;
+        let failed = CitationError::Provider(ProviderError::Request("429".into()));
+
+        // The other providers answered: success, not partial.
         assert_eq!(
             providers([Ok(()), Err(Failure::Citation(&unknown_seed))]),
+            Code::Success
+        );
+        assert_eq!(
+            providers([Err(Failure::Citation(&unresolvable)), Ok(())]),
+            Code::Success
+        );
+        assert_eq!(
+            providers([Ok(()), Err(Failure::Provider(&unknown_doi)), Ok(())]),
+            Code::Success
+        );
+
+        // No provider knows it: not found.
+        assert_eq!(
+            providers([
+                Err(Failure::Citation(&unknown_seed)),
+                Err(Failure::Citation(&unresolvable)),
+            ]),
+            Code::NotFound
+        );
+
+        // A real failure beside it still leaves the answer incomplete.
+        assert_eq!(
+            providers([
+                Err(Failure::Citation(&unknown_seed)),
+                Err(Failure::Citation(&failed)),
+            ]),
             Code::Partial
         );
-        assert_eq!(providers([Ok(()), Ok(())]), Code::Success);
+        assert_eq!(
+            providers([
+                Ok(()),
+                Err(Failure::Citation(&unknown_seed)),
+                Err(Failure::Citation(&failed)),
+            ]),
+            Code::Partial
+        );
     }
 
     #[test]
@@ -245,14 +301,10 @@ mod tests {
     fn every_provider_failing_is_providers_failed() {
         let failed = ProviderError::Request("timed out".into());
         assert_eq!(code(Failure::Provider(&failed)), Code::ProvidersFailed);
-        let unknown_seed = CitationError::SeedNotFound {
-            provider: ProviderId::OpenAlex,
-            key: "W1".into(),
-        };
         let citation_failed = CitationError::Provider(ProviderError::Request("429".into()));
         assert_eq!(
             providers([
-                Err(Failure::Citation(&unknown_seed)),
+                Err(Failure::Provider(&failed)),
                 Err(Failure::Citation(&citation_failed)),
             ]),
             Code::ProvidersFailed

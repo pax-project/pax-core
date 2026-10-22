@@ -154,8 +154,8 @@ Every command exits with a code a script can branch on:
 | 0 | Success. |
 | 1 | Any other failure, e.g. `nix` failing to fetch or build; also `check` or `sync` finding problems in the library. |
 | 2 | Wrong arguments: an unknown command or flag, a malformed `provider:id` or citation key, or flags that can't be combined. |
-| 3 | Partial: in `search`, `refs` or `cited-by`, at least one provider failed while others answered, so the results are incomplete. |
-| 4 | Not found: a reference, seed or citation key doesn't resolve. |
+| 3 | Partial: in `search`, `refs` or `cited-by`, at least one provider failed (network, rate limit, provider error) while others answered, so the results are incomplete. A provider that has no record of the seed or DOI isn't a failure: it answered, so when the others returned results `pax` exits 0 and notes it on stderr. |
+| 4 | Not found: a reference, seed or citation key doesn't resolve, e.g. no provider has a record of the `refs` / `cited-by` seed or the `search --doi` DOI. |
 | 5 | Refused: the library rejected the operation, e.g. excluding a paper already declared, renaming to a citation key in use, fetching a paper with no PDF source, or `init` where a library exists. |
 | 6 | Every provider failed (network, rate limit, provider error). |
 | 7 | The library is missing, not initialized, or unreadable. |
