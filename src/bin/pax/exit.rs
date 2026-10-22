@@ -82,6 +82,8 @@ impl fmt::Display for Failure<'_> {
 /// The exit code a failure maps to.
 pub fn code(failure: Failure<'_>) -> Code {
     match failure {
+        // A refusal without a variant of its own, carried as an I/O error.
+        Failure::Pax(e) if e.refusal().is_some() => Code::Refused,
         Failure::Pax(e) => match e {
             PaxError::Provider(e) => code(Failure::Provider(e)),
             // Every I/O error the library returns comes from reading or

@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub use citations::{CITATION_PROVIDERS, CitationError, CitationResults, cited_by, references};
-pub use error::PaxError;
+pub use error::{PaxError, Refusal};
 pub use exclusions::{
     Exclusion, ExclusionStage, Exclusions, UnknownExclusionStage, candidate_exclusion_key,
     doi_exclusion_key, exclusion_key,
@@ -272,12 +272,24 @@ pub async fn resolve_candidate(
 /// add — they just leave `source_url` unset. `hash` stays unset: fetching
 /// bytes and computing a Nix hash is `fetch`'s job, not `add`'s (lazy
 /// materialization, see `docs/mvp.md` at tag `1.0.0`).
+///
+/// The library is loaded before anything is resolved, so a missing library
+/// fails without a network call. A paper already declared is refused with
+/// [`Refusal::AlreadyDeclared`] (see [`PaxError::refusal`]), naming its
+/// citation key: one with the same DOI, or the same arXiv id in any version
+/// ([`identity_keys`]). A Crossref or arXiv reference names its DOI or arXiv
+/// id itself, so it's checked before it's resolved too.
 pub async fn add_candidate(
     id: &CandidateId,
     root: &Path,
     config: &Config,
 ) -> Result<PaperRef, PaxError> {
+    let path = nix::papers_path(root);
+    let mut library = Library::load(&path)?;
+    refuse_declared(&library, id, &identity::reference_id_keys(id))?;
+
     let work = resolve_candidate(id, config).await?;
+    refuse_declared(&library, id, &identity_keys(&work))?;
     let source_url = match (&work.pdf_url, &work.doi) {
         (Some(pdf_url), _) => Some(pdf_url.clone()),
         (None, Some(doi)) => first_pdf_url(
@@ -286,8 +298,6 @@ pub async fn add_candidate(
         ),
         (None, None) => None,
     };
-    let path = nix::papers_path(root);
-    let mut library = Library::load(&path)?;
 
     let existing_keys: Vec<&str> = library
         .papers()
@@ -317,6 +327,141 @@ pub async fn add_candidate(
     library.save(&path)?;
 
     Ok(PaperRef(citation_key))
+}
+
+/// Refuses adding `id` when a declared paper shares a DOI or arXiv key with
+/// `keys`. A title+year key doesn't count, since a declared paper's keys
+/// never include one: different papers can share a title and year.
+fn refuse_declared(
+    library: &Library,
+    id: &CandidateId,
+    keys: &[IdentityKey],
+) -> Result<(), PaxError> {
+    let declared = library.papers().iter().find(|paper| {
+        identity::paper_id_keys(paper)
+            .iter()
+            .any(|declared| keys.contains(declared))
+    });
+    match declared {
+        Some(paper) => Err(Refusal::AlreadyDeclared {
+            reference: id.to_string(),
+            citation_key: paper.local.citation_key.clone(),
+        }
+        .into()),
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod refuse_declared_tests {
+    use super::*;
+
+    fn library() -> Library {
+        let paper = |key: &str, doi: Option<&str>, source_url: Option<&str>| Paper {
+            identity: Identity {
+                doi: doi.map(str::to_string),
+                title: "A Study".to_string(),
+                year: Some(2016),
+                ..Identity::default()
+            },
+            artifact: Artifact {
+                source_url: source_url.map(str::to_string),
+                hash: None,
+            },
+            local: Local {
+                citation_key: key.to_string(),
+                ..Local::default()
+            },
+        };
+        Library::new(vec![
+            paper("he2016", Some("https://doi.org/10.1109/CVPR.2016.90"), None),
+            paper(
+                "vaswani2017",
+                None,
+                Some("https://arxiv.org/pdf/1706.03762v5"),
+            ),
+        ])
+    }
+
+    fn work(provider: ProviderId, native_id: &str, doi: Option<&str>) -> CandidateWork {
+        CandidateWork {
+            id: CandidateId {
+                provider,
+                native_id: native_id.to_string(),
+            },
+            title: "A Study".to_string(),
+            authors: Vec::new(),
+            publish_date: "2016".to_string(),
+            doi: doi.map(str::to_string),
+            pdf_url: None,
+            venue: None,
+            abstract_text: None,
+        }
+    }
+
+    fn refused_as(id: &str, keys: &[IdentityKey]) -> Option<String> {
+        let id: CandidateId = id.parse().unwrap();
+        let error = refuse_declared(&library(), &id, keys).err()?;
+        match error.refusal() {
+            Some(Refusal::AlreadyDeclared { citation_key, .. }) => Some(citation_key.clone()),
+            None => panic!("not a refusal: {error}"),
+        }
+    }
+
+    #[test]
+    fn the_same_doi_from_any_provider_is_refused_with_its_key() {
+        let resolved = work(ProviderId::OpenAlex, "W1", Some("10.1109/cvpr.2016.90"));
+        assert_eq!(
+            refused_as("openalex:W1", &identity_keys(&resolved)).as_deref(),
+            Some("he2016")
+        );
+        let id: CandidateId = "crossref:10.1109/CVPR.2016.90".parse().unwrap();
+        assert_eq!(
+            refused_as(
+                "crossref:10.1109/CVPR.2016.90",
+                &identity::reference_id_keys(&id)
+            )
+            .as_deref(),
+            Some("he2016")
+        );
+    }
+
+    #[test]
+    fn another_arxiv_version_is_the_same_paper() {
+        let id: CandidateId = "arxiv:1706.03762v2".parse().unwrap();
+        assert_eq!(
+            refused_as("arxiv:1706.03762v2", &identity::reference_id_keys(&id)).as_deref(),
+            Some("vaswani2017")
+        );
+        let preprint_doi = work(
+            ProviderId::SemanticScholar,
+            "abc",
+            Some("10.48550/arXiv.1706.03762"),
+        );
+        assert_eq!(
+            refused_as("semanticscholar:abc", &identity_keys(&preprint_doi)).as_deref(),
+            Some("vaswani2017")
+        );
+    }
+
+    #[test]
+    fn a_different_paper_with_the_same_title_and_year_is_not_refused() {
+        let other = work(ProviderId::OpenAlex, "W2", Some("10.1/other"));
+        assert_eq!(refused_as("openalex:W2", &identity_keys(&other)), None);
+        let no_doi = work(ProviderId::OpenAlex, "W3", None);
+        assert_eq!(refused_as("openalex:W3", &identity_keys(&no_doi)), None);
+    }
+
+    #[test]
+    fn a_refusal_names_the_reference_and_key() {
+        let id: CandidateId = "crossref:10.1109/CVPR.2016.90".parse().unwrap();
+        let error =
+            refuse_declared(&library(), &id, &identity::reference_id_keys(&id)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "crossref:10.1109/CVPR.2016.90 is already in the library as \"he2016\""
+        );
+    }
 }
 
 /// The open PDF link `add` falls back to, among `results` from providers

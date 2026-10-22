@@ -27,8 +27,8 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::normalize_doi;
-use crate::paper::year_from_publish_date;
-use crate::provider::{CandidateWork, ProviderId};
+use crate::paper::{Paper, year_from_publish_date};
+use crate::provider::{CandidateId, CandidateWork, ProviderId};
 
 /// One way of identifying a paper. See the module docs for how each is
 /// normalized.
@@ -55,29 +55,8 @@ impl fmt::Display for IdentityKey {
 /// Every identity key `work` has, strongest first (DOI, arXiv id,
 /// title+year). Empty when the record has none — it can't be matched.
 pub fn identity_keys(work: &CandidateWork) -> Vec<IdentityKey> {
-    let mut keys = Vec::new();
-
-    let doi = work
-        .doi
-        .as_deref()
-        .map(normalize_doi_key)
-        .filter(|doi| !doi.is_empty());
-    let mut arxiv = None;
-    if let Some(doi) = doi {
-        match arxiv_id_from_doi(&doi) {
-            Some(id) => arxiv = Some(id),
-            None => keys.push(IdentityKey::Doi(doi)),
-        }
-    }
-    if arxiv.is_none() && work.id.provider == ProviderId::ArXiv {
-        arxiv = Some(strip_arxiv_version(&work.id.native_id).to_string());
-    }
-    if arxiv.is_none() {
-        arxiv = work.pdf_url.as_deref().and_then(arxiv_id_from_url);
-    }
-    if let Some(id) = arxiv.filter(|id| !id.is_empty()) {
-        keys.push(IdentityKey::Arxiv(id));
-    }
+    let arxiv_id = (work.id.provider == ProviderId::ArXiv).then_some(work.id.native_id.as_str());
+    let mut keys = id_keys(work.doi.as_deref(), arxiv_id, work.pdf_url.as_deref());
 
     let title = normalize_title(&work.title);
     if let (false, Some(year)) = (title.is_empty(), year_from_publish_date(&work.publish_date)) {
@@ -89,6 +68,54 @@ pub fn identity_keys(work: &CandidateWork) -> Vec<IdentityKey> {
 /// The strongest identity key `work` has, or `None` if it has none.
 pub fn identity_key(work: &CandidateWork) -> Option<IdentityKey> {
     identity_keys(work).into_iter().next()
+}
+
+/// A declared paper's DOI and arXiv keys: its DOI, and its arXiv id from an
+/// arXiv DOI or an arxiv.org PDF source. No title+year key: on its own, a
+/// title and year don't prove two records are the same paper.
+pub(crate) fn paper_id_keys(paper: &Paper) -> Vec<IdentityKey> {
+    id_keys(
+        paper.identity.doi.as_deref(),
+        None,
+        paper.artifact.source_url.as_deref(),
+    )
+}
+
+/// The DOI and arXiv keys a `provider:id` reference carries by itself,
+/// without resolving it: a Crossref id is a DOI, an arXiv id an arXiv id.
+/// Empty for the other providers' opaque ids.
+pub(crate) fn reference_id_keys(id: &CandidateId) -> Vec<IdentityKey> {
+    match id.provider {
+        ProviderId::Crossref => id_keys(Some(&id.native_id), None, None),
+        ProviderId::ArXiv => id_keys(None, Some(&id.native_id), None),
+        ProviderId::OpenAlex | ProviderId::SemanticScholar => Vec::new(),
+    }
+}
+
+/// The DOI and arXiv keys from a record's DOI, its arXiv id (when it comes
+/// from arXiv) and its PDF link, strongest first. The arXiv id is taken from
+/// the first of an arXiv DOI, `arxiv_id`, or an arxiv.org `pdf_url`.
+fn id_keys(doi: Option<&str>, arxiv_id: Option<&str>, pdf_url: Option<&str>) -> Vec<IdentityKey> {
+    let mut keys = Vec::new();
+
+    let doi = doi.map(normalize_doi_key).filter(|doi| !doi.is_empty());
+    let mut arxiv = None;
+    if let Some(doi) = doi {
+        match arxiv_id_from_doi(&doi) {
+            Some(id) => arxiv = Some(id),
+            None => keys.push(IdentityKey::Doi(doi)),
+        }
+    }
+    if arxiv.is_none() {
+        arxiv = arxiv_id.map(|id| strip_arxiv_version(id).to_string());
+    }
+    if arxiv.is_none() {
+        arxiv = pdf_url.and_then(arxiv_id_from_url);
+    }
+    if let Some(id) = arxiv.filter(|id| !id.is_empty()) {
+        keys.push(IdentityKey::Arxiv(id));
+    }
+    keys
 }
 
 /// Groups records by identity: given each record's keys (from

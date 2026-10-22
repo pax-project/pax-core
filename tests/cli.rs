@@ -133,3 +133,60 @@ fn a_command_outside_a_library_exits_7() {
         assert!(stderr(&output).starts_with("Error: "), "pax {args:?}");
     }
 }
+
+/// Runs `pax` with every proxy pointed at a closed port, so a network call
+/// fails at once instead of reaching a provider.
+fn pax_offline(dir: &PathBuf, args: &[&str]) -> Output {
+    let dead = "http://127.0.0.1:9";
+    Command::new(env!("CARGO_BIN_EXE_pax"))
+        .args(args)
+        .current_dir(dir)
+        .env("HTTP_PROXY", dead)
+        .env("HTTPS_PROXY", dead)
+        .env("ALL_PROXY", dead)
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn adding_a_declared_paper_is_refused_with_5() {
+    let dir = library("add-declared");
+    for reference in [
+        // The DOI lamport1978 was added with, from a reference that names it.
+        "crossref:10.1145/359545.359563",
+        "crossref:https://doi.org/10.1145/359545.359563",
+    ] {
+        let output = pax_offline(&dir, &["add", reference]);
+        assert_eq!(output.status.code(), Some(5), "pax add {reference}");
+        assert!(stdout(&output).is_empty());
+        assert!(stderr(&output).contains("\"lamport1978\""));
+    }
+    let papers = fs::read_to_string(dir.join("research").join("papers.nix")).unwrap();
+    assert_eq!(papers.matches("doi = ").count(), 1, "nothing was added");
+}
+
+/// The same paper added twice: the second `add` names the first one's key.
+#[test]
+#[ignore = "needs the network"]
+fn adding_a_paper_twice_is_refused_with_5() {
+    let dir = scratch("add-twice");
+    assert_eq!(pax(&dir, &["init"]).status.code(), Some(0));
+    let first = pax(&dir, &["add", "crossref:10.1109/CVPR.2016.90"]);
+    assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
+    let key = stdout(&first)
+        .trim()
+        .strip_prefix("Added ")
+        .unwrap()
+        .to_string();
+    for again in [
+        "crossref:10.1109/CVPR.2016.90",
+        // The same paper, as OpenAlex knows it.
+        "openalex:W2194775991",
+    ] {
+        let output = pax(&dir, &["add", again]);
+        assert_eq!(output.status.code(), Some(5), "pax add {again}");
+        assert!(stderr(&output).contains(&format!("{key:?}")));
+    }
+}
