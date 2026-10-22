@@ -6,13 +6,15 @@
 use std::collections::HashSet;
 
 use pax_core::{
-    CandidateWork, CheckReport, CheckStatus, FetchOutcome, Paper, ProviderId, normalize_doi,
+    CandidateWork, CheckReport, CheckStatus, FetchOutcome, Paper, ProviderId, SearchPage,
+    normalize_doi,
 };
 
 pub trait Sink {
     fn message(&mut self, message: &str);
     fn error(&mut self, message: &str);
     fn provider_header(&mut self, provider: ProviderId);
+    fn page_header(&mut self, provider: ProviderId, page: &SearchPage);
     fn candidates(&mut self, candidates: &[CandidateWork], known_dois: &HashSet<String>);
     fn candidate(&mut self, candidate: &CandidateWork);
     fn papers(&mut self, papers: &[Paper]);
@@ -35,6 +37,25 @@ impl Sink for TextSink {
 
     fn provider_header(&mut self, provider: ProviderId) {
         println!("{provider}:");
+    }
+
+    fn page_header(&mut self, provider: ProviderId, page: &SearchPage) {
+        let retrieved = page.retrieved();
+        let Some(total) = page.total else {
+            println!("{provider}: retrieved {retrieved} (total not reported)");
+            return;
+        };
+        let note = if page.is_complete() {
+            String::new()
+        } else if page
+            .max_retrievable
+            .is_some_and(|max| retrieved as u64 >= max)
+        {
+            format!(" ({provider} serves at most {retrieved} per query)")
+        } else {
+            " (use --limit N or --all for more)".to_string()
+        };
+        println!("{provider}: retrieved {retrieved} of {total}{note}");
     }
 
     fn candidates(&mut self, candidates: &[CandidateWork], known_dois: &HashSet<String>) {
