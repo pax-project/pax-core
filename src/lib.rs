@@ -12,6 +12,7 @@ pub mod identity;
 pub mod library;
 pub mod merge;
 pub mod nix;
+mod nix_attrs;
 pub mod paper;
 mod process;
 pub mod provider;
