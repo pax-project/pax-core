@@ -6,8 +6,8 @@
 use std::collections::HashSet;
 
 use pax_core::{
-    CandidateWork, CheckReport, CheckStatus, FetchOutcome, Paper, ProviderId, SearchPage,
-    normalize_doi,
+    CandidateWork, CheckReport, CheckStatus, FetchOutcome, FilterApplication, Paper, ProviderId,
+    SearchPage, normalize_doi,
 };
 
 pub trait Sink {
@@ -45,17 +45,28 @@ impl Sink for TextSink {
             println!("{provider}: retrieved {retrieved} (total not reported)");
             return;
         };
+        let scanned = page.scanned;
         let note = if page.is_complete() {
             String::new()
-        } else if page
-            .max_retrievable
-            .is_some_and(|max| retrieved as u64 >= max)
-        {
-            format!(" ({provider} serves at most {retrieved} per query)")
+        } else if let Some(max) = page.max_retrievable.filter(|&max| scanned >= max) {
+            format!(" ({provider} serves at most {max} per query)")
         } else {
             " (use --limit N or --all for more)".to_string()
         };
         println!("{provider}: retrieved {retrieved} of {total}{note}");
+        for filter in &page.filters {
+            match filter.application {
+                FilterApplication::PostRetrieval => println!(
+                    "\t{} filter applied post-retrieval to the {scanned} records fetched; the total counts records before it",
+                    filter.kind
+                ),
+                FilterApplication::NotApplied => println!(
+                    "\t{} filter not applied: {provider} has no such data, so these results ignore it",
+                    filter.kind
+                ),
+                _ => {}
+            }
+        }
     }
 
     fn candidates(&mut self, candidates: &[CandidateWork], known_dois: &HashSet<String>) {
