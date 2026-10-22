@@ -16,6 +16,11 @@ name = "pax"
 path = "src/bin/pax/main.rs"
 required-features = ["cli"]
 
+# Runs the built `pax` binary, so it needs the CLI.
+[[test]]
+name = "cli"
+required-features = ["cli"]
+
 [features]
 default = ["cli"]
 cli = ["dep:clap", "dep:dotenvy", "tokio/macros", "tokio/rt-multi-thread"]
