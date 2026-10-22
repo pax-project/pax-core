@@ -91,6 +91,11 @@ pub struct SearchPage {
     /// post-retrieval filter dropped some. Equals `retrieved()` when no
     /// filter ran after retrieval.
     pub scanned: u64,
+    /// Ids of the works a post-retrieval language filter kept although their
+    /// record has no language (e.g. Crossref proceedings papers, which never
+    /// carry one), so the filter couldn't check them. Empty when no such
+    /// filter ran.
+    pub language_unknown: Vec<CandidateId>,
 }
 
 impl SearchPage {
@@ -106,6 +111,7 @@ impl SearchPage {
             max_retrievable,
             filters: Vec::new(),
             scanned,
+            language_unknown: Vec::new(),
         }
     }
 
@@ -118,6 +124,18 @@ impl SearchPage {
     pub fn with_scanned(mut self, scanned: u64) -> Self {
         self.scanned = scanned;
         self
+    }
+
+    /// Marks works a language filter kept without a language to check; see
+    /// [`SearchPage::language_unknown`].
+    pub fn with_language_unknown(mut self, ids: Vec<CandidateId>) -> Self {
+        self.language_unknown = ids;
+        self
+    }
+
+    /// Whether a language filter kept `work` without a language to check.
+    pub fn is_language_unknown(&self, work: &CandidateWork) -> bool {
+        self.language_unknown.contains(&work.id)
     }
 
     pub fn retrieved(&self) -> usize {

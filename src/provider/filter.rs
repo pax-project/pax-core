@@ -228,7 +228,11 @@ pub enum FilterApplication {
     /// In the provider's query; its reported total already reflects it.
     Server,
     /// By pax on the retrieved records; the provider's total does not
-    /// reflect it, and records lacking the field are excluded.
+    /// reflect it. Records lacking the field are excluded, except under a
+    /// language filter: those are kept and listed in
+    /// [`SearchPage::language_unknown`].
+    ///
+    /// [`SearchPage::language_unknown`]: super::SearchPage::language_unknown
     PostRetrieval,
     /// The provider has no such data (or no equivalent type), so its
     /// results are unfiltered on this criterion.
