@@ -18,7 +18,7 @@ required-features = ["cli"]
 
 [features]
 default = ["cli"]
-cli = ["dep:clap", "dep:dotenvy", "dep:tokio"]
+cli = ["dep:clap", "dep:dotenvy", "tokio/macros", "tokio/rt-multi-thread"]
 
 [dependencies]
 arxiv-tools = "2.0.0"
@@ -27,8 +27,12 @@ clap = { version = "4.6.6", features = ["derive"], optional = true }
 crossref = { package = "crossref-async", version = "0.3.1" }
 dotenvy = { version = "0.15.7", optional = true }
 papers-openalex = "0.3.1"
+# HTTPS for the Semantic Scholar list requests; default-tls is the TLS
+# backend semantic-scholar-rs already pulls into this same reqwest.
+reqwest = { version = "0.12", default-features = false, features = ["default-tls"] }
 semantic-scholar-rs = "0.2.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2.0.20"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"], optional = true }
+# The library needs only the timer, to back off when Semantic Scholar rate-limits.
+tokio = { version = "1", features = ["time"] }

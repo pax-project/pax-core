@@ -1,4 +1,10 @@
+use std::time::Duration;
+
 use ::semantic_scholar::{Paper, SemanticScholar};
+use reqwest::StatusCode;
+use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 use super::{
     AppliedFilter, CandidateId, CandidateWork, DocType, FilterApplication, FilterKind, Filters,
@@ -14,6 +20,10 @@ const MAX_RETRIEVABLE: u64 = 1000;
 
 pub struct SemanticScholarProvider {
     client: SemanticScholar,
+    /// For the reference and citation lists, which the `semantic_scholar`
+    /// client can't parse: it requires a `paperId` that unmatched entries
+    /// lack, so one such entry failed the whole page.
+    http: reqwest::Client,
 }
 
 impl SemanticScholarProvider {
@@ -23,7 +33,18 @@ impl SemanticScholarProvider {
             None => SemanticScholar::new(),
         }
         .map_err(|e| ProviderError::Request(e.to_string()))?;
-        Ok(SemanticScholarProvider { client })
+        let mut headers = HeaderMap::new();
+        if let Some(key) = api_key {
+            let key = HeaderValue::from_str(key)
+                .map_err(|_| ProviderError::Request("invalid Semantic Scholar API key".into()))?;
+            headers.insert("x-api-key", key);
+        }
+        let http = reqwest::Client::builder()
+            .default_headers(headers)
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| ProviderError::Request(e.to_string()))?;
+        Ok(SemanticScholarProvider { client, http })
     }
 
     /// The papers `paper` cites — its reference list — paged. `paper` is
@@ -64,7 +85,7 @@ impl SemanticScholarProvider {
             .fields("paperId,referenceCount,citationCount")
             .send()
             .await
-            .map_err(citation_error)?;
+            .map_err(seed_error)?;
         let total = match list {
             CitationList::References => seed.reference_count,
             CitationList::Citations => seed.citation_count,
@@ -79,43 +100,25 @@ impl SemanticScholarProvider {
             Some(MAX_CITATIONS_RETRIEVABLE),
             post_filtered,
             |offset, limit| {
-                let paper_id = seed.paper_id.clone();
+                let path = format!("/paper/{}/{}", seed.paper_id, list.endpoint());
                 async move {
-                    let papers: Vec<Option<Paper>> = match list {
-                        CitationList::References => self
-                            .client
-                            .get_references(&paper_id)
-                            .offset(offset as u32)
-                            .limit(limit as u32)
-                            .fields(CITATION_FIELDS)
-                            .send()
-                            .await
-                            .map_err(citation_error)?
-                            .data
-                            .into_iter()
-                            .map(|reference| reference.cited_paper)
-                            .collect(),
-                        CitationList::Citations => self
-                            .client
-                            .get_citations(&paper_id)
-                            .offset(offset as u32)
-                            .limit(limit as u32)
-                            .fields(CITATION_FIELDS)
-                            .send()
-                            .await
-                            .map_err(citation_error)?
-                            .data
-                            .into_iter()
-                            .map(|citation| citation.citing_paper)
-                            .collect(),
-                    };
-                    let fetched = papers.len();
-                    // A reference Semantic Scholar couldn't match to a paper
-                    // has no id, so it can't be addressed — it's skipped.
-                    let works = papers
+                    let query = [
+                        ("offset", offset.to_string()),
+                        ("limit", limit.to_string()),
+                        ("fields", CITATION_FIELDS.to_string()),
+                    ];
+                    let response: ListResponse = self.get_json(&path, &query).await?;
+                    let entries = response.data.ok_or_else(|| {
+                        ProviderError::Request(format!(
+                            "Semantic Scholar withholds this paper's {} at the publisher's request",
+                            list.endpoint()
+                        ))
+                    })?;
+                    let fetched = entries.len();
+                    let works = entries
                         .into_iter()
-                        .flatten()
-                        .filter(|paper| !paper.paper_id.is_empty() && keeps(filters, paper))
+                        .filter_map(ListEntry::into_paper)
+                        .filter(|paper| keeps(filters, paper))
                         .map(CandidateWork::from)
                         .collect();
                     Ok(RawPage {
@@ -129,13 +132,106 @@ impl SemanticScholarProvider {
         .await?;
         Ok(page.with_filters(citation_filters(filters)))
     }
+
+    /// GETs `path` under the Graph API, retrying a rate-limited or failed
+    /// request with backoff the way the `semantic_scholar` client does.
+    async fn get_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<T, ProviderError> {
+        let url = format!("{GRAPH_API}{path}");
+        let mut backoff = INITIAL_BACKOFF;
+        for attempt in 0..=MAX_RETRIES {
+            let response = self
+                .http
+                .get(&url)
+                .query(query)
+                .send()
+                .await
+                .map_err(|e| ProviderError::Request(e.to_string()))?;
+            let status = response.status();
+            if status.is_success() {
+                let body = response
+                    .text()
+                    .await
+                    .map_err(|e| ProviderError::Request(e.to_string()))?;
+                return serde_json::from_str(&body).map_err(|e| {
+                    ProviderError::Request(format!("unexpected Semantic Scholar response: {e}"))
+                });
+            }
+            if status == StatusCode::NOT_FOUND {
+                return Err(ProviderError::NotFound);
+            }
+            let retryable = status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+            if retryable && attempt < MAX_RETRIES {
+                let wait = response
+                    .headers()
+                    .get(RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse().ok())
+                    .map_or(backoff, Duration::from_secs);
+                tokio::time::sleep(wait).await;
+                backoff *= 2;
+                continue;
+            }
+            let body = response.text().await.unwrap_or_default();
+            let excerpt: String = body.chars().take(200).collect();
+            return Err(ProviderError::Request(format!(
+                "Semantic Scholar answered {status} for {path}: {excerpt}"
+            )));
+        }
+        unreachable!("the last attempt always returns")
+    }
 }
+
+const GRAPH_API: &str = "https://api.semanticscholar.org/graph/v1";
+const MAX_RETRIES: u32 = 3;
+const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 
 /// Which of a paper's citation lists to page through.
 #[derive(Clone, Copy)]
 enum CitationList {
     References,
     Citations,
+}
+
+impl CitationList {
+    fn endpoint(self) -> &'static str {
+        match self {
+            CitationList::References => "references",
+            CitationList::Citations => "citations",
+        }
+    }
+}
+
+/// One page of a reference or citation list. `data` is `null` when the
+/// publisher has the list withheld.
+#[derive(Deserialize)]
+struct ListResponse {
+    #[serde(default)]
+    data: Option<Vec<ListEntry>>,
+}
+
+/// A list entry: the cited paper (references) or the citing one (citations).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListEntry {
+    #[serde(default, alias = "citingPaper")]
+    cited_paper: Option<serde_json::Value>,
+}
+
+impl ListEntry {
+    /// The entry's paper, or `None` for one Semantic Scholar couldn't match
+    /// to a paper: with no `paperId` it can't be addressed, so it's skipped.
+    fn into_paper(self) -> Option<Paper> {
+        let paper = self.cited_paper?;
+        let has_id = paper
+            .get("paperId")
+            .and_then(|id| id.as_str())
+            .is_some_and(|id| !id.is_empty());
+        has_id.then(|| serde_json::from_value(paper).ok()).flatten()
+    }
 }
 
 /// The reference and citation endpoints serve at most 1,000 papers per
@@ -149,20 +245,11 @@ const MAX_CITATIONS_RETRIEVABLE: u64 = 9_999;
 const CITATION_FIELDS: &str =
     "paperId,title,authors,year,publicationDate,externalIds,venue,openAccessPdf,publicationTypes";
 
-/// Maps a citation-list error. A paper missing from Semantic Scholar is
-/// [`ProviderError::NotFound`]; a list the publisher withheld comes back as
-/// `"data": null`, which the client can't deserialize, so it's named here.
-fn citation_error(e: ::semantic_scholar::Error) -> ProviderError {
+/// Maps an error looking up the seed paper: one Semantic Scholar doesn't
+/// have is [`ProviderError::NotFound`].
+fn seed_error(e: ::semantic_scholar::Error) -> ProviderError {
     match e {
         ::semantic_scholar::Error::Api { status: 404, .. } => ProviderError::NotFound,
-        ::semantic_scholar::Error::Deserialize { ref source, .. }
-            if source.to_string().starts_with("invalid type: null") =>
-        {
-            ProviderError::Request(
-                "Semantic Scholar withholds this list for this paper at the publisher's request"
-                    .to_string(),
-            )
-        }
         e => ProviderError::Request(e.to_string()),
     }
 }
@@ -397,15 +484,36 @@ mod tests {
     }
 
     #[test]
-    fn a_withheld_list_is_named_and_a_missing_paper_is_not_found() {
-        let null_list = serde_json::from_str::<Vec<u8>>("null").unwrap_err();
-        let withheld = citation_error(::semantic_scholar::Error::Deserialize {
-            endpoint: "/graph/v1/paper/x/references".to_string(),
-            source: null_list,
-        });
-        assert!(withheld.to_string().contains("withholds"));
+    fn list_pages_parse_leniently() {
+        // An unmatched reference has a null paperId; a withheld list, null data.
+        let body = r#"{"offset": 0, "data": [
+            {"citedPaper": {"paperId": "abc", "title": "Matched", "year": 2017,
+                            "publicationTypes": null, "externalIds": null}},
+            {"citedPaper": {"paperId": null, "title": "Unmatched"}},
+            {"citedPaper": null}
+        ]}"#;
+        let response: ListResponse = serde_json::from_str(body).unwrap();
+        let papers: Vec<Paper> = response
+            .data
+            .unwrap()
+            .into_iter()
+            .filter_map(ListEntry::into_paper)
+            .collect();
+        assert_eq!(papers.len(), 1);
+        assert_eq!(papers[0].paper_id, "abc");
 
-        let missing = citation_error(::semantic_scholar::Error::Api {
+        let citations = r#"{"data": [{"citingPaper": {"paperId": "def"}}]}"#;
+        let response: ListResponse = serde_json::from_str(citations).unwrap();
+        let entry = response.data.unwrap().into_iter().next().unwrap();
+        assert_eq!(entry.into_paper().unwrap().paper_id, "def");
+
+        let withheld: ListResponse = serde_json::from_str(r#"{"data": null}"#).unwrap();
+        assert!(withheld.data.is_none());
+    }
+
+    #[test]
+    fn a_missing_seed_is_not_found() {
+        let missing = seed_error(::semantic_scholar::Error::Api {
             status: 404,
             endpoint: "/graph/v1/paper/x".to_string(),
             message: "Paper not found".to_string(),
