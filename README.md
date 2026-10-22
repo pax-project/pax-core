@@ -120,6 +120,29 @@ The project is designed to be:
 - Unix-friendly
 - lazy
 
+## Excluding papers
+
+Papers you've screened and decided against go in `research/excluded.nix`, next to `papers.nix`:
+
+```Bash
+pax exclude openalex:W2072794470 --reason "not empirical" --stage screening
+pax exclude 10.1145/3474085.3475385 --reason "wrong domain" --stage full-text
+```
+
+The reference is a DOI or a `search` result. pax looks up the title, and keys the entry by the paper's DOI when it has one (so the exclusion matches it from any provider), otherwise by the `provider:id`. Keys are version-less: `arxiv:2301.01234v2` is keyed as `arxiv:2301.01234`, and every version of an excluded paper counts as excluded. `--stage` is `screening` (title/abstract) or `full-text`, the two exclusion stages a PRISMA flow diagram reports. `--title` sets the title yourself, and is required when the reference can't be resolved. Excluding the same paper again updates its reason and stage; a paper already in `papers.nix` can't be excluded until it's removed.
+
+```Nix
+{
+  "10.1145/3474085.3475385" = {
+    title = "...";
+    reason = "wrong domain";
+    stage = "full-text";
+  };
+}
+```
+
+The flake never reads `excluded.nix`, and a library without it simply has no exclusions.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.

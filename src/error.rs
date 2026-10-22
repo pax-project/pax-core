@@ -36,4 +36,12 @@ pub enum PaxError {
          contain only letters, digits, underscores, and hyphens)"
     )]
     InvalidCitationKey(String),
+    #[error("an exclusion needs a non-empty reason")]
+    MissingExclusionReason,
+    #[error("{0:?} is neither a DOI nor a provider:id reference")]
+    InvalidExclusionReference(String),
+    #[error("couldn't resolve a title for {0:?} ({1}); pass a title to exclude it anyway")]
+    ExclusionTitleUnresolved(String, String),
+    #[error("{0:?} is declared in the library as {1:?}; remove it before excluding it")]
+    ExcludingDeclaredPaper(String, String),
 }

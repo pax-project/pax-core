@@ -45,6 +45,13 @@ pub fn papers_path(root: &Path) -> PathBuf {
     root.join("research").join("papers.nix")
 }
 
+/// Where `research/excluded.nix` lives under a library root. Unlike
+/// `papers.nix`, `init_library` doesn't create it: a missing file means no
+/// exclusions, and the first `exclude` writes it.
+pub fn excluded_path(root: &Path) -> PathBuf {
+    root.join("research").join("excluded.nix")
+}
+
 pub fn init_library(root: &Path) -> Result<(), Error> {
     let research_dir = root.join("research");
     create_dir(&research_dir)?;
