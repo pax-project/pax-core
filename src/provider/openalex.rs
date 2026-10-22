@@ -1,4 +1,4 @@
-use papers_openalex::{GetParams, ListParams, OpenAlexClient};
+use papers_openalex::{GetParams, ListParams, OpenAlexClient, OpenAlexError};
 
 use super::{
     AppliedFilter, CandidateId, CandidateWork, DocType, FilterApplication, Filters, Provider,
@@ -20,6 +20,46 @@ impl OpenAlexProvider {
     pub fn new() -> Self {
         OpenAlexProvider {
             client: OpenAlexClient::new(),
+        }
+    }
+
+    /// The works `work` cites — its reference list — paged, with
+    /// `options.filters` applied server-side. `work` is anything
+    /// [`Provider::get`] accepts: a `W…` id, or `doi:<doi>`.
+    pub async fn references_page(
+        &self,
+        work: &str,
+        options: &SearchOptions,
+    ) -> Result<SearchPage, ProviderError> {
+        let id = self.work_id(work).await?;
+        let params = ListParams::builder()
+            .filter(format!("cited_by:{id}"))
+            .build();
+        self.list_works_page(params, options).await
+    }
+
+    /// The works that cite `work`, paged, with `options.filters` applied
+    /// server-side. `work` is as for [`Self::references_page`].
+    pub async fn citations_page(
+        &self,
+        work: &str,
+        options: &SearchOptions,
+    ) -> Result<SearchPage, ProviderError> {
+        let id = self.work_id(work).await?;
+        let params = ListParams::builder().filter(format!("cites:{id}")).build();
+        self.list_works_page(params, options).await
+    }
+
+    /// `work`'s `W…` id, looking it up when given another form (e.g. a DOI);
+    /// [`ProviderError::NotFound`] when OpenAlex has no such work.
+    async fn work_id(&self, work: &str) -> Result<String, ProviderError> {
+        if is_work_id(work) {
+            return Ok(work.to_string());
+        }
+        match self.client.get_work(work, &GetParams::default()).await {
+            Ok(found) => Ok(CandidateWork::from(found).id.native_id),
+            Err(OpenAlexError::Api { status: 404, .. }) => Err(ProviderError::NotFound),
+            Err(e) => Err(ProviderError::Request(e.to_string())),
         }
     }
 
@@ -69,6 +109,13 @@ impl OpenAlexProvider {
             .collect();
         Ok(page.with_filters(applied))
     }
+}
+
+/// Whether `id` is already an OpenAlex work id (`W` and digits), as opposed
+/// to another form `get_work` resolves, like `doi:…`.
+fn is_work_id(id: &str) -> bool {
+    id.strip_prefix('W')
+        .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// OpenAlex `filter` clauses for `filters`. A journal article and a
@@ -219,6 +266,14 @@ mod tests {
         assert_eq!(candidate.title, "");
         assert_eq!(candidate.publish_date, "");
         assert!(candidate.authors.is_empty());
+    }
+
+    #[test]
+    fn only_a_bare_w_id_skips_the_lookup() {
+        assert!(is_work_id("W2741809807"));
+        assert!(!is_work_id("doi:10.1145/359545.359563"));
+        assert!(!is_work_id("W"));
+        assert!(!is_work_id("https://openalex.org/W1"));
     }
 
     #[test]

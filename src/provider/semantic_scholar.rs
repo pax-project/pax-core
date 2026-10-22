@@ -1,4 +1,4 @@
-use ::semantic_scholar::SemanticScholar;
+use ::semantic_scholar::{Paper, SemanticScholar};
 
 use super::{
     AppliedFilter, CandidateId, CandidateWork, DocType, FilterApplication, FilterKind, Filters,
@@ -25,6 +25,187 @@ impl SemanticScholarProvider {
         .map_err(|e| ProviderError::Request(e.to_string()))?;
         Ok(SemanticScholarProvider { client })
     }
+
+    /// The papers `paper` cites — its reference list — paged. `paper` is
+    /// anything [`Provider::get`] accepts: a paper id, `DOI:<doi>`,
+    /// `ARXIV:<id>`, …
+    ///
+    /// The reference and citation endpoints take no filters, so year and type
+    /// are applied after retrieval (see [`citation_filters`]).
+    pub async fn references_page(
+        &self,
+        paper: &str,
+        options: &SearchOptions,
+    ) -> Result<SearchPage, ProviderError> {
+        self.citation_list_page(paper, CitationList::References, options)
+            .await
+    }
+
+    /// The papers that cite `paper`, paged; as for [`Self::references_page`].
+    pub async fn citations_page(
+        &self,
+        paper: &str,
+        options: &SearchOptions,
+    ) -> Result<SearchPage, ProviderError> {
+        self.citation_list_page(paper, CitationList::Citations, options)
+            .await
+    }
+
+    async fn citation_list_page(
+        &self,
+        paper: &str,
+        list: CitationList,
+        options: &SearchOptions,
+    ) -> Result<SearchPage, ProviderError> {
+        // The list endpoints report no total; the paper's own counts are it.
+        let seed = self
+            .client
+            .get_paper(paper)
+            .fields("paperId,referenceCount,citationCount")
+            .send()
+            .await
+            .map_err(citation_error)?;
+        let total = match list {
+            CitationList::References => seed.reference_count,
+            CitationList::Citations => seed.citation_count,
+        };
+        let total = u64::from(total.unwrap_or(0));
+
+        let filters = &options.filters;
+        let post_filtered = filters.years.is_some() || filters.doc_type.is_some();
+        let page = collect_pages(
+            options,
+            MAX_CITATION_PAGE_SIZE,
+            Some(MAX_CITATIONS_RETRIEVABLE),
+            post_filtered,
+            |offset, limit| {
+                let paper_id = seed.paper_id.clone();
+                async move {
+                    let papers: Vec<Option<Paper>> = match list {
+                        CitationList::References => self
+                            .client
+                            .get_references(&paper_id)
+                            .offset(offset as u32)
+                            .limit(limit as u32)
+                            .fields(CITATION_FIELDS)
+                            .send()
+                            .await
+                            .map_err(citation_error)?
+                            .data
+                            .into_iter()
+                            .map(|reference| reference.cited_paper)
+                            .collect(),
+                        CitationList::Citations => self
+                            .client
+                            .get_citations(&paper_id)
+                            .offset(offset as u32)
+                            .limit(limit as u32)
+                            .fields(CITATION_FIELDS)
+                            .send()
+                            .await
+                            .map_err(citation_error)?
+                            .data
+                            .into_iter()
+                            .map(|citation| citation.citing_paper)
+                            .collect(),
+                    };
+                    let fetched = papers.len();
+                    // A reference Semantic Scholar couldn't match to a paper
+                    // has no id, so it can't be addressed — it's skipped.
+                    let works = papers
+                        .into_iter()
+                        .flatten()
+                        .filter(|paper| !paper.paper_id.is_empty() && keeps(filters, paper))
+                        .map(CandidateWork::from)
+                        .collect();
+                    Ok(RawPage {
+                        works,
+                        total,
+                        fetched,
+                    })
+                }
+            },
+        )
+        .await?;
+        Ok(page.with_filters(citation_filters(filters)))
+    }
+}
+
+/// Which of a paper's citation lists to page through.
+#[derive(Clone, Copy)]
+enum CitationList {
+    References,
+    Citations,
+}
+
+/// The reference and citation endpoints serve at most 1,000 papers per
+/// request.
+const MAX_CITATION_PAGE_SIZE: usize = 1000;
+
+/// The reference and citation endpoints require `offset + limit < 10000`.
+const MAX_CITATIONS_RETRIEVABLE: u64 = 9_999;
+
+/// Every field `CandidateWork` reads, plus what post-retrieval filters need.
+const CITATION_FIELDS: &str =
+    "paperId,title,authors,year,publicationDate,externalIds,venue,openAccessPdf,publicationTypes";
+
+/// Maps a citation-list error. A paper missing from Semantic Scholar is
+/// [`ProviderError::NotFound`]; a list the publisher withheld comes back as
+/// `"data": null`, which the client can't deserialize, so it's named here.
+fn citation_error(e: ::semantic_scholar::Error) -> ProviderError {
+    match e {
+        ::semantic_scholar::Error::Api { status: 404, .. } => ProviderError::NotFound,
+        ::semantic_scholar::Error::Deserialize { ref source, .. }
+            if source.to_string().starts_with("invalid type: null") =>
+        {
+            ProviderError::Request(
+                "Semantic Scholar withholds this list for this paper at the publisher's request"
+                    .to_string(),
+            )
+        }
+        e => ProviderError::Request(e.to_string()),
+    }
+}
+
+/// How the reference and citation lists apply `filters`: year and (mapped)
+/// type after retrieval, since those endpoints take no filters; language
+/// not at all, since Semantic Scholar records carry none.
+fn citation_filters(filters: &Filters) -> Vec<AppliedFilter> {
+    filters
+        .kinds()
+        .into_iter()
+        .map(|kind| {
+            let application = match kind {
+                FilterKind::Year => FilterApplication::PostRetrieval,
+                FilterKind::DocType if filters.doc_type.and_then(publication_type).is_some() => {
+                    FilterApplication::PostRetrieval
+                }
+                _ => FilterApplication::NotApplied,
+            };
+            AppliedFilter::new(kind, application)
+        })
+        .collect()
+}
+
+/// Whether `paper` passes the year and type filters applied after
+/// retrieval. A paper missing the field doesn't match a filter on it.
+fn keeps(filters: &Filters, paper: &Paper) -> bool {
+    let year_ok = filters.years.is_none_or(|years| {
+        paper
+            .year
+            .and_then(|year| i32::try_from(year).ok())
+            .is_some_and(|year| years.contains(year))
+    });
+    let type_ok = filters
+        .doc_type
+        .and_then(publication_type)
+        .is_none_or(|wanted| {
+            paper
+                .publication_types
+                .as_ref()
+                .is_some_and(|types| types.iter().any(|t| t == wanted))
+        });
+    year_ok && type_ok
 }
 
 impl Provider for SemanticScholarProvider {
@@ -177,6 +358,59 @@ mod tests {
             applied_filters(&review)[0].application,
             FilterApplication::Server
         );
+    }
+
+    #[test]
+    fn citation_lists_filter_year_and_type_after_retrieval() {
+        let filters = Filters::default()
+            .with_years("2015-2020".parse().unwrap())
+            .with_doc_type(DocType::ConferencePaper)
+            .with_language("en");
+        let applications: Vec<_> = citation_filters(&filters)
+            .into_iter()
+            .map(|f| f.application)
+            .collect();
+        assert_eq!(
+            applications,
+            [
+                FilterApplication::PostRetrieval,
+                FilterApplication::PostRetrieval,
+                FilterApplication::NotApplied,
+            ]
+        );
+
+        let mut matching = paper("Hit");
+        matching.year = Some(2018);
+        matching.publication_types = Some(vec!["Conference".to_string()]);
+        assert!(keeps(&filters, &matching));
+
+        let mut too_old = matching.clone();
+        too_old.year = Some(2010);
+        assert!(!keeps(&filters, &too_old));
+
+        let mut journal = matching.clone();
+        journal.publication_types = Some(vec!["JournalArticle".to_string()]);
+        assert!(!keeps(&filters, &journal));
+
+        assert!(!keeps(&filters, &paper("No year or type")));
+        assert!(keeps(&Filters::default(), &paper("Unfiltered")));
+    }
+
+    #[test]
+    fn a_withheld_list_is_named_and_a_missing_paper_is_not_found() {
+        let null_list = serde_json::from_str::<Vec<u8>>("null").unwrap_err();
+        let withheld = citation_error(::semantic_scholar::Error::Deserialize {
+            endpoint: "/graph/v1/paper/x/references".to_string(),
+            source: null_list,
+        });
+        assert!(withheld.to_string().contains("withholds"));
+
+        let missing = citation_error(::semantic_scholar::Error::Api {
+            status: 404,
+            endpoint: "/graph/v1/paper/x".to_string(),
+            message: "Paper not found".to_string(),
+        });
+        assert!(matches!(missing, ProviderError::NotFound));
     }
 
     fn paper(title: &str) -> Paper {
