@@ -6,7 +6,8 @@
 //! `research/flake.nix` are untouched: the flake never imports it, and a
 //! library without the file simply has no exclusions. Same attrset subset
 //! as `papers.nix` (see `nix_attrs`), keyed by an exclusion key — a
-//! normalized DOI, or `provider:id` for a work without one:
+//! normalized DOI, or `provider:id` for a work without one. An arXiv id is
+//! keyed without its version: the paper, not a version, is what's excluded.
 //!
 //! ```nix
 //! {
@@ -23,7 +24,7 @@ use std::str::FromStr;
 
 use crate::error::PaxError;
 use crate::nix_attrs::{self, Value, take_string, write_field_string};
-use crate::provider::CandidateWork;
+use crate::provider::{CandidateId, CandidateWork, ProviderId};
 
 /// When in the screening process a paper was excluded. PRISMA 2020 reports
 /// the two in separate boxes: title/abstract screening, and full-text
@@ -192,11 +193,32 @@ pub fn doi_exclusion_key(doi: &str) -> String {
 
 /// The key `work` is excluded under, and the one to look up when flagging
 /// it: its DOI when it has one, so an exclusion matches the same paper from
-/// any provider; otherwise its `provider:id`.
+/// any provider; otherwise its `provider:id` ([`candidate_exclusion_key`]).
 pub fn exclusion_key(work: &CandidateWork) -> String {
     match work.doi.as_deref() {
         Some(doi) if !doi.trim().is_empty() => doi_exclusion_key(doi),
-        _ => work.id.to_string(),
+        _ => candidate_exclusion_key(&work.id),
+    }
+}
+
+/// The key a work without a DOI is excluded under: its `provider:id`, with
+/// an arXiv id's version stripped, so excluding one version of a paper
+/// excludes every version of it. Other providers' ids are kept as they are.
+pub fn candidate_exclusion_key(id: &CandidateId) -> String {
+    match id.provider {
+        ProviderId::ArXiv => format!("{}:{}", id.provider, strip_arxiv_version(&id.native_id)),
+        _ => id.to_string(),
+    }
+}
+
+/// An arXiv id without its trailing version (`v` followed by digits):
+/// `2301.01234v12` becomes `2301.01234`, `hep-th/9901001v2` becomes
+/// `hep-th/9901001`, and an id without a version is returned unchanged.
+pub fn strip_arxiv_version(id: &str) -> &str {
+    let without_digits = id.trim_end_matches(|c: char| c.is_ascii_digit());
+    match without_digits.strip_suffix('v') {
+        Some(base) if without_digits.len() < id.len() && !base.is_empty() => base,
+        _ => id,
     }
 }
 
@@ -289,6 +311,75 @@ mod tests {
         )
         .unwrap();
         assert!(Exclusions::load(&path).is_err());
+    }
+
+    #[test]
+    fn arxiv_versions_are_stripped_from_new_style_ids() {
+        assert_eq!(strip_arxiv_version("2301.01234v12"), "2301.01234");
+        assert_eq!(strip_arxiv_version("2301.01234v1"), "2301.01234");
+    }
+
+    #[test]
+    fn arxiv_versions_are_stripped_from_old_style_ids() {
+        assert_eq!(strip_arxiv_version("hep-th/9901001v2"), "hep-th/9901001");
+    }
+
+    #[test]
+    fn an_arxiv_id_without_a_version_is_unchanged() {
+        assert_eq!(strip_arxiv_version("2301.01234"), "2301.01234");
+        assert_eq!(strip_arxiv_version("hep-th/9901001"), "hep-th/9901001");
+    }
+
+    fn key_for(reference: &str) -> String {
+        candidate_exclusion_key(&reference.parse().unwrap())
+    }
+
+    #[test]
+    fn keys_built_from_versioned_arxiv_references_are_version_less() {
+        assert_eq!(key_for("arxiv:2301.01234v3"), "arxiv:2301.01234");
+        assert_eq!(key_for("arxiv:hep-th/9901001v2"), "arxiv:hep-th/9901001");
+        assert_eq!(key_for("arxiv:2301.01234"), "arxiv:2301.01234");
+    }
+
+    #[test]
+    fn other_providers_ids_are_kept_as_they_are() {
+        assert_eq!(key_for("openalex:W2741809807v2"), "openalex:W2741809807v2");
+    }
+
+    #[test]
+    fn a_resolved_versioned_arxiv_work_is_keyed_without_its_version() {
+        let work = CandidateWork {
+            id: "arxiv:2301.01234v1".parse().unwrap(),
+            title: "Some preprint".to_string(),
+            authors: Vec::new(),
+            publish_date: String::new(),
+            doi: None,
+            pdf_url: None,
+            venue: None,
+            abstract_text: None,
+        };
+        assert_eq!(exclusion_key(&work), "arxiv:2301.01234");
+    }
+
+    #[test]
+    fn re_excluding_another_arxiv_version_updates_the_same_entry() {
+        let mut exclusions = Exclusions::default();
+        for (reference, reason) in [
+            ("arxiv:2301.01234v1", "wrong domain"),
+            ("arxiv:2301.01234v2", "not empirical"),
+        ] {
+            exclusions.upsert(Exclusion::new(
+                key_for(reference),
+                "Some preprint".to_string(),
+                reason.to_string(),
+                ExclusionStage::Screening,
+            ));
+        }
+        assert_eq!(exclusions.entries().len(), 1);
+        assert_eq!(
+            exclusions.get("arxiv:2301.01234").unwrap().reason,
+            "not empirical"
+        );
     }
 
     #[test]

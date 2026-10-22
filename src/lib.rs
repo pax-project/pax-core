@@ -24,7 +24,8 @@ use std::path::{Path, PathBuf};
 pub use citations::{CITATION_PROVIDERS, CitationError, CitationResults, cited_by, references};
 pub use error::PaxError;
 pub use exclusions::{
-    Exclusion, ExclusionStage, Exclusions, UnknownExclusionStage, doi_exclusion_key, exclusion_key,
+    Exclusion, ExclusionStage, Exclusions, UnknownExclusionStage, candidate_exclusion_key,
+    doi_exclusion_key, exclusion_key,
 };
 pub use github::publish_to_github_release;
 pub use identity::{IdentityKey, identity_key, identity_keys};
@@ -1041,7 +1042,8 @@ pub async fn show_reference(
 /// reference (`openalex:W…`). The entry's title comes from the provider —
 /// a DOI is looked up across providers, a reference resolved directly — and
 /// a provider reference whose work has a DOI is keyed by that DOI, so the
-/// exclusion matches the paper from any provider ([`exclusion_key`]).
+/// exclusion matches the paper from any provider ([`exclusion_key`]); an
+/// arXiv id is keyed without its version, so every version is excluded.
 /// `title`, when given, overrides the resolved title and is the fallback if
 /// resolution fails; a bare DOI with a `title` needs no network at all.
 ///
@@ -1087,7 +1089,7 @@ pub async fn exclude_paper(
             },
             Err(e) => match title {
                 Some(title) => ResolvedExclusion {
-                    key: id.to_string(),
+                    key: candidate_exclusion_key(&id),
                     title: title.to_string(),
                     doi: None,
                     year: None,
