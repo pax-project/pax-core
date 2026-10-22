@@ -115,6 +115,12 @@ pub fn code(failure: Failure<'_>) -> Code {
             _ => Code::Failure,
         },
         Failure::Citation(e) => match e {
+            // Fetching the seed to learn its DOI failed: a provider with no
+            // such work is not found, a failed request is an error.
+            CitationError::Unresolvable {
+                lookup_error: Some(lookup),
+                ..
+            } => code(Failure::Provider(&lookup.error)),
             CitationError::Unresolvable { .. } | CitationError::SeedNotFound { .. } => {
                 Code::NotFound
             }
@@ -284,6 +290,60 @@ mod tests {
                 Err(Failure::Citation(&unresolvable)),
             ]),
             Code::NotFound
+        );
+    }
+
+    fn unresolvable_after(error: ProviderError) -> CitationError {
+        CitationError::Unresolvable {
+            provider: ProviderId::SemanticScholar,
+            lookup_error: Some(pax_core::SeedLookupError {
+                provider: ProviderId::OpenAlex,
+                error,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_seed_lookup_that_failed_on_the_network_is_an_error() {
+        let unresolvable = unresolvable_after(ProviderError::Request("timed out".into()));
+        assert_eq!(
+            code(Failure::Citation(&unresolvable)),
+            Code::ProvidersFailed
+        );
+        // The other provider answered: partial, not success.
+        assert_eq!(
+            providers([Ok(()), Err(Failure::Citation(&unresolvable))]),
+            Code::Partial
+        );
+        // Neither did: every provider failed, not not-found.
+        let failed = CitationError::Provider(ProviderError::Request("429".into()));
+        assert_eq!(
+            providers([
+                Err(Failure::Citation(&failed)),
+                Err(Failure::Citation(&unresolvable)),
+            ]),
+            Code::ProvidersFailed
+        );
+    }
+
+    #[test]
+    fn a_seed_its_own_provider_lacks_is_not_found() {
+        let unresolvable = unresolvable_after(ProviderError::NotFound);
+        assert_eq!(code(Failure::Citation(&unresolvable)), Code::NotFound);
+        let unknown_seed = CitationError::SeedNotFound {
+            provider: ProviderId::OpenAlex,
+            key: "W1".into(),
+        };
+        assert_eq!(
+            providers([
+                Err(Failure::Citation(&unknown_seed)),
+                Err(Failure::Citation(&unresolvable)),
+            ]),
+            Code::NotFound
+        );
+        assert_eq!(
+            providers([Ok(()), Err(Failure::Citation(&unresolvable))]),
+            Code::Success
         );
     }
 
