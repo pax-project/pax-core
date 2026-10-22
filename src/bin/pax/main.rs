@@ -280,7 +280,46 @@ async fn main() -> ExitCode {
     run(cli.command, &mut TextSink, &config).await.into()
 }
 
+/// Whether `command` reads or writes the library in the current directory.
+/// A `show`, `refs` or `cited-by` reference with a `:` is a provider
+/// reference, which needs no library; without one it's a citation key.
+/// `search --local` is checked after its arguments are.
+fn needs_library(command: &Command) -> bool {
+    match command {
+        Command::Init | Command::Search { .. } => false,
+        Command::Show { reference }
+        | Command::Refs { reference, .. }
+        | Command::CitedBy { reference, .. } => !reference.contains(':'),
+        Command::Add { .. }
+        | Command::List { .. }
+        | Command::Remove { .. }
+        | Command::Exclude { .. }
+        | Command::Edit { .. }
+        | Command::Export { .. }
+        | Command::Fetch { .. }
+        | Command::Check
+        | Command::Open { .. }
+        | Command::Sync => true,
+    }
+}
+
+/// Fails with a clear message when there's no library in the current
+/// directory, before a command that needs one does anything else, e.g. `add`
+/// resolving its reference over the network.
+fn require_library(sink: &mut impl Sink) -> Result<(), Code> {
+    if pax_core::nix::papers_path(Path::new(".")).exists() {
+        Ok(())
+    } else {
+        Err(fail(sink, Failure::NoLibrary))
+    }
+}
+
 async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) -> Code {
+    if needs_library(&command)
+        && let Err(code) = require_library(sink)
+    {
+        return code;
+    }
     match command {
         Command::Init => match pax_core::init_library(Path::new(".")) {
             Ok(()) => {
@@ -318,6 +357,9 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             }
 
             if let Some(query) = &local {
+                if let Err(code) = require_library(sink) {
+                    return code;
+                }
                 sink.papers(&pax_core::search_local(query, Path::new(".")));
                 return Code::Success;
             }

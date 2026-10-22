@@ -190,3 +190,34 @@ fn adding_a_paper_twice_is_refused_with_5() {
         assert!(stderr(&output).contains(&format!("{key:?}")));
     }
 }
+
+const NO_LIBRARY: &str =
+    "Error: no pax library here (research/papers.nix not found); run pax init first";
+
+#[test]
+fn a_citation_key_outside_a_library_exits_7() {
+    let dir = scratch("no-library-key");
+    for args in [
+        &["show", "turing1936"][..],
+        &["refs", "turing1936"],
+        &["cited-by", "turing1936"],
+        &["search", "--local", "turing"],
+    ] {
+        let output = pax_offline(&dir, args);
+        assert_eq!(output.status.code(), Some(7), "pax {args:?}");
+        assert!(stdout(&output).is_empty(), "pax {args:?}");
+        assert_eq!(stderr(&output).trim_end(), NO_LIBRARY, "pax {args:?}");
+    }
+}
+
+#[test]
+fn adding_outside_a_library_exits_7_before_any_network_call() {
+    let dir = scratch("no-library-add");
+    let started = std::time::Instant::now();
+    // Resolving this reference needs OpenAlex; offline, that would exit 6.
+    let output = pax_offline(&dir, &["add", "openalex:W2194775991"]);
+    assert_eq!(output.status.code(), Some(7), "{}", stderr(&output));
+    assert_eq!(stderr(&output).trim_end(), NO_LIBRARY);
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(!dir.join("research").exists());
+}

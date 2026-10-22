@@ -158,7 +158,7 @@ Every command exits with a code a script can branch on:
 | 4 | Not found: a reference, seed or citation key doesn't resolve, e.g. no provider has a record of the `refs` / `cited-by` seed or the `search --doi` DOI. |
 | 5 | Refused: the library rejected the operation, e.g. adding or excluding a paper already declared, renaming to a citation key in use, fetching a paper with no PDF source, or `init` where a library exists. |
 | 6 | Every provider failed (network, rate limit, provider error). |
-| 7 | The library is missing, not initialized, or unreadable. |
+| 7 | The library is missing, not initialized, or unreadable. A command that needs a library checks for `research/papers.nix` before doing anything else, so `add` fails before any network call, and so do a citation key given to `show`, `refs` or `cited-by` and `search --local`; a `provider:id` reference and a plain `search` work without one. |
 
 ## License
 

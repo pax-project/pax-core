@@ -45,6 +45,8 @@ pub enum Failure<'a> {
     Init(&'a std::io::Error),
     /// Arguments clap accepted but the command can't use together.
     Usage(&'a str),
+    /// No library in the current directory: `research/papers.nix` is missing.
+    NoLibrary,
     /// Anything else, described by its message.
     Other(&'a str),
 }
@@ -75,6 +77,9 @@ impl fmt::Display for Failure<'_> {
             Failure::Citation(e) => e.fmt(f),
             Failure::Init(e) => e.fmt(f),
             Failure::Usage(message) | Failure::Other(message) => f.write_str(message),
+            Failure::NoLibrary => f.write_str(
+                "no pax library here (research/papers.nix not found); run pax init first",
+            ),
         }
     }
 }
@@ -121,6 +126,7 @@ pub fn code(failure: Failure<'_>) -> Code {
         Failure::Init(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Code::Refused,
         Failure::Init(_) | Failure::Other(_) => Code::Failure,
         Failure::Usage(_) => Code::Usage,
+        Failure::NoLibrary => Code::NoLibrary,
     }
 }
 
@@ -318,5 +324,6 @@ mod tests {
         let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
         assert_eq!(pax(PaxError::Io(missing)), Code::NoLibrary);
         assert_eq!(pax(PaxError::LibraryParse("bad".into())), Code::NoLibrary);
+        assert_eq!(code(Failure::NoLibrary), Code::NoLibrary);
     }
 }
