@@ -17,14 +17,14 @@ use crate::error::PaxError;
 use crate::process::run_with_timeout;
 
 /// How long `prefetch_file` waits on `nix store prefetch-file` before giving
-/// up. That command always re-hits the network (see pax-project/.github's status.md), so a
+/// up. That command always re-hits the network (see pax-core#7), so a
 /// stalled connection or an unreachable substituter can otherwise hang it
 /// indefinitely — with no timeout, a caller (e.g. `lazypax`) sees "nothing
 /// happens" forever instead of an error it can show and recover from.
 const PREFETCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long `build_package` waits on `nix build`. Normally near-instant
-/// (pax-project/.github's status.md measured ~0.5s for an already-fetched artifact), but a
+/// (pax-core#7 measured ~0.5s for an already-fetched artifact), but a
 /// first-time flake evaluation can fetch `nixpkgs` over the network, so this
 /// is deliberately more generous than `PREFETCH_TIMEOUT`.
 const BUILD_TIMEOUT: Duration = Duration::from_secs(180);
