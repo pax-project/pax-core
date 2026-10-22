@@ -6,8 +6,8 @@
 use std::collections::HashSet;
 
 use pax_core::{
-    CandidateWork, CheckReport, CheckStatus, FetchOutcome, Paper, ProviderId, SearchPage,
-    normalize_doi,
+    CandidateWork, CheckReport, CheckStatus, FetchOutcome, FilterApplication, Paper, ProviderId,
+    SearchPage, normalize_doi,
 };
 
 pub trait Sink {
@@ -16,6 +16,9 @@ pub trait Sink {
     fn provider_header(&mut self, provider: ProviderId);
     fn page_header(&mut self, provider: ProviderId, page: &SearchPage);
     fn candidates(&mut self, candidates: &[CandidateWork], known_dois: &HashSet<String>);
+    /// A paged result list: its header, then its works, each marked with
+    /// what the page knows about it.
+    fn page(&mut self, provider: ProviderId, page: &SearchPage, known_dois: &HashSet<String>);
     fn candidate(&mut self, candidate: &CandidateWork);
     fn papers(&mut self, papers: &[Paper]);
     fn paper(&mut self, paper: &Paper);
@@ -45,42 +48,45 @@ impl Sink for TextSink {
             println!("{provider}: retrieved {retrieved} (total not reported)");
             return;
         };
+        let scanned = page.scanned;
         let note = if page.is_complete() {
             String::new()
-        } else if page
-            .max_retrievable
-            .is_some_and(|max| retrieved as u64 >= max)
-        {
-            format!(" ({provider} serves at most {retrieved} per query)")
+        } else if let Some(max) = page.max_retrievable.filter(|&max| scanned >= max) {
+            format!(" ({provider} serves at most {max} per query)")
         } else {
             " (use --limit N or --all for more)".to_string()
         };
         println!("{provider}: retrieved {retrieved} of {total}{note}");
+        for filter in &page.filters {
+            match filter.application {
+                FilterApplication::PostRetrieval => println!(
+                    "\t{} filter applied post-retrieval to the {scanned} records fetched; the total counts records before it",
+                    filter.kind
+                ),
+                FilterApplication::NotApplied => println!(
+                    "\t{} filter not applied: {provider} has no such data, so these results ignore it",
+                    filter.kind
+                ),
+                _ => {}
+            }
+        }
+        let unknown = page.language_unknown.len();
+        if unknown > 0 {
+            println!(
+                "\t{unknown} records have no language, so the language filter couldn't check them; kept and marked [language unknown]"
+            );
+        }
     }
 
     fn candidates(&mut self, candidates: &[CandidateWork], known_dois: &HashSet<String>) {
-        for work in candidates {
-            let in_library = work
-                .doi
-                .as_deref()
-                .is_some_and(|doi| known_dois.contains(normalize_doi(doi)));
-            println!(
-                "\t{}{}",
-                work.title,
-                if in_library { " [in library]" } else { "" }
-            );
-            println!("\t\t{}", work.id);
-            if !work.authors.is_empty() {
-                println!("\t\t{}", work.authors.join(", "));
-            }
-            println!("\t\t{}", work.publish_date);
-            println!("\t\t{}", work.doi.as_deref().unwrap_or("(no doi)"));
-            println!("\t\t{}", work.venue.as_deref().unwrap_or("(no venue)"));
-            println!(
-                "\t\tPDF: {}",
-                if work.pdf_url.is_some() { "✓" } else { "✗" }
-            );
-        }
+        print_candidates(candidates, known_dois, |_| false);
+    }
+
+    fn page(&mut self, provider: ProviderId, page: &SearchPage, known_dois: &HashSet<String>) {
+        self.page_header(provider, page);
+        print_candidates(&page.works, known_dois, |work| {
+            page.is_language_unknown(work)
+        });
     }
 
     fn candidate(&mut self, candidate: &CandidateWork) {
@@ -202,6 +208,41 @@ impl Sink for TextSink {
         println!(
             "{} checked: {reproducible} reproducible, {not_fetched} not fetched, {mismatched} mismatched, {errored} errored",
             reports.len()
+        );
+    }
+}
+
+/// One row per work: its title (with any marks), then its details.
+fn print_candidates(
+    works: &[CandidateWork],
+    known_dois: &HashSet<String>,
+    language_unknown: impl Fn(&CandidateWork) -> bool,
+) {
+    for work in works {
+        let in_library = work
+            .doi
+            .as_deref()
+            .is_some_and(|doi| known_dois.contains(normalize_doi(doi)));
+        println!(
+            "\t{}{}{}",
+            work.title,
+            if in_library { " [in library]" } else { "" },
+            if language_unknown(work) {
+                " [language unknown]"
+            } else {
+                ""
+            }
+        );
+        println!("\t\t{}", work.id);
+        if !work.authors.is_empty() {
+            println!("\t\t{}", work.authors.join(", "));
+        }
+        println!("\t\t{}", work.publish_date);
+        println!("\t\t{}", work.doi.as_deref().unwrap_or("(no doi)"));
+        println!("\t\t{}", work.venue.as_deref().unwrap_or("(no venue)"));
+        println!(
+            "\t\tPDF: {}",
+            if work.pdf_url.is_some() { "✓" } else { "✗" }
         );
     }
 }

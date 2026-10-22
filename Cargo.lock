@@ -1149,6 +1149,7 @@ name = "pax-core-papers"
 version = "1.1.1"
 dependencies = [
  "arxiv-tools",
+ "chrono",
  "clap",
  "crossref-async",
  "dotenvy",

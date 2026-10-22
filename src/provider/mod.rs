@@ -1,10 +1,15 @@
 mod arxiv;
 mod crossref;
+mod filter;
 mod openalex;
 mod semantic_scholar;
 
 pub use arxiv::ArxivProvider;
 pub use crossref::CrossrefProvider;
+pub use filter::{
+    AppliedFilter, DocType, FilterApplication, FilterKind, Filters, UnknownDocType, YearRange,
+    YearRangeParseError,
+};
 pub use openalex::OpenAlexProvider;
 pub use semantic_scholar::SemanticScholarProvider;
 
@@ -34,19 +39,21 @@ pub enum Limit {
 }
 
 /// Options for [`Provider::search_page`]. Construct with `default()` and the
-/// `with_*` methods: new options (e.g. filters) can then be added without
-/// breaking callers.
+/// `with_*` methods: new options can then be added without breaking callers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SearchOptions {
     pub limit: Limit,
+    pub filters: Filters,
 }
 
 impl Default for SearchOptions {
-    /// The same [`SEARCH_RESULT_LIMIT`] the unpaged `search` always used.
+    /// The same [`SEARCH_RESULT_LIMIT`] the unpaged `search` always used, and
+    /// no filters.
     fn default() -> Self {
         SearchOptions {
             limit: Limit::Count(SEARCH_RESULT_LIMIT),
+            filters: Filters::default(),
         }
     }
 }
@@ -54,6 +61,11 @@ impl Default for SearchOptions {
 impl SearchOptions {
     pub fn with_limit(mut self, limit: Limit) -> Self {
         self.limit = limit;
+        self
+    }
+
+    pub fn with_filters(mut self, filters: Filters) -> Self {
+        self.filters = filters;
         self
     }
 }
@@ -65,12 +77,25 @@ impl SearchOptions {
 pub struct SearchPage {
     pub works: Vec<CandidateWork>,
     /// How many records the provider reports matching in total. `None` when
-    /// the provider doesn't report it.
+    /// the provider doesn't report it. Reflects server-side filters only —
+    /// see [`SearchPage::filters`].
     pub total: Option<u64>,
     /// The most this provider serves for one query however far it's paged
     /// (e.g. Semantic Scholar's relevance search stops at 1,000). `None` when
     /// there's no such ceiling.
     pub max_retrievable: Option<u64>,
+    /// How each requested filter was applied by this provider. Empty when
+    /// the search had no filters.
+    pub filters: Vec<AppliedFilter>,
+    /// How many records were fetched from the provider, before any
+    /// post-retrieval filter dropped some. Equals `retrieved()` when no
+    /// filter ran after retrieval.
+    pub scanned: u64,
+    /// Ids of the works a post-retrieval language filter kept although their
+    /// record has no language (e.g. Crossref proceedings papers, which never
+    /// carry one), so the filter couldn't check them. Empty when no such
+    /// filter ran.
+    pub language_unknown: Vec<CandidateId>,
 }
 
 impl SearchPage {
@@ -79,41 +104,102 @@ impl SearchPage {
         total: Option<u64>,
         max_retrievable: Option<u64>,
     ) -> Self {
+        let scanned = works.len() as u64;
         SearchPage {
             works,
             total,
             max_retrievable,
+            filters: Vec::new(),
+            scanned,
+            language_unknown: Vec::new(),
         }
+    }
+
+    pub fn with_filters(mut self, filters: Vec<AppliedFilter>) -> Self {
+        self.filters = filters;
+        self
+    }
+
+    /// Sets how many records were fetched before post-retrieval filtering.
+    pub fn with_scanned(mut self, scanned: u64) -> Self {
+        self.scanned = scanned;
+        self
+    }
+
+    /// Marks works a language filter kept without a language to check; see
+    /// [`SearchPage::language_unknown`].
+    pub fn with_language_unknown(mut self, ids: Vec<CandidateId>) -> Self {
+        self.language_unknown = ids;
+        self
+    }
+
+    /// Whether a language filter kept `work` without a language to check.
+    pub fn is_language_unknown(&self, work: &CandidateWork) -> bool {
+        self.language_unknown.contains(&work.id)
     }
 
     pub fn retrieved(&self) -> usize {
         self.works.len()
     }
 
-    /// Whether every record the provider matched was retrieved. `false` when
-    /// the total is unknown, since completeness can't be shown then.
+    /// Whether every record the provider matched was retrieved — or, under a
+    /// post-retrieval filter, scanned. `false` when the total is unknown,
+    /// since completeness can't be shown then.
     pub fn is_complete(&self) -> bool {
-        self.total
-            .is_some_and(|total| self.retrieved() as u64 >= total)
+        let seen = self.scanned.max(self.retrieved() as u64);
+        self.total.is_some_and(|total| seen >= total)
+    }
+
+    /// Whether any filter was applied after retrieval, so `total` counts
+    /// records the filter later dropped.
+    pub fn has_post_retrieval_filter(&self) -> bool {
+        self.filters
+            .iter()
+            .any(|f| f.application == FilterApplication::PostRetrieval)
+    }
+}
+
+/// One page as a provider's `fetch_page` callback returns it to
+/// [`collect_pages`]: the works that passed any post-retrieval filter, the
+/// provider's reported total, and how many raw records the page held before
+/// filtering — paging advances by the raw count.
+pub(crate) struct RawPage {
+    pub works: Vec<CandidateWork>,
+    pub total: u64,
+    pub fetched: usize,
+}
+
+impl RawPage {
+    pub fn new(works: Vec<CandidateWork>, total: u64) -> Self {
+        let fetched = works.len();
+        RawPage {
+            works,
+            total,
+            fetched,
+        }
     }
 }
 
 /// Drives offset-based paging for a provider: calls `fetch_page(offset,
-/// page_size)` until `options.limit`, the provider's reported total, or
-/// `max_retrievable` is reached, or a page comes back short. `fetch_page`
-/// returns one page of works plus the provider's reported total.
+/// page_size)` until `options.limit` works are kept, the provider's reported
+/// total or `max_retrievable` raw records are consumed, or a page comes back
+/// short.
 ///
 /// Every request uses the same page size, so offsets stay multiples of it —
-/// which providers that page by page number (OpenAlex) rely on.
+/// which providers that page by page number (OpenAlex) rely on. With
+/// `post_filtered` set, that size is always `max_page_size`: a post-retrieval
+/// filter may keep few records per page, and small pages would then take
+/// many requests.
 pub(crate) async fn collect_pages<F, Fut>(
     options: &SearchOptions,
     max_page_size: usize,
     max_retrievable: Option<u64>,
+    post_filtered: bool,
     mut fetch_page: F,
 ) -> Result<SearchPage, ProviderError>
 where
     F: FnMut(usize, usize) -> Fut,
-    Fut: Future<Output = Result<(Vec<CandidateWork>, u64), ProviderError>>,
+    Fut: Future<Output = Result<RawPage, ProviderError>>,
 {
     let wanted = match options.limit {
         Limit::Count(n) => Some(n),
@@ -122,27 +208,28 @@ where
     if wanted == Some(0) {
         return Ok(SearchPage::new(Vec::new(), None, max_retrievable));
     }
-    let page_size = wanted.map_or(max_page_size, |n| n.min(max_page_size));
+    let page_size = match wanted {
+        Some(n) if !post_filtered => n.min(max_page_size),
+        _ => max_page_size,
+    };
 
     let mut works = Vec::new();
+    let mut consumed = 0;
     let total = loop {
-        let (page, total) = fetch_page(works.len(), page_size).await?;
-        let fetched = page.len();
-        works.extend(page);
+        let page = fetch_page(consumed, page_size).await?;
+        consumed += page.fetched;
+        works.extend(page.works);
 
-        let ceiling = [wanted.map(|n| n as u64), Some(total), max_retrievable]
-            .into_iter()
-            .flatten()
-            .min()
-            .unwrap_or(total);
-        if fetched < page_size || works.len() as u64 >= ceiling {
-            break total;
+        let raw_ceiling = max_retrievable.map_or(page.total, |max| max.min(page.total));
+        let have_enough = wanted.is_some_and(|n| works.len() >= n);
+        if page.fetched < page_size || have_enough || consumed as u64 >= raw_ceiling {
+            break page.total;
         }
     };
     if let Some(n) = wanted {
         works.truncate(n);
     }
-    Ok(SearchPage::new(works, Some(total), max_retrievable))
+    Ok(SearchPage::new(works, Some(total), max_retrievable).with_scanned(consumed as u64))
 }
 
 /// Which external metadata source a [`CandidateId`] or [`CandidateWork`] came from.
@@ -279,8 +366,8 @@ pub trait Provider {
     }
 
     /// Paged search reporting the provider's total. Default: a single
-    /// unpaged `search`, trimmed to the limit, with the total unknown — every
-    /// built-in provider overrides it with real paging.
+    /// unpaged `search`, trimmed to the limit, with the total unknown and no
+    /// filter applied — every built-in provider overrides it with real paging.
     async fn search_page(
         &self,
         query: &str,
@@ -290,7 +377,7 @@ pub trait Provider {
         if let Limit::Count(n) = options.limit {
             works.truncate(n);
         }
-        Ok(SearchPage::new(works, None, None))
+        Ok(SearchPage::new(works, None, None).with_filters(filter::none_applied(&options.filters)))
     }
 
     /// Paged counterpart of `search_by_author`. Default: falls back to
@@ -361,11 +448,12 @@ mod tests {
             &options,
             max_page_size,
             max_retrievable,
+            false,
             |offset, size| {
                 requests.push((offset, size));
                 let end = (offset + size).min(available);
                 let works = (offset.min(end)..end).map(work).collect();
-                std::future::ready(Ok((works, total)))
+                std::future::ready(Ok(RawPage::new(works, total)))
             },
         ))
         .unwrap();
@@ -416,6 +504,71 @@ mod tests {
         let (page, requests) = page_through(options, 100, None, 150, 900);
         assert_eq!(page.retrieved(), 150);
         assert_eq!(requests.len(), 2);
+    }
+
+    #[test]
+    fn collect_pages_keeps_paging_until_enough_records_pass_a_post_filter() {
+        // The fake keeps only even-numbered records, as a post-retrieval
+        // filter would; paging must advance by raw records, not kept ones.
+        let options = SearchOptions::default().with_limit(Limit::Count(50));
+        let mut requests = Vec::new();
+        let page = block_on(collect_pages(&options, 50, None, false, |offset, size| {
+            requests.push((offset, size));
+            let works: Vec<_> = (offset..offset + size)
+                .filter(|n| n % 2 == 0)
+                .map(work)
+                .collect();
+            std::future::ready(Ok(RawPage {
+                works,
+                total: 1000,
+                fetched: size,
+            }))
+        }))
+        .unwrap();
+        assert_eq!(page.retrieved(), 50);
+        assert_eq!(requests, vec![(0, 50), (50, 50)]);
+    }
+
+    #[test]
+    fn collect_pages_requests_full_pages_under_a_post_filter() {
+        let options = SearchOptions::default().with_limit(Limit::Count(10));
+        let mut requests = Vec::new();
+        let page = block_on(collect_pages(&options, 100, None, true, |offset, size| {
+            requests.push((offset, size));
+            // Only every tenth record passes the filter.
+            let works: Vec<_> = (offset..offset + size)
+                .filter(|n| n % 10 == 0)
+                .map(work)
+                .collect();
+            std::future::ready(Ok(RawPage {
+                works,
+                total: 1000,
+                fetched: size,
+            }))
+        }))
+        .unwrap();
+        assert_eq!(page.retrieved(), 10);
+        assert_eq!(page.scanned, 100);
+        assert_eq!(requests, vec![(0, 100)]);
+        assert!(!page.is_complete());
+    }
+
+    #[test]
+    fn a_post_filtered_page_is_complete_once_every_record_is_scanned() {
+        let options = SearchOptions::default().with_limit(Limit::All);
+        let page = block_on(collect_pages(&options, 100, None, true, |offset, size| {
+            let end = (offset + size).min(150);
+            let works: Vec<_> = (offset..end).filter(|n| n % 10 == 0).map(work).collect();
+            std::future::ready(Ok(RawPage {
+                works,
+                total: 150,
+                fetched: end - offset,
+            }))
+        }))
+        .unwrap();
+        assert_eq!(page.retrieved(), 15);
+        assert_eq!(page.scanned, 150);
+        assert!(page.is_complete());
     }
 
     #[test]

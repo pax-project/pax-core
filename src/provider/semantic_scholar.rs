@@ -1,8 +1,8 @@
 use ::semantic_scholar::SemanticScholar;
 
 use super::{
-    CandidateId, CandidateWork, Provider, ProviderError, ProviderId, SearchOptions, SearchPage,
-    collect_pages,
+    AppliedFilter, CandidateId, CandidateWork, DocType, FilterApplication, FilterKind, Filters,
+    Provider, ProviderError, ProviderId, RawPage, SearchOptions, SearchPage, collect_pages,
 };
 
 /// Semantic Scholar's relevance search serves at most 100 papers per request.
@@ -42,24 +42,37 @@ impl Provider for SemanticScholarProvider {
         query: &str,
         options: &SearchOptions,
     ) -> Result<SearchPage, ProviderError> {
-        collect_pages(
+        let years = options.filters.years.map(|years| years.to_string());
+        let publication_type = options.filters.doc_type.and_then(publication_type);
+        let page = collect_pages(
             options,
             MAX_PAGE_SIZE,
             Some(MAX_RETRIEVABLE),
-            |offset, limit| async move {
-                let result = self
+            false,
+            |offset, limit| {
+                let mut request = self
                     .client
                     .search_papers(query)
                     .offset(offset as u32)
-                    .limit(limit as u32)
-                    .send()
-                    .await
-                    .map_err(|e| ProviderError::Request(e.to_string()))?;
-                let works = result.data.into_iter().map(CandidateWork::from).collect();
-                Ok((works, result.total))
+                    .limit(limit as u32);
+                if let Some(years) = &years {
+                    request = request.year(years);
+                }
+                if let Some(publication_type) = publication_type {
+                    request = request.publication_types(publication_type);
+                }
+                async move {
+                    let result = request
+                        .send()
+                        .await
+                        .map_err(|e| ProviderError::Request(e.to_string()))?;
+                    let works = result.data.into_iter().map(CandidateWork::from).collect();
+                    Ok(RawPage::new(works, result.total))
+                }
             },
         )
-        .await
+        .await?;
+        Ok(page.with_filters(applied_filters(&options.filters)))
     }
 
     async fn get(&self, native_id: &str) -> Result<CandidateWork, ProviderError> {
@@ -75,6 +88,39 @@ impl Provider for SemanticScholarProvider {
     async fn get_by_doi(&self, doi: &str) -> Result<CandidateWork, ProviderError> {
         self.get(&format!("DOI:{doi}")).await
     }
+}
+
+/// Semantic Scholar's `publicationTypes` value for `doc_type`, if it has an
+/// equivalent: it has no preprint or thesis type.
+fn publication_type(doc_type: DocType) -> Option<&'static str> {
+    match doc_type {
+        DocType::JournalArticle => Some("JournalArticle"),
+        DocType::ConferencePaper => Some("Conference"),
+        DocType::Review => Some("Review"),
+        DocType::Book => Some("Book"),
+        DocType::BookChapter => Some("BookSection"),
+        DocType::Dataset => Some("Dataset"),
+        DocType::Preprint | DocType::Thesis => None,
+    }
+}
+
+/// Year and (mapped) type are filtered server-side; Semantic Scholar records
+/// carry no language, so a language filter can't be applied at all.
+fn applied_filters(filters: &Filters) -> Vec<AppliedFilter> {
+    filters
+        .kinds()
+        .into_iter()
+        .map(|kind| {
+            let application = match kind {
+                FilterKind::Year => FilterApplication::Server,
+                FilterKind::DocType if filters.doc_type.and_then(publication_type).is_some() => {
+                    FilterApplication::Server
+                }
+                _ => FilterApplication::NotApplied,
+            };
+            AppliedFilter::new(kind, application)
+        })
+        .collect()
 }
 
 impl From<::semantic_scholar::Paper> for CandidateWork {
@@ -107,6 +153,31 @@ impl From<::semantic_scholar::Paper> for CandidateWork {
 mod tests {
     use super::*;
     use ::semantic_scholar::{OpenAccessPdf, Paper};
+
+    #[test]
+    fn language_and_unmapped_types_are_not_applied() {
+        let filters = Filters::default()
+            .with_years("2020".parse().unwrap())
+            .with_doc_type(DocType::Preprint)
+            .with_language("en");
+        let applications: Vec<_> = applied_filters(&filters)
+            .into_iter()
+            .map(|f| f.application)
+            .collect();
+        assert_eq!(
+            applications,
+            [
+                FilterApplication::Server,
+                FilterApplication::NotApplied,
+                FilterApplication::NotApplied,
+            ]
+        );
+        let review = Filters::default().with_doc_type(DocType::Review);
+        assert_eq!(
+            applied_filters(&review)[0].application,
+            FilterApplication::Server
+        );
+    }
 
     fn paper(title: &str) -> Paper {
         Paper {

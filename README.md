@@ -73,6 +73,28 @@ pax open <paper>
 pax export bibtex
 ```
 
+### Search filters
+
+`pax search` (a query or `--author`) can narrow results by publication year, document type, and language:
+
+```Bash
+pax search "actor model" --year 2015-2020 --type conference-paper --lang en
+```
+
+- `--year`: `2020`, an inclusive range `2015-2020`, or an open range `2015-` / `-2020`.
+- `--type`: `journal-article`, `conference-paper`, `preprint`, `review`, `book`, `book-chapter`, `thesis`, or `dataset`.
+- `--lang`: an ISO 639-1 code, e.g. `en`.
+
+Each provider applies a filter in its own query where its API supports it, so its reported total already reflects it. Where it can't, but its records carry the field, pax filters after retrieval — the output says so, because the provider's total then counts records the filter dropped. Where a provider has no such data at all, the output says the filter wasn't applied there.
+
+| Filter | OpenAlex | Crossref | Semantic Scholar | arXiv |
+| --- | --- | --- | --- | --- |
+| year | server | server | server | server (submission date) |
+| type | server | server (no `review` type: not applied) | server (no `preprint`/`thesis` type: not applied) | every record is a preprint; any other type matches nothing |
+| language | server | after retrieval (records with no language are kept, marked `[language unknown]`) | not applied (no language data) | not applied (no language data) |
+
+Crossref records often carry no language (proceedings papers never do), so its language filter can't check them. Rather than silently dropping every conference paper, pax keeps them, marks each such row `[language unknown]`, and says under Crossref's count how many it kept that way.
+
 The project is designed to be:
 - local-first
 - reproducible

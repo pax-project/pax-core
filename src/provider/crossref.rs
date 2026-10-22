@@ -1,11 +1,16 @@
+use std::cell::RefCell;
+
 use ::crossref::query::ResultControl;
-use ::crossref::{Crossref, CrossrefQuery, WorkListQuery, WorkResultControl, Works, WorksQuery};
+use ::crossref::{
+    Crossref, CrossrefQuery, Type, WorkListQuery, WorkResultControl, Works, WorksFilter, WorksQuery,
+};
+use chrono::NaiveDate;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use super::{
-    CandidateId, CandidateWork, Provider, ProviderError, ProviderId, SearchOptions, SearchPage,
-    collect_pages,
+    AppliedFilter, CandidateId, CandidateWork, DocType, FilterApplication, FilterKind, Filters,
+    Provider, ProviderError, ProviderId, RawPage, SearchOptions, SearchPage, collect_pages,
 };
 
 /// Crossref serves at most 1,000 rows per request.
@@ -68,22 +73,54 @@ impl Provider for CrossrefProvider {
         query: &str,
         options: &SearchOptions,
     ) -> Result<SearchPage, ProviderError> {
-        collect_pages(
+        let plan = FilterPlan::new(&options.filters);
+        // Works the language filter kept without a language to check.
+        let language_unknown = RefCell::new(Vec::new());
+        let page = collect_pages(
             options,
             MAX_PAGE_SIZE,
             Some(MAX_RETRIEVABLE),
+            plan.language.is_some(),
             |offset, rows| {
-                let query = WorkListQuery::from(WorksQuery::new(query).result_control(
+                let mut works_query = WorksQuery::new(query).result_control(
                     WorkResultControl::Standard(ResultControl::RowsOffset { rows, offset }),
-                ));
+                );
+                for filter in plan.server.iter().cloned() {
+                    works_query = works_query.filter(filter);
+                }
+                let query = WorkListQuery::from(works_query);
+                let plan = &plan;
+                let language_unknown = &language_unknown;
                 async move {
                     let list: WorkList = self.fetch_message(&query).await?;
-                    let works = list.items.into_iter().map(CandidateWork::from).collect();
-                    Ok((works, list.total_results))
+                    let fetched = list.items.len();
+                    let mut works = Vec::new();
+                    for work in list.items {
+                        let verdict = plan.verdict(&work);
+                        if verdict == Verdict::Drop {
+                            continue;
+                        }
+                        let work = CandidateWork::from(work);
+                        if verdict == Verdict::KeepLanguageUnknown {
+                            language_unknown.borrow_mut().push(work.id.clone());
+                        }
+                        works.push(work);
+                    }
+                    Ok(RawPage {
+                        works,
+                        total: list.total_results,
+                        fetched,
+                    })
                 }
             },
         )
-        .await
+        .await?;
+        let mut language_unknown = language_unknown.into_inner();
+        // Paging may have truncated the last page's works.
+        language_unknown.retain(|id| page.works.iter().any(|work| &work.id == id));
+        Ok(page
+            .with_filters(plan.applied)
+            .with_language_unknown(language_unknown))
     }
 
     async fn get(&self, native_id: &str) -> Result<CandidateWork, ProviderError> {
@@ -104,6 +141,91 @@ impl Provider for CrossrefProvider {
     async fn get_by_doi(&self, doi: &str) -> Result<CandidateWork, ProviderError> {
         self.get(doi).await
     }
+}
+
+/// How Crossref applies a search's filters: year and type server-side,
+/// language after retrieval (Crossref has no language filter, but records
+/// carry a `language` field).
+struct FilterPlan {
+    server: Vec<WorksFilter>,
+    language: Option<String>,
+    applied: Vec<AppliedFilter>,
+}
+
+impl FilterPlan {
+    fn new(filters: &Filters) -> Self {
+        let mut plan = FilterPlan {
+            server: Vec::new(),
+            language: None,
+            applied: Vec::new(),
+        };
+        if let Some(years) = filters.years {
+            if let Some(from) = years.from.and_then(|y| NaiveDate::from_ymd_opt(y, 1, 1)) {
+                plan.server.push(WorksFilter::FromPubDate(from));
+            }
+            if let Some(to) = years.to.and_then(|y| NaiveDate::from_ymd_opt(y, 12, 31)) {
+                plan.server.push(WorksFilter::UntilPubDate(to));
+            }
+            plan.applied.push(AppliedFilter::new(
+                FilterKind::Year,
+                FilterApplication::Server,
+            ));
+        }
+        if let Some(doc_type) = filters.doc_type {
+            // Repeated `type` filters are OR'd by Crossref.
+            let types: &[Type] = match doc_type {
+                DocType::JournalArticle => &[Type::JournalArticle],
+                DocType::ConferencePaper => &[Type::ProceedingsArticle],
+                DocType::Preprint => &[Type::PostedContent],
+                DocType::Book => &[Type::Book, Type::Monograph, Type::EditedBook],
+                DocType::BookChapter => &[Type::BookChapter],
+                DocType::Thesis => &[Type::Dissertation],
+                DocType::Dataset => &[Type::Dataset],
+                // Crossref has no review type.
+                DocType::Review => &[],
+            };
+            plan.server
+                .extend(types.iter().cloned().map(WorksFilter::Type));
+            let application = if types.is_empty() {
+                FilterApplication::NotApplied
+            } else {
+                FilterApplication::Server
+            };
+            plan.applied
+                .push(AppliedFilter::new(FilterKind::DocType, application));
+        }
+        if let Some(language) = &filters.language {
+            plan.language = Some(language.clone());
+            plan.applied.push(AppliedFilter::new(
+                FilterKind::Language,
+                FilterApplication::PostRetrieval,
+            ));
+        }
+        plan
+    }
+
+    /// Whether `work` passes the post-retrieval filters. A record with no
+    /// `language` is kept but marked: proceedings papers never carry one, so
+    /// dropping them would silently exclude every conference paper.
+    fn verdict(&self, work: &Work) -> Verdict {
+        let Some(wanted) = &self.language else {
+            return Verdict::Keep;
+        };
+        match work.language.as_deref() {
+            None => Verdict::KeepLanguageUnknown,
+            Some(language) if language.eq_ignore_ascii_case(wanted) => Verdict::Keep,
+            Some(_) => Verdict::Drop,
+        }
+    }
+}
+
+/// What the post-retrieval filters make of one record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Keep,
+    /// Kept, though the record has no language to check the filter against.
+    KeepLanguageUnknown,
+    Drop,
 }
 
 /// Parses a Crossref response body into its `message`. Crossref answers an
@@ -146,6 +268,7 @@ struct Work {
     container_title: Vec<String>,
     #[serde(rename = "abstract")]
     abstract_text: Option<String>,
+    language: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -266,6 +389,62 @@ mod tests {
         let body = r#"{"status": "ok", "message-type": "work", "message": {"DOI": "10.1/x"}}"#;
         let work: Work = parse_message(body).unwrap();
         assert_eq!(CandidateWork::from(work).id.native_id, "10.1/x");
+    }
+
+    #[test]
+    fn language_is_filtered_after_retrieval_and_review_is_not_applied() {
+        let plan = FilterPlan::new(
+            &Filters::default()
+                .with_doc_type(DocType::Review)
+                .with_language("en"),
+        );
+        assert!(plan.server.is_empty());
+        assert_eq!(
+            plan.applied,
+            [
+                AppliedFilter::new(FilterKind::DocType, FilterApplication::NotApplied),
+                AppliedFilter::new(FilterKind::Language, FilterApplication::PostRetrieval),
+            ]
+        );
+        let english = Work {
+            language: Some("EN".to_string()),
+            ..Work::default()
+        };
+        assert_eq!(plan.verdict(&english), Verdict::Keep);
+        let french = Work {
+            language: Some("fr".to_string()),
+            ..Work::default()
+        };
+        assert_eq!(plan.verdict(&french), Verdict::Drop);
+        assert_eq!(
+            plan.verdict(&Work::default()),
+            Verdict::KeepLanguageUnknown,
+            "a record with no language is kept, marked unknown"
+        );
+    }
+
+    #[test]
+    fn year_and_type_are_server_side() {
+        let plan = FilterPlan::new(
+            &Filters::default()
+                .with_years("2015-2020".parse().unwrap())
+                .with_doc_type(DocType::Book),
+        );
+        assert_eq!(
+            plan.server.len(),
+            2 + 3,
+            "two date bounds, three book types"
+        );
+        assert!(
+            plan.applied
+                .iter()
+                .all(|f| f.application == FilterApplication::Server)
+        );
+        assert_eq!(
+            plan.verdict(&Work::default()),
+            Verdict::Keep,
+            "no post-retrieval filter"
+        );
     }
 
     #[test]

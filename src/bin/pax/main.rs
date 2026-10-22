@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use clap::{Parser, Subcommand};
-use pax_core::{CandidateId, Limit, ProviderId, SearchOptions};
+use pax_core::{CandidateId, DocType, Filters, Limit, ProviderId, SearchOptions, YearRange};
 
 mod sink;
 use sink::{Sink, TextSink};
@@ -29,6 +29,16 @@ enum Command {
         /// Retrieve every result each provider serves (can be slow)
         #[arg(long)]
         all: bool,
+        /// Publication year: YYYY, or an inclusive range YYYY-YYYY, YYYY- or -YYYY
+        #[arg(long, allow_hyphen_values = true)]
+        year: Option<YearRange>,
+        /// Document type: journal-article, conference-paper, preprint, review,
+        /// book, book-chapter, thesis, or dataset
+        #[arg(long = "type")]
+        doc_type: Option<DocType>,
+        /// Language, as an ISO 639-1 code (e.g. en)
+        #[arg(long)]
+        lang: Option<String>,
     },
     ///Inspect a search result before adding it
     Show {
@@ -155,6 +165,9 @@ async fn main() {
             local,
             limit,
             all,
+            year,
+            doc_type,
+            lang,
         } => {
             let modes = [
                 query.is_some(),
@@ -166,8 +179,12 @@ async fn main() {
                 sink.error("specify exactly one of QUERY, --author, --doi, or --local");
                 return;
             }
-            if (limit.is_some() || all) && (doi.is_some() || local.is_some()) {
-                sink.error("--limit and --all only apply to QUERY and --author searches");
+            let paged_only =
+                limit.is_some() || all || year.is_some() || doc_type.is_some() || lang.is_some();
+            if paged_only && (doi.is_some() || local.is_some()) {
+                sink.error(
+                    "--limit, --all, --year, --type, and --lang only apply to QUERY and --author searches",
+                );
                 return;
             }
 
@@ -207,6 +224,17 @@ async fn main() {
                 (false, Some(n)) => Limit::Count(n),
                 (false, None) => SearchOptions::default().limit,
             });
+            let mut filters = Filters::default();
+            if let Some(year) = year {
+                filters = filters.with_years(year);
+            }
+            if let Some(doc_type) = doc_type {
+                filters = filters.with_doc_type(doc_type);
+            }
+            if let Some(lang) = lang {
+                filters = filters.with_language(lang);
+            }
+            let options = options.with_filters(filters);
             let results = if let Some(author) = &author {
                 pax_core::search_by_author_paged(author, &options, &config).await
             } else {
@@ -215,10 +243,7 @@ async fn main() {
             };
             for provider in ALL_PROVIDERS {
                 match results.get(&provider) {
-                    Some(Ok(page)) => {
-                        sink.page_header(provider, page);
-                        sink.candidates(&page.works, &known_dois);
-                    }
+                    Some(Ok(page)) => sink.page(provider, page, &known_dois),
                     Some(Err(e)) => {
                         sink.provider_header(provider);
                         sink.error(&e.to_string());

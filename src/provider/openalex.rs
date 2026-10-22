@@ -1,8 +1,8 @@
 use papers_openalex::{GetParams, ListParams, OpenAlexClient};
 
 use super::{
-    CandidateId, CandidateWork, Provider, ProviderError, ProviderId, SearchOptions, SearchPage,
-    collect_pages,
+    AppliedFilter, CandidateId, CandidateWork, DocType, FilterApplication, Filters, Provider,
+    ProviderError, ProviderId, RawPage, SearchOptions, SearchPage, collect_pages,
 };
 
 /// OpenAlex serves at most 200 works per page.
@@ -24,16 +24,22 @@ impl OpenAlexProvider {
     }
 
     /// Pages through `list_works` for `params` (a search or filter with no
-    /// paging set yet).
+    /// paging set yet), adding `options.filters` to its `filter` expression.
+    /// OpenAlex filters on every supported criterion server-side.
     async fn list_works_page(
         &self,
-        params: ListParams,
+        mut params: ListParams,
         options: &SearchOptions,
     ) -> Result<SearchPage, ProviderError> {
-        collect_pages(
+        let mut clauses: Vec<String> = params.filter.take().into_iter().collect();
+        clauses.extend(filter_clauses(&options.filters));
+        params.filter = (!clauses.is_empty()).then(|| clauses.join(","));
+
+        let page = collect_pages(
             options,
             MAX_PAGE_SIZE,
             Some(MAX_RETRIEVABLE),
+            false,
             |offset, size| {
                 let mut params = params.clone();
                 params.per_page = Some(size as u32);
@@ -50,12 +56,53 @@ impl OpenAlexProvider {
                         .into_iter()
                         .map(CandidateWork::from)
                         .collect();
-                    Ok((works, total))
+                    Ok(RawPage::new(works, total))
                 }
             },
         )
-        .await
+        .await?;
+        let applied = options
+            .filters
+            .kinds()
+            .into_iter()
+            .map(|kind| AppliedFilter::new(kind, FilterApplication::Server))
+            .collect();
+        Ok(page.with_filters(applied))
     }
+}
+
+/// OpenAlex `filter` clauses for `filters`. A journal article and a
+/// conference paper are both `type:article` in OpenAlex; the venue's source
+/// type tells them apart.
+fn filter_clauses(filters: &Filters) -> Vec<String> {
+    let mut clauses = Vec::new();
+    if let Some(years) = filters.years {
+        if let Some(from) = years.from {
+            clauses.push(format!("from_publication_date:{from}-01-01"));
+        }
+        if let Some(to) = years.to {
+            clauses.push(format!("to_publication_date:{to}-12-31"));
+        }
+    }
+    if let Some(doc_type) = filters.doc_type {
+        clauses.push(
+            match doc_type {
+                DocType::JournalArticle => "type:article,primary_location.source.type:journal",
+                DocType::ConferencePaper => "type:article,primary_location.source.type:conference",
+                DocType::Preprint => "type:preprint",
+                DocType::Review => "type:review",
+                DocType::Book => "type:book",
+                DocType::BookChapter => "type:book-chapter",
+                DocType::Thesis => "type:dissertation",
+                DocType::Dataset => "type:dataset",
+            }
+            .to_string(),
+        );
+    }
+    if let Some(language) = &filters.language {
+        clauses.push(format!("language:{language}"));
+    }
+    clauses
 }
 
 impl Default for OpenAlexProvider {
@@ -172,5 +219,22 @@ mod tests {
         assert_eq!(candidate.title, "");
         assert_eq!(candidate.publish_date, "");
         assert!(candidate.authors.is_empty());
+    }
+
+    #[test]
+    fn filters_become_openalex_filter_clauses() {
+        let filters = Filters::default()
+            .with_years("2015-".parse().unwrap())
+            .with_doc_type(DocType::ConferencePaper)
+            .with_language("EN");
+        assert_eq!(
+            filter_clauses(&filters),
+            [
+                "from_publication_date:2015-01-01",
+                "type:article,primary_location.source.type:conference",
+                "language:en",
+            ]
+        );
+        assert!(filter_clauses(&Filters::default()).is_empty());
     }
 }
