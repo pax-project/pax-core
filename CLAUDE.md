@@ -23,7 +23,7 @@ Secrets/config load via `dotenvy` from `.env` at startup, but only in the `pax` 
 
 ```bash
 cargo build                        # builds the library + the pax binary (cli is a default feature)
-cargo build --no-default-features  # builds pax-core alone — proves the CLI deps (clap, dotenvy, tokio) aren't pulled in
+cargo build --no-default-features  # builds pax-core alone — proves the CLI deps (clap, dotenvy, tokio's runtime) aren't pulled in
 cargo run --bin pax -- <args>      # e.g. cargo run --bin pax -- search "actor model"
 cargo test                         # unit tests (library.rs round-trip, provider CandidateId parsing)
 cargo test <substring>             # run a single test, e.g. cargo test candidate_id_rejects_bare_doi
@@ -36,8 +36,10 @@ cargo clippy                       # lint
 ```
 src/
   lib.rs          # pax-core's public API: re-exports + search_all()
+  citations.rs    # references()/cited_by(): resolve a seed per provider, page its citation lists
   provider/       # Provider trait, ProviderId, CandidateId, CandidateWork, ProviderError
-    mod.rs        #   + the four provider implementations, one file each
+    mod.rs        #   + the four provider implementations, one file each; collect_pages() drives paging
+    filter.rs     # Filters (year/type/language) and AppliedFilter: how each provider applied each one
   paper.rs        # Paper, Identity, Artifact, Local, PaperRef (citation key)
   library.rs      # Library::load()/save() against research/papers.nix
   nix.rs          # init_library(): scaffolds research/flake.nix + research/papers.nix from templates/
@@ -59,6 +61,8 @@ src/
 **`Provider` trait** (`provider/mod.rs`) — `fn id()`, `async fn search(query)`, `async fn get(native_id)`. One implementation per provider module (`openalex.rs`, `crossref.rs`, `semantic_scholar.rs`, `arxiv.rs`), each also providing `From<ProviderNativeType> for CandidateWork`. `get()` is implemented for all four today (`OpenAlexClient::get_work`, Crossref `/works/{doi}`, `SemanticScholar::get_paper`, arXiv `fetch_page` by id). Crossref is the exception to "one crate per provider": the `crossref` crate builds URLs and supplies the HTTP client, but `crossref.rs` parses responses into its own lenient types, because the crate's `Work` requires fields (e.g. `title`) that real records omit.
 
 **`pax::search_all(query)`** fans out to all four providers concurrently-in-sequence (awaited one after another, not via `join!`) and returns `HashMap<ProviderId, Result<Vec<CandidateWork>, ProviderError>>` — a failing provider doesn't fail the whole search, and the *caller* (the CLI) decides how to display an error, since the library itself never prints.
+
+**Citation graph** (`citations.rs`) — `references(seed, …)` / `cited_by(seed, …)` return the same per-provider `HashMap<ProviderId, Result<SearchPage, CitationError>>` shape as `search_all_paged`, for OpenAlex and Semantic Scholar only (`CITATION_PROVIDERS`). The seed accepts both address spaces: a `CandidateId` from any provider, or a `PaperRef` citation key (told apart by the colon, as in `show_reference`). `SeedIds` resolves it to each provider's lookup key — its own id if the seed came from it, else `doi:`/`DOI:` (a `CandidateId` seed is fetched from its own provider to learn the DOI), else the arXiv id (from an arXiv seed, an arXiv DOI, or a library paper's arxiv.org `source_url`) — and a provider it can't be resolved in or found in gets a `CitationError` while the other still answers. The lists are the provider-level `OpenAlexProvider::references_page`/`citations_page` (`cited_by:`/`cites:` work filters, so search filters apply server-side) and `SemanticScholarProvider::references_page`/`citations_page`. The latter fetch the list endpoints with their own `reqwest` client and lenient types rather than the `semantic_scholar` crate, whose `Paper` requires a `paperId` that unmatched references lack; their total is the seed's `referenceCount`/`citationCount`, and year/type filters run after retrieval. Lists stay per provider — merging duplicates across providers and the "excluded" flag are separate issues (#20, #21).
 
 **`Library`** (`library.rs`) — `research/papers.nix` is Nix syntax, but it's a schema PAX itself invented and fully controls (a flat attrset of `citation_key = { ...fields... };` records; `research/flake.nix` only ever reads `source_url`/`hash` off each entry generically via `builtins.mapAttrs`, so extra fields are harmless to it). `Library::load`/`save` are a small hand-rolled tokenizer/parser and writer scoped to exactly that fixed shape — deliberately not a general Nix-language parser (no `rnix-parser` or similar dependency). `research/papers.nix` is the single source of truth; nothing else shadows it. `add`/`edit`/`remove` all mutate a `Library` today; round-trip correctness is proven by a unit test in `library.rs`.
 
