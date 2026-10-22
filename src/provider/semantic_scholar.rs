@@ -411,10 +411,19 @@ impl From<::semantic_scholar::Paper> for CandidateWork {
                 .collect(),
             publish_date: value.publication_date.unwrap_or_default(),
             doi: value.external_ids.as_ref().and_then(|ids| ids.doi.clone()),
+            // An arXiv id always has a PDF behind it; `openAccessPdf` is
+            // sometimes a repository landing page instead.
             pdf_url: value
-                .open_access_pdf
+                .external_ids
                 .as_ref()
-                .and_then(|pdf| pdf.url.clone()),
+                .and_then(|ids| ids.arxiv.as_deref())
+                .map(|arxiv| format!("https://arxiv.org/pdf/{arxiv}"))
+                .or_else(|| {
+                    value
+                        .open_access_pdf
+                        .as_ref()
+                        .and_then(|pdf| pdf.url.clone())
+                }),
             venue: value.venue,
             abstract_text: value.abstract_text,
         }
@@ -424,7 +433,7 @@ impl From<::semantic_scholar::Paper> for CandidateWork {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ::semantic_scholar::{OpenAccessPdf, Paper};
+    use ::semantic_scholar::{ExternalIds, OpenAccessPdf, Paper};
 
     #[test]
     fn language_and_unmapped_types_are_not_applied() {
@@ -544,6 +553,51 @@ mod tests {
             work.pdf_url.as_deref(),
             Some("https://example.org/turing.pdf")
         );
+    }
+
+    #[test]
+    fn an_arxiv_id_gives_an_arxiv_pdf_over_open_access_pdf() {
+        // ResNet's openAccessPdf is a repository landing page.
+        let resnet: Paper = serde_json::from_str(
+            r#"{
+                "paperId": "2c03df8b48bf3fa39054345bafabfeff15bfd11d",
+                "title": "Deep Residual Learning for Image Recognition",
+                "externalIds": {"DOI": "10.1109/CVPR.2016.90", "ArXiv": "1512.03385"},
+                "openAccessPdf": {
+                    "url": "https://repositorio.unal.edu.co/handle/unal/81443",
+                    "status": "GREEN"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            CandidateWork::from(resnet).pdf_url.as_deref(),
+            Some("https://arxiv.org/pdf/1512.03385")
+        );
+    }
+
+    #[test]
+    fn without_an_arxiv_id_pdf_url_stays_open_access_pdf() {
+        let mut p = paper("Communicating Sequential Processes");
+        p.external_ids = Some(ExternalIds {
+            doi: Some("10.1145/359576.359585".to_string()),
+            ..Default::default()
+        });
+        p.open_access_pdf = Some(OpenAccessPdf {
+            url: Some("https://example.org/csp.pdf".to_string()),
+            status: None,
+        });
+        assert_eq!(
+            CandidateWork::from(p).pdf_url.as_deref(),
+            Some("https://example.org/csp.pdf")
+        );
+    }
+
+    #[test]
+    fn every_request_asks_for_external_ids() {
+        // Search, lookup and the citation lists all request PAPER_FIELDS;
+        // without externalIds there's no DOI and no arXiv PDF.
+        assert!(PAPER_FIELDS.split(',').any(|field| field == "externalIds"));
     }
 
     #[test]
