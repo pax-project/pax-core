@@ -26,6 +26,22 @@ enum Command {
         #[command(flatten)]
         paging: PageArgs,
     },
+    ///List the papers a paper cites, from OpenAlex and Semantic Scholar
+    Refs {
+        /// A reference from `search` (e.g. openalex:W2072794470) or a
+        /// library citation key (e.g. turing1936)
+        reference: String,
+        #[command(flatten)]
+        paging: PageArgs,
+    },
+    ///List the papers citing a paper, from OpenAlex and Semantic Scholar
+    CitedBy {
+        /// A reference from `search` (e.g. openalex:W2072794470) or a
+        /// library citation key (e.g. turing1936)
+        reference: String,
+        #[command(flatten)]
+        paging: PageArgs,
+    },
     ///Inspect a search result before adding it
     Show {
         /// A fully-qualified reference from `search`, e.g. openalex:W2072794470
@@ -181,6 +197,32 @@ fn open_in_viewer(sink: &mut impl Sink, path: &Path) {
     }
 }
 
+/// Prints each citation provider's list, the way `search` prints each
+/// provider's results.
+fn show_citations(
+    sink: &mut impl Sink,
+    results: Result<pax_core::CitationResults, pax_core::PaxError>,
+) {
+    let results = match results {
+        Ok(results) => results,
+        Err(e) => {
+            sink.error(&e.to_string());
+            return;
+        }
+    };
+    let known_dois = pax_core::known_dois(Path::new("."));
+    for provider in pax_core::CITATION_PROVIDERS {
+        match results.get(&provider) {
+            Some(Ok(page)) => sink.page(provider, page, &known_dois),
+            Some(Err(e)) => {
+                sink.provider_header(provider);
+                sink.error(&e.to_string());
+            }
+            None => {}
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
@@ -268,6 +310,16 @@ async fn main() {
                     None => {}
                 }
             }
+        }
+        Command::Refs { reference, paging } => {
+            let options = paging.options();
+            let results = pax_core::references(&reference, &options, Path::new("."), &config).await;
+            show_citations(&mut sink, results);
+        }
+        Command::CitedBy { reference, paging } => {
+            let options = paging.options();
+            let results = pax_core::cited_by(&reference, &options, Path::new("."), &config).await;
+            show_citations(&mut sink, results);
         }
         Command::Show { reference } => {
             match pax_core::show_reference(&reference, Path::new("."), &config).await {
