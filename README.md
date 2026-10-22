@@ -91,7 +91,9 @@ Each provider applies a filter in its own query where its API supports it, so it
 | --- | --- | --- | --- | --- |
 | year | server | server | server | server (submission date) |
 | type | server | server (no `review` type: not applied) | server (no `preprint`/`thesis` type: not applied) | every record is a preprint; any other type matches nothing |
-| language | server | after retrieval (records with no language are dropped) | not applied (no language data) | not applied (no language data) |
+| language | server | after retrieval (records with no language are kept, marked `[language unknown]`) | not applied (no language data) | not applied (no language data) |
+
+Crossref records often carry no language (proceedings papers never do), so its language filter can't check them. Rather than silently dropping every conference paper, pax keeps them, marks each such row `[language unknown]`, and says under Crossref's count how many it kept that way.
 
 The project is designed to be:
 - local-first
