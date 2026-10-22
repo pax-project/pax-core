@@ -23,8 +23,10 @@ pub use nix::init_library;
 use paper::year_from_publish_date;
 pub use paper::{Artifact, Identity, Local, Paper, PaperRef};
 pub use provider::{
-    ArxivProvider, CandidateId, CandidateWork, CrossrefProvider, Limit, OpenAlexProvider, Provider,
-    ProviderError, ProviderId, SearchOptions, SearchPage, SemanticScholarProvider,
+    AppliedFilter, ArxivProvider, CandidateId, CandidateWork, CrossrefProvider, DocType,
+    FilterApplication, FilterKind, Filters, Limit, OpenAlexProvider, Provider, ProviderError,
+    ProviderId, SearchOptions, SearchPage, SemanticScholarProvider, UnknownDocType, YearRange,
+    YearRangeParseError,
 };
 
 /// Per-installation settings a caller (e.g. the CLI, reading `.env`) supplies
