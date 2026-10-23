@@ -11,6 +11,10 @@ pub enum PaxError {
     Io(#[from] std::io::Error),
     #[error("failed to parse library: {0}")]
     LibraryParse(String),
+    /// A line of `research/search-log.jsonl` that isn't a log entry pax can
+    /// read, numbered from 1.
+    #[error("failed to parse research/search-log.jsonl, line {line}: {message}")]
+    SearchLogParse { line: usize, message: String },
     #[error(transparent)]
     InvalidReference(#[from] CandidateIdParseError),
     #[error("no paper found for {0:?}: not declared locally, and not a valid candidate reference")]

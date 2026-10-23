@@ -52,6 +52,24 @@ impl fmt::Display for IdentityKey {
     }
 }
 
+/// Reads a key back from its text form ([`IdentityKey`]'s `Display`), e.g.
+/// from a search log. `None` for text no key displays as.
+pub(crate) fn parse_identity_key(text: &str) -> Option<IdentityKey> {
+    if let Some(doi) = text.strip_prefix("doi:") {
+        return (!doi.is_empty()).then(|| IdentityKey::Doi(doi.to_string()));
+    }
+    if let Some(id) = text.strip_prefix("arxiv:") {
+        return (!id.is_empty()).then(|| IdentityKey::Arxiv(id.to_string()));
+    }
+    // A normalized title has no `|`, so the last one separates the year.
+    let (title, year) = text.strip_prefix("title:")?.rsplit_once('|')?;
+    let year = year.parse().ok()?;
+    (!title.is_empty()).then(|| IdentityKey::TitleYear {
+        title: title.to_string(),
+        year,
+    })
+}
+
 /// Every identity key `work` has, strongest first (DOI, arXiv id,
 /// title+year). Empty when the record has none — it can't be matched.
 pub fn identity_keys(work: &CandidateWork) -> Vec<IdentityKey> {
@@ -554,6 +572,31 @@ mod tests {
         let a = work(ProviderId::OpenAlex, "W1", "", "", None);
         let b = work(ProviderId::OpenAlex, "W2", "", "", None);
         assert_eq!(groups(&[a, b]), vec![0, 1]);
+    }
+
+    #[test]
+    fn keys_parse_back_from_their_text_form() {
+        let keys = [
+            IdentityKey::Doi("10.1/a".into()),
+            IdentityKey::Arxiv("hep-th/9901001".into()),
+            IdentityKey::TitleYear {
+                title: "attention is all you need".into(),
+                year: 2017,
+            },
+        ];
+        for key in keys {
+            assert_eq!(parse_identity_key(&key.to_string()), Some(key));
+        }
+        for bad in [
+            "",
+            "doi:",
+            "isbn:123",
+            "title:x",
+            "title:x|y",
+            "title:|2017",
+        ] {
+            assert_eq!(parse_identity_key(bad), None, "{bad}");
+        }
     }
 
     #[test]

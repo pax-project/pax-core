@@ -19,6 +19,7 @@ pub mod paper;
 mod process;
 pub mod provider;
 pub mod search_log;
+pub mod stats;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -49,6 +50,7 @@ pub use search_log::{
     LogOutcome, Logged, SearchCommand, SearchLog, SearchLogEntry, cited_by_logged, log_results,
     references_logged, search_all_logged, search_by_author_logged,
 };
+pub use stats::{FullTextExclusions, Identified, ReasonCount, Stats, stats};
 
 /// Per-installation settings a caller (e.g. the CLI, reading `.env`) supplies
 /// so `pax-core` never reads the environment itself. Both fields are
