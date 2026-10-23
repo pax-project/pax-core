@@ -303,3 +303,147 @@ fn a_search_outside_a_library_notes_it_isnt_logged() {
     );
     assert!(!dir.join("research").exists());
 }
+
+/// A library with `lamport1978` declared, a search log of four lines (one
+/// failed) and an excluded.nix.
+fn library_with_history(name: &str) -> PathBuf {
+    let dir = library(name);
+    let line = |command: &str, provider: &str, outcome: &str| {
+        format!(
+            r#"{{"v":1,"command":"{command}","query":"q","provider":"{provider}","date":"2026-01-01T00:00:00Z","limit":50,"filters":[],"total":null,{outcome},"merge":{{"before":0,"after":0,"unmatched":0}}}}"#
+        )
+    };
+    let log = [
+        line(
+            "search",
+            "openalex",
+            r#""retrieved":2,"keys":[["doi:10.1/a","title:a|2000"],["doi:10.1/b"]]"#,
+        ),
+        line(
+            "search",
+            "arxiv",
+            r#""retrieved":1,"keys":[["arxiv:2001.00001","title:a|2000"]]"#,
+        ),
+        line("search", "semanticscholar", r#""error":"rate limited""#),
+        line(
+            "cited-by",
+            "openalex",
+            r#""retrieved":2,"keys":[["doi:10.1/b"],["doi:10.1/c"]]"#,
+        ),
+    ];
+    fs::write(
+        dir.join("research").join("search-log.jsonl"),
+        log.join("\n") + "\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("research").join("excluded.nix"),
+        r#"{
+  "10.1/c" = { title = "C"; reason = "off topic"; stage = "screening"; };
+  "10.1/b" = { title = "B"; reason = "not empirical"; stage = "full-text"; };
+}
+"#,
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn stats_prints_the_prisma_counts() {
+    let dir = library_with_history("stats");
+    let output = pax(&dir, &["stats"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "\
+Identification
+  Records identified from databases           3
+    arxiv                                     1
+    openalex                                  2
+  Records identified from citation searching  2
+    openalex                                  2
+  Duplicate records removed                   2
+Screening
+  Records screened                            3
+  Records excluded                            1
+  Reports not retrieved                       1
+  Reports excluded                            1
+    not empirical                             1
+Included
+  Studies included in review                  1
+"
+    );
+    assert_eq!(
+        stderr(&output),
+        "Warning: skipped 1 search-log line(s) whose provider failed, so retrieved no records\n"
+    );
+}
+
+#[test]
+fn stats_json_is_one_object_for_scripts() {
+    let dir = library_with_history("stats-json");
+    let output = pax(&dir, &["stats", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).is_empty());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "identified": {
+                "databases": { "arxiv": 1, "openalex": 2 },
+                "citation_searching": { "openalex": 2 },
+                "total": 5
+            },
+            "duplicates_removed": 2,
+            "records_screened": 3,
+            "excluded_screening": 1,
+            "excluded_full_text": {
+                "total": 1,
+                "reasons": [{ "reason": "not empirical", "count": 1 }]
+            },
+            "not_retrieved": 1,
+            "included": 1,
+            "skipped_log_lines": 1
+        })
+    );
+}
+
+#[test]
+fn stats_on_a_fresh_library_is_zeros() {
+    let dir = scratch("stats-fresh");
+    assert_eq!(pax(&dir, &["init"]).status.code(), Some(0));
+    let output = pax(&dir, &["stats", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["identified"]["total"], 0);
+    assert_eq!(json["included"], 0);
+}
+
+#[test]
+fn stats_outside_a_library_exits_7() {
+    let dir = scratch("stats-no-library");
+    for args in [&["stats"][..], &["stats", "--json"]] {
+        let output = pax(&dir, args);
+        assert_eq!(output.status.code(), Some(7), "pax {args:?}");
+        assert!(stdout(&output).is_empty());
+        assert_eq!(stderr(&output).trim_end(), NO_LIBRARY);
+    }
+}
+
+#[test]
+fn stats_names_a_malformed_log_line() {
+    let dir = library("stats-malformed");
+    fs::write(
+        dir.join("research").join("search-log.jsonl"),
+        "\n{\"v\":1,\n",
+    )
+    .unwrap();
+    let output = pax(&dir, &["stats"]);
+    assert_eq!(output.status.code(), Some(7));
+    assert!(stdout(&output).is_empty());
+    assert!(
+        stderr(&output).starts_with("Error: failed to parse research/search-log.jsonl, line 2:"),
+        "{}",
+        stderr(&output)
+    );
+}

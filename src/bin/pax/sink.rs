@@ -8,7 +8,7 @@
 
 use pax_core::{
     CandidateWork, CheckReport, CheckStatus, FetchOutcome, FilterApplication, LibraryIndex,
-    MergeReport, Paper, ProviderId, SearchPage,
+    MergeReport, Paper, ProviderId, SearchPage, Stats,
 };
 
 pub trait Sink {
@@ -42,6 +42,10 @@ pub trait Sink {
     fn export(&mut self, bibtex: &str);
     fn fetched(&mut self, citation_key: &str, outcome: &FetchOutcome);
     fn checked(&mut self, reports: &[CheckReport]);
+    /// The PRISMA flow-diagram counts, aligned under the box names.
+    fn stats(&mut self, stats: &Stats);
+    /// The PRISMA flow-diagram counts as one JSON object.
+    fn stats_json(&mut self, stats: &Stats);
 }
 
 pub struct TextSink;
@@ -265,6 +269,25 @@ impl Sink for TextSink {
             reports.len()
         );
     }
+
+    fn stats(&mut self, stats: &Stats) {
+        for line in stats_lines(stats) {
+            println!("{line}");
+        }
+        if stats.skipped_log_lines > 0 {
+            self.warning(&format!(
+                "skipped {} search-log line(s) whose provider failed, so retrieved no records",
+                stats.skipped_log_lines
+            ));
+        }
+    }
+
+    fn stats_json(&mut self, stats: &Stats) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(stats).expect("Stats serializes")
+        );
+    }
 }
 
 /// The marks after a row's title.
@@ -309,4 +332,100 @@ fn print_work(work: &CandidateWork, ids: &str, marks: &Marks) {
         "\t\tPDF: {}",
         if work.pdf_url.is_some() { "✓" } else { "✗" }
     );
+}
+
+/// The PRISMA 2020 flow-diagram boxes, one per line: a phase heading, then
+/// each box's label with its count, the counts right-aligned in one column.
+/// Per-provider and per-reason breakdowns are indented under their box.
+fn stats_lines(stats: &Stats) -> Vec<String> {
+    enum Row<'a> {
+        Phase(&'a str),
+        Count(usize, String, usize),
+    }
+    let mut rows = Vec::new();
+    let by_provider =
+        |rows: &mut Vec<Row>, providers: &std::collections::BTreeMap<String, usize>| {
+            for (provider, count) in providers {
+                rows.push(Row::Count(2, provider.clone(), *count));
+            }
+        };
+    rows.push(Row::Phase("Identification"));
+    rows.push(Row::Count(
+        1,
+        "Records identified from databases".into(),
+        stats.identified.databases.values().sum(),
+    ));
+    by_provider(&mut rows, &stats.identified.databases);
+    rows.push(Row::Count(
+        1,
+        "Records identified from citation searching".into(),
+        stats.identified.citation_searching.values().sum(),
+    ));
+    by_provider(&mut rows, &stats.identified.citation_searching);
+    rows.push(Row::Count(
+        1,
+        "Duplicate records removed".into(),
+        stats.duplicates_removed,
+    ));
+    rows.push(Row::Phase("Screening"));
+    rows.push(Row::Count(
+        1,
+        "Records screened".into(),
+        stats.records_screened,
+    ));
+    rows.push(Row::Count(
+        1,
+        "Records excluded".into(),
+        stats.excluded_screening,
+    ));
+    rows.push(Row::Count(
+        1,
+        "Reports not retrieved".into(),
+        stats.not_retrieved,
+    ));
+    rows.push(Row::Count(
+        1,
+        "Reports excluded".into(),
+        stats.excluded_full_text.total,
+    ));
+    for reason in &stats.excluded_full_text.reasons {
+        rows.push(Row::Count(2, reason.reason.clone(), reason.count));
+    }
+    rows.push(Row::Phase("Included"));
+    rows.push(Row::Count(
+        1,
+        "Studies included in review".into(),
+        stats.included,
+    ));
+
+    let label_width = |indent: usize, label: &str| 2 * indent + label.chars().count();
+    let width = rows
+        .iter()
+        .filter_map(|row| match row {
+            Row::Count(indent, label, _) => Some(label_width(*indent, label)),
+            Row::Phase(_) => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let digits = rows
+        .iter()
+        .filter_map(|row| match row {
+            Row::Count(_, _, count) => Some(count.to_string().len()),
+            Row::Phase(_) => None,
+        })
+        .max()
+        .unwrap_or(1);
+    rows.into_iter()
+        .map(|row| match row {
+            Row::Phase(phase) => phase.to_string(),
+            Row::Count(indent, label, count) => {
+                let pad = width - label_width(indent, &label);
+                format!(
+                    "{}{label}{}  {count:>digits$}",
+                    "  ".repeat(indent),
+                    " ".repeat(pad)
+                )
+            }
+        })
+        .collect()
 }

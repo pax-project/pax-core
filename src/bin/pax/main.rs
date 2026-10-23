@@ -141,6 +141,18 @@ enum Command {
     },
     ///Materialize every declared paper that isn't fetched yet
     Sync,
+    ///Print the review's PRISMA 2020 flow-diagram counts
+    ///
+    ///Computed from research/search-log.jsonl, research/excluded.nix and
+    ///research/papers.nix; a missing log or excluded.nix counts as empty.
+    ///Duplicates are counted across the whole log by identity key. "Reports
+    ///not retrieved" is the declared papers with no source_url or no hash
+    ///(what `check` reports as not fetched), decided without the network.
+    Stats {
+        /// Print the counts as one JSON object, for scripts and agents
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// How many results to retrieve per provider, and the filters to apply.
@@ -341,7 +353,8 @@ fn needs_library(command: &Command) -> bool {
         | Command::Fetch { .. }
         | Command::Check
         | Command::Open { .. }
-        | Command::Sync => true,
+        | Command::Sync
+        | Command::Stats { .. } => true,
     }
 }
 
@@ -652,6 +665,17 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                     }
                 }
                 if failed { Code::Failure } else { Code::Success }
+            }
+            Err(e) => fail(sink, &e),
+        },
+        Command::Stats { json } => match pax_core::stats(Path::new(".")) {
+            Ok(stats) => {
+                if json {
+                    sink.stats_json(&stats);
+                } else {
+                    sink.stats(&stats);
+                }
+                Code::Success
             }
             Err(e) => fail(sink, &e),
         },

@@ -91,7 +91,9 @@ pub fn code(failure: Failure<'_>) -> Code {
             PaxError::Provider(e) => code(Failure::Provider(e)),
             // Every I/O error the library returns comes from reading or
             // writing the files under research/.
-            PaxError::Io(_) | PaxError::LibraryParse(_) => Code::NoLibrary,
+            PaxError::Io(_) | PaxError::LibraryParse(_) | PaxError::SearchLogParse { .. } => {
+                Code::NoLibrary
+            }
             PaxError::InvalidReference(_)
             | PaxError::InvalidExclusionReference(_)
             | PaxError::InvalidCitationKey(_)
@@ -400,6 +402,13 @@ mod tests {
     fn a_missing_or_unparseable_library_is_no_library() {
         let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
         assert_eq!(pax(PaxError::Io(missing)), Code::NoLibrary);
+        assert_eq!(
+            pax(PaxError::SearchLogParse {
+                line: 3,
+                message: "bad".into()
+            }),
+            Code::NoLibrary
+        );
         assert_eq!(pax(PaxError::LibraryParse("bad".into())), Code::NoLibrary);
         assert_eq!(code(Failure::NoLibrary), Code::NoLibrary);
     }
