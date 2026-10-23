@@ -113,6 +113,34 @@ The paper can be any `provider:id` reference from `search`, or the citation key 
 
 Like `search`, each provider reports its `retrieved N of M` count, then the two lists are merged into one, with the same `merged: X → Y (Z duplicates, U unmatched)` line and one row per paper listing every provider's reference. Papers already in your library are marked `[in library]`, and excluded ones `[excluded]` (see [Excluding papers](#excluding-papers)). They take the same `--limit`, `--all`, `--year`, `--type` and `--lang` flags. OpenAlex applies the filters server-side; Semantic Scholar's citation lists take no filters, so year and type are applied there after retrieval, and language not at all. Semantic Scholar serves at most 9,999 entries of a list, and skips references it couldn't match to a paper.
 
+### Search log
+
+Inside a library, every `search` (a query or `--author`), `refs` and `cited-by` appends to `research/search-log.jsonl`: the record of every source a review searched, when, and with what search string, filters and limit — what PRISMA 2020 asks a review to report — plus every record retrieved, so duplicates can be counted across the whole review, not just one command. It's always on, created on the first search, and append-only: pax never rewrites a line, so commit it with the library. `search --doi` and `search --local` aren't logged: one resolves a known paper and the other reads your own library, neither searches a database. Outside a library a search still works, isn't logged, and says so on stderr. If the log can't be written, the results still print with a warning on stderr, and a search that otherwise succeeded exits 1.
+
+Each line is one JSON object for one provider's part in one command, so a command writes a line per provider it asked, including a provider that failed:
+
+```JSON
+{"v":1,"command":"search","query":"actor model","provider":"openalex","date":"2026-10-22T22:49:14Z","limit":5,"filters":[{"filter":"year","value":"2015-2020","applied":"server-side"}],"total":246125,"retrieved":2,"keys":[["doi:10.1086/686221","title:empirical evidence for the devoted actor model|2016"],[]],"merge":{"before":7,"after":6,"unmatched":1}}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `v` | Schema version, `1`. It changes only when a field changes meaning or is removed; new fields can appear without it changing. |
+| `command` | `search`, `search-author` (`search --author`), `refs` or `cited-by`. |
+| `query` | The query, or the author name for `search-author`. Only on `search` / `search-author`. |
+| `seed` | The paper as given: a `provider:id` reference or a citation key. Only on `refs` / `cited-by`. |
+| `provider` | `openalex`, `crossref`, `semanticscholar` or `arxiv`. |
+| `date` | When the command ran, ISO 8601 in UTC to the second. Every line of one command has the same date. |
+| `limit` | The `--limit` per provider, or `"all"` for `--all`. |
+| `filters` | One object per `--year` / `--type` / `--lang` given: `filter` (`year`, `type`, `language`), `value` as given, and `applied`: `server-side` (in the provider's query, so `total` reflects it), `post-retrieval` (by pax on the retrieved records), or `not-applied` (the provider has no such data). `applied` is absent when the provider failed. Empty without filters. |
+| `total` | How many records the provider reported matching; `null` when it doesn't say, or failed. |
+| `retrieved` | How many records it returned, after any post-retrieval filter. Absent when the provider failed. |
+| `keys` | One array per retrieved record, in order: the record's identity keys, strongest first — `doi:<doi>`, `arxiv:<id>` (no version), `title:<normalized title>\|<year>` — the same keys `search` merges by. An empty array is a record with none, which can't be matched. Absent when the provider failed. |
+| `error` | Why the provider returned nothing: a failed request, or not knowing the `refs` / `cited-by` seed. Only present when it failed. |
+| `merge` | The command's merge counts across every provider that answered: `before` (records), `after` (distinct papers) and `unmatched` (records with no key), as `search` prints them. |
+
+The merge counts sit on every line of a command rather than on a separate summary line, so every line has the same shape and a reader never has to tell two kinds apart; to read a command's counts, take them from any one of its lines. Keys are kept per record rather than pooled, because whether two records are the same paper depends on all of each one's keys (a title match never joins two different DOIs).
+
 The project is designed to be:
 - local-first
 - reproducible
@@ -154,7 +182,7 @@ Every command exits with a code a script can branch on:
 | Code | Meaning |
 | --- | --- |
 | 0 | Success. |
-| 1 | Any other failure, e.g. `nix` failing to fetch or build; also `check` or `sync` finding problems in the library. |
+| 1 | Any other failure, e.g. `nix` failing to fetch or build; also `check` or `sync` finding problems in the library, or a `search`, `refs` or `cited-by` that succeeded but couldn't write the [search log](#search-log). |
 | 2 | Wrong arguments: an unknown command or flag, a malformed `provider:id` or citation key, or flags that can't be combined. |
 | 3 | Partial: in `search`, `refs` or `cited-by`, at least one provider failed (network, rate limit, provider error) while others answered, so the results are incomplete. A provider that has no record of the seed or DOI isn't a failure: it answered, so when the others returned results `pax` exits 0 and notes it on stderr. |
 | 4 | Not found: a reference, seed or citation key doesn't resolve, e.g. no provider has a record of the `refs` / `cited-by` seed or the `search --doi` DOI. |

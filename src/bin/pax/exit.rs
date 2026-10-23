@@ -178,6 +178,17 @@ where
     )
 }
 
+/// The exit code of a search whose results are good but whose search log
+/// couldn't be written: a failure if the search otherwise succeeded, since
+/// the review's record of it is missing; any other code (partial, not found,
+/// every provider failed) already says the results fell short, and is kept.
+pub fn log_failed(code: Code) -> Code {
+    match code {
+        Code::Success => Code::Failure,
+        code => code,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,5 +402,13 @@ mod tests {
         assert_eq!(pax(PaxError::Io(missing)), Code::NoLibrary);
         assert_eq!(pax(PaxError::LibraryParse("bad".into())), Code::NoLibrary);
         assert_eq!(code(Failure::NoLibrary), Code::NoLibrary);
+    }
+
+    #[test]
+    fn a_failed_search_log_fails_only_an_otherwise_successful_search() {
+        assert_eq!(log_failed(Code::Success), Code::Failure);
+        for kept in [Code::Partial, Code::NotFound, Code::ProvidersFailed] {
+            assert_eq!(log_failed(kept), kept);
+        }
     }
 }

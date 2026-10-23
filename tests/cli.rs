@@ -221,3 +221,85 @@ fn adding_outside_a_library_exits_7_before_any_network_call() {
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
     assert!(!dir.join("research").exists());
 }
+
+/// A library whose one paper has no DOI and no arXiv source, so `refs` can
+/// look it up in neither provider — and so needs no network.
+fn library_without_ids(name: &str) -> PathBuf {
+    let dir = scratch(name);
+    assert_eq!(pax(&dir, &["init"]).status.code(), Some(0));
+    fs::write(
+        dir.join("research").join("papers.nix"),
+        r#"{
+  hoare1978 = {
+    doi = null;
+    title = "Communicating Sequential Processes";
+    authors = [ "C. A. R. Hoare" ];
+    year = 1978;
+    source_url = null;
+    hash = null;
+    tags = [ ];
+    notes = null;
+  };
+}
+"#,
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn refs_appends_a_line_per_provider_to_the_search_log() {
+    let dir = library_without_ids("search-log");
+    let log = dir.join("research").join("search-log.jsonl");
+    for (run, command) in ["refs", "cited-by"].into_iter().enumerate() {
+        let output = pax_offline(&dir, &[command, "hoare1978", "--year", "1990-"]);
+        assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+        let lines: Vec<String> = fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(lines.len(), 2 * (run + 1), "pax {command}");
+        for (line, provider) in lines[2 * run..].iter().zip(["openalex", "semanticscholar"]) {
+            assert!(
+                line.starts_with(&format!(
+                    r#"{{"v":1,"command":"{command}","seed":"hoare1978","provider":"{provider}","#
+                )),
+                "{line}"
+            );
+            assert!(line.contains(r#""filters":[{"filter":"year","value":"1990-"}]"#));
+            assert!(
+                line.contains(r#""error":"can't look the seed up"#),
+                "{line}"
+            );
+            assert!(!line.contains(r#""keys""#), "{line}");
+        }
+    }
+}
+
+#[test]
+fn an_unwritable_search_log_is_a_warning() {
+    let dir = library_without_ids("search-log-unwritable");
+    fs::create_dir(dir.join("research").join("search-log.jsonl")).unwrap();
+    let output = pax_offline(&dir, &["refs", "hoare1978"]);
+    // Every provider said it doesn't know the seed: that code stands.
+    assert_eq!(output.status.code(), Some(4));
+    assert!(
+        stderr(&output).contains("Warning: couldn't write ./research/search-log.jsonl"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+#[ignore = "slow: offline, the providers retry for about 40s before failing"]
+fn a_search_outside_a_library_notes_it_isnt_logged() {
+    let dir = scratch("search-log-no-library");
+    let output = pax_offline(&dir, &["search", "actor model", "--limit", "1"]);
+    assert!(
+        stderr(&output).contains("isn't recorded in a search log"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!dir.join("research").exists());
+}
