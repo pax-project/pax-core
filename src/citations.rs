@@ -301,6 +301,7 @@ fn strip_arxiv_version(id: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::CandidateWork;
 
     #[test]
     fn a_doi_seed_is_looked_up_by_doi_everywhere() {
@@ -423,6 +424,118 @@ mod tests {
             error.to_string(),
             "semanticscholar has no record of the seed (looked up as DOI:10.1/x)"
         );
+    }
+
+    fn work(
+        provider: ProviderId,
+        native_id: &str,
+        title: &str,
+        doi: Option<&str>,
+    ) -> CandidateWork {
+        CandidateWork {
+            id: CandidateId {
+                provider,
+                native_id: native_id.to_string(),
+            },
+            title: title.to_string(),
+            authors: Vec::new(),
+            publish_date: "2017-06-12".to_string(),
+            doi: doi.map(str::to_string),
+            pdf_url: None,
+            venue: None,
+            abstract_text: None,
+        }
+    }
+
+    #[test]
+    fn merging_two_providers_reference_lists_collapses_shared_papers() {
+        let mut results: CitationResults = HashMap::new();
+        results.insert(
+            ProviderId::SemanticScholar,
+            Ok(SearchPage::new(
+                vec![
+                    work(
+                        ProviderId::SemanticScholar,
+                        "s1",
+                        "Attention Is All You Need",
+                        Some("10.48550/arXiv.1706.03762"),
+                    ),
+                    work(
+                        ProviderId::SemanticScholar,
+                        "s2",
+                        "Deep Residual Learning",
+                        Some("10.1109/CVPR.2016.90"),
+                    ),
+                    work(ProviderId::SemanticScholar, "s3", "", None),
+                ],
+                Some(3),
+                None,
+            )),
+        );
+        results.insert(
+            ProviderId::OpenAlex,
+            Ok(SearchPage::new(
+                vec![
+                    work(
+                        ProviderId::OpenAlex,
+                        "W1",
+                        "Deep residual learning",
+                        Some("https://doi.org/10.1109/cvpr.2016.90"),
+                    ),
+                    work(
+                        ProviderId::OpenAlex,
+                        "W2",
+                        "Attention is all you need",
+                        Some("https://doi.org/10.48550/arxiv.1706.03762"),
+                    ),
+                ],
+                Some(2),
+                None,
+            )),
+        );
+
+        let report = crate::merge_pages(&results);
+        assert_eq!(
+            (
+                report.before,
+                report.after,
+                report.duplicates(),
+                report.unmatched
+            ),
+            (5, 3, 2, 1)
+        );
+        // OpenAlex comes first in provider order, so its records lead.
+        assert_eq!(report.works[0].work.id.native_id, "W1");
+        assert_eq!(
+            report.works[0].providers(),
+            [ProviderId::OpenAlex, ProviderId::SemanticScholar]
+        );
+        assert_eq!(
+            report.works[1].providers(),
+            [ProviderId::OpenAlex, ProviderId::SemanticScholar]
+        );
+    }
+
+    #[test]
+    fn merging_skips_a_provider_that_failed() {
+        let mut results: CitationResults = HashMap::new();
+        results.insert(
+            ProviderId::OpenAlex,
+            Ok(SearchPage::new(
+                vec![work(ProviderId::OpenAlex, "W1", "A Study", Some("10.1/a"))],
+                Some(1),
+                None,
+            )),
+        );
+        results.insert(
+            ProviderId::SemanticScholar,
+            Err(CitationError::SeedNotFound {
+                provider: ProviderId::SemanticScholar,
+                key: "DOI:10.1/seed".to_string(),
+            }),
+        );
+        let report = crate::merge_pages(&results);
+        assert_eq!((report.before, report.after), (1, 1));
     }
 
     #[test]

@@ -247,8 +247,8 @@ fn provider_failed<'a>(
     }
 }
 
-/// Prints each citation provider's list, the way `search` prints each
-/// provider's results.
+/// Prints each citation provider's count, then one list merged across them,
+/// the way `search` does.
 fn show_citations(
     sink: &mut impl Sink,
     results: Result<pax_core::CitationResults, pax_core::PaxError>,
@@ -257,14 +257,23 @@ fn show_citations(
         Ok(results) => results,
         Err(e) => return fail(sink, &e),
     };
-    let known_dois = pax_core::known_dois(Path::new("."));
+    let index = pax_core::LibraryIndex::load(Path::new("."));
     let listed = results.values().any(Result::is_ok);
     for provider in pax_core::CITATION_PROVIDERS {
         match results.get(&provider) {
-            Some(Ok(page)) => sink.page(provider, page, &known_dois),
+            Some(Ok(page)) => sink.page_header(provider, page),
             Some(Err(e)) => provider_failed(sink, provider, e, listed),
             None => {}
         }
+    }
+    if listed {
+        let language_unknown = |work: &pax_core::CandidateWork| {
+            results
+                .values()
+                .flatten()
+                .any(|page| page.is_language_unknown(work))
+        };
+        sink.merged(&pax_core::merge_pages(&results), &index, &language_unknown);
     }
     exit::provider_results(results.values())
 }
@@ -364,7 +373,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 return Code::Success;
             }
 
-            let known_dois = pax_core::known_dois(Path::new("."));
+            let index = pax_core::LibraryIndex::load(Path::new("."));
             const ALL_PROVIDERS: [ProviderId; 4] = [
                 ProviderId::OpenAlex,
                 ProviderId::Crossref,
@@ -384,7 +393,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                     match results.get(&provider) {
                         Some(Ok(works)) => {
                             sink.provider_header(provider);
-                            sink.candidates(works, &known_dois);
+                            sink.candidates(works, &index);
                         }
                         Some(Err(e)) => provider_failed(sink, provider, e, listed),
                         None => {}
@@ -413,11 +422,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                     .flatten()
                     .any(|page| page.is_language_unknown(work))
             };
-            sink.merged(
-                &pax_core::merge_pages(&results),
-                &known_dois,
-                &language_unknown,
-            );
+            sink.merged(&pax_core::merge_pages(&results), &index, &language_unknown);
             exit::provider_results(results.values())
         }
         Command::Refs { reference, paging } => {

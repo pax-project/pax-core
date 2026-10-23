@@ -6,11 +6,9 @@
 //! Results go to stdout; errors and warnings go to stderr, so redirecting
 //! stdout (`pax search … > results.txt`) captures the results alone.
 
-use std::collections::HashSet;
-
 use pax_core::{
-    CandidateWork, CheckReport, CheckStatus, FetchOutcome, FilterApplication, MergeReport, Paper,
-    ProviderId, SearchPage, normalize_doi,
+    CandidateWork, CheckReport, CheckStatus, FetchOutcome, FilterApplication, LibraryIndex,
+    MergeReport, Paper, ProviderId, SearchPage,
 };
 
 pub trait Sink {
@@ -26,17 +24,16 @@ pub trait Sink {
     fn provider_note(&mut self, provider: ProviderId, message: &str);
     fn provider_header(&mut self, provider: ProviderId);
     fn page_header(&mut self, provider: ProviderId, page: &SearchPage);
-    fn candidates(&mut self, candidates: &[CandidateWork], known_dois: &HashSet<String>);
-    /// A paged result list: its header, then its works, each marked with
-    /// what the page knows about it.
-    fn page(&mut self, provider: ProviderId, page: &SearchPage, known_dois: &HashSet<String>);
-    /// Search results merged across providers. `language_unknown` says
+    /// Results, each marked if it's in the library or excluded.
+    fn candidates(&mut self, candidates: &[CandidateWork], index: &LibraryIndex);
+    /// Search or citation results merged across providers. A row is marked
+    /// in library or excluded if any of its records is. `language_unknown` says
     /// whether a record's language couldn't be checked by the filter; a
     /// merged row is marked only if that holds for every record in it.
     fn merged(
         &mut self,
         report: &MergeReport,
-        known_dois: &HashSet<String>,
+        index: &LibraryIndex,
         language_unknown: &dyn Fn(&CandidateWork) -> bool,
     );
     fn candidate(&mut self, candidate: &CandidateWork);
@@ -118,33 +115,16 @@ impl Sink for TextSink {
         }
     }
 
-    fn candidates(&mut self, candidates: &[CandidateWork], known_dois: &HashSet<String>) {
+    fn candidates(&mut self, candidates: &[CandidateWork], index: &LibraryIndex) {
         for work in candidates {
-            print_work(
-                work,
-                &work.id.to_string(),
-                in_library(work, known_dois),
-                false,
-            );
-        }
-    }
-
-    fn page(&mut self, provider: ProviderId, page: &SearchPage, known_dois: &HashSet<String>) {
-        self.page_header(provider, page);
-        for work in &page.works {
-            print_work(
-                work,
-                &work.id.to_string(),
-                in_library(work, known_dois),
-                page.is_language_unknown(work),
-            );
+            print_work(work, &work.id.to_string(), &Marks::of([work], index));
         }
     }
 
     fn merged(
         &mut self,
         report: &MergeReport,
-        known_dois: &HashSet<String>,
+        index: &LibraryIndex,
         language_unknown: &dyn Fn(&CandidateWork) -> bool,
     ) {
         println!(
@@ -156,9 +136,11 @@ impl Sink for TextSink {
         );
         for merged in &report.works {
             let ids: Vec<String> = merged.ids().iter().map(|id| id.to_string()).collect();
-            let in_library = merged.records().any(|work| in_library(work, known_dois));
-            let unknown = merged.records().all(language_unknown);
-            print_work(&merged.work, &ids.join(" · "), in_library, unknown);
+            let marks = Marks {
+                language_unknown: merged.records().all(language_unknown),
+                ..Marks::of(merged.records(), index)
+            };
+            print_work(&merged.work, &ids.join(" · "), &marks);
         }
     }
 
@@ -285,25 +267,36 @@ impl Sink for TextSink {
     }
 }
 
-/// Whether a paper with `work`'s DOI is already declared in the library.
-fn in_library(work: &CandidateWork, known_dois: &HashSet<String>) -> bool {
-    work.doi
-        .as_deref()
-        .is_some_and(|doi| known_dois.contains(normalize_doi(doi)))
+/// The marks after a row's title.
+#[derive(Default)]
+struct Marks {
+    in_library: bool,
+    excluded: bool,
+    language_unknown: bool,
+}
+
+impl Marks {
+    /// Whether any of `records` — a row's records — is declared or excluded.
+    fn of<'a>(records: impl IntoIterator<Item = &'a CandidateWork>, index: &LibraryIndex) -> Self {
+        let mut marks = Marks::default();
+        for work in records {
+            marks.in_library |= index.contains(work);
+            marks.excluded |= index.is_excluded(work);
+        }
+        marks
+    }
 }
 
 /// One result row: the title with any marks, then its details. `ids` is the
 /// record's reference, or every merged record's reference for a merged row.
-fn print_work(work: &CandidateWork, ids: &str, in_library: bool, language_unknown: bool) {
+fn print_work(work: &CandidateWork, ids: &str, marks: &Marks) {
+    let flag = |set: bool, text: &'static str| if set { text } else { "" };
     println!(
-        "\t{}{}{}",
+        "\t{}{}{}{}",
         work.title,
-        if in_library { " [in library]" } else { "" },
-        if language_unknown {
-            " [language unknown]"
-        } else {
-            ""
-        }
+        flag(marks.in_library, " [in library]"),
+        flag(marks.excluded, " [excluded]"),
+        flag(marks.language_unknown, " [language unknown]"),
     );
     println!("\t\t{ids}");
     if !work.authors.is_empty() {
