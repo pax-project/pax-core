@@ -366,11 +366,13 @@ Identification
 Screening
   Records screened                            3
   Records excluded                            1
+  Reports sought for retrieval                2
   Reports not retrieved                       1
+  Reports assessed for eligibility            1
   Reports excluded                            1
     not empirical                             1
 Included
-  Studies included in review                  1
+  Studies included in review                  0
 "
     );
     assert_eq!(
@@ -397,12 +399,14 @@ fn stats_json_is_one_object_for_scripts() {
             "duplicates_removed": 2,
             "records_screened": 3,
             "excluded_screening": 1,
+            "reports_sought": 2,
+            "not_retrieved": 1,
+            "reports_assessed": 1,
             "excluded_full_text": {
                 "total": 1,
                 "reasons": [{ "reason": "not empirical", "count": 1 }]
             },
-            "not_retrieved": 1,
-            "included": 1,
+            "included": 0,
             "skipped_log_lines": 1
         })
     );

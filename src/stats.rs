@@ -31,12 +31,17 @@ pub struct Stats {
     pub records_screened: usize,
     /// Papers excluded at title/abstract screening.
     pub excluded_screening: usize,
-    /// Papers excluded after reading the full text, by reason.
-    pub excluded_full_text: FullTextExclusions,
+    /// Papers left to read in full: `records_screened - excluded_screening`.
+    pub reports_sought: usize,
     /// Declared papers with no fetchable artifact: no `source_url` or no
     /// `hash` recorded.
     pub not_retrieved: usize,
-    /// Declared papers.
+    /// Papers read in full: `reports_sought - not_retrieved`.
+    pub reports_assessed: usize,
+    /// Papers excluded after reading the full text, by reason.
+    pub excluded_full_text: FullTextExclusions,
+    /// Declared papers with a fetchable artifact. A declared paper without
+    /// one is only counted in `not_retrieved`.
     pub included: usize,
     /// Log lines where the provider failed, so retrieved no records; they
     /// count nowhere else.
@@ -90,7 +95,14 @@ pub struct ReasonCount {
 ///   those `check_library` reports as not fetched. Decided from
 ///   `papers.nix` alone, with no network: a recorded artifact whose source
 ///   has since gone away isn't counted (that's `check_library`'s job).
-/// - **included**: the papers declared in `papers.nix`.
+/// - **reports sought / assessed**: what's left after screening exclusions,
+///   then after the reports not retrieved (never below zero).
+/// - **included**: the declared papers with a fetchable artifact, so a paper
+///   is never both included and not retrieved.
+///
+/// The boxes balance, as a PRISMA diagram's must, when every declared or
+/// excluded paper was found by a logged search; a paper added or excluded
+/// without one is still counted in its box.
 ///
 /// A missing search log or `excluded.nix` counts as empty. A missing
 /// `papers.nix` means there's no library: the error is its I/O error. A log
@@ -150,12 +162,16 @@ pub fn stats(root: &Path) -> Result<Stats, PaxError> {
             .collect(),
     };
 
-    stats.included = library.papers().len();
-    stats.not_retrieved = library
+    let (retrieved, not_retrieved): (Vec<_>, Vec<_>) = library
         .papers()
         .iter()
-        .filter(|paper| paper.artifact.source_url.is_none() || paper.artifact.hash.is_none())
-        .count();
+        .partition(|paper| paper.artifact.source_url.is_some() && paper.artifact.hash.is_some());
+    stats.included = retrieved.len();
+    stats.not_retrieved = not_retrieved.len();
+    stats.reports_sought = stats
+        .records_screened
+        .saturating_sub(stats.excluded_screening);
+    stats.reports_assessed = stats.reports_sought.saturating_sub(stats.not_retrieved);
     Ok(stats)
 }
 
@@ -463,7 +479,7 @@ mod tests {
                 ],
             }
         );
-        assert_eq!(stats.included, 3);
+        assert_eq!(stats.included, 1);
         assert_eq!(stats.not_retrieved, 2);
         // No log: nothing identified.
         assert_eq!(stats.identified, Identified::default());
@@ -491,7 +507,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&stats).unwrap(),
-            r#"{"identified":{"databases":{"openalex":2},"citation_searching":{},"total":2},"duplicates_removed":1,"records_screened":1,"excluded_screening":0,"excluded_full_text":{"total":1,"reasons":[{"reason":"r","count":1}]},"not_retrieved":0,"included":0,"skipped_log_lines":0}"#
+            r#"{"identified":{"databases":{"openalex":2},"citation_searching":{},"total":2},"duplicates_removed":1,"records_screened":1,"excluded_screening":0,"reports_sought":0,"not_retrieved":0,"reports_assessed":0,"excluded_full_text":{"total":1,"reasons":[{"reason":"r","count":1}]},"included":0,"skipped_log_lines":0}"#
         );
     }
 

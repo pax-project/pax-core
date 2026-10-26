@@ -380,8 +380,18 @@ fn stats_lines(stats: &Stats) -> Vec<String> {
     ));
     rows.push(Row::Count(
         1,
+        "Reports sought for retrieval".into(),
+        stats.reports_sought,
+    ));
+    rows.push(Row::Count(
+        1,
         "Reports not retrieved".into(),
         stats.not_retrieved,
+    ));
+    rows.push(Row::Count(
+        1,
+        "Reports assessed for eligibility".into(),
+        stats.reports_assessed,
     ));
     rows.push(Row::Count(
         1,

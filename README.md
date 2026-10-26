@@ -188,11 +188,13 @@ Identification
 Screening
   Records screened                            3
   Records excluded                            1
+  Reports sought for retrieval                2
   Reports not retrieved                       1
+  Reports assessed for eligibility            1
   Reports excluded                            1
     not empirical                             1
 Included
-  Studies included in review                  1
+  Studies included in review                  0
 ```
 
 | Box | Source |
@@ -202,13 +204,17 @@ Included
 | Duplicate records removed | Every record identified, minus the distinct papers among them across the *whole* log, not per command: records are the same paper when they share a key, by the same rules `search` merges by (a title+year match never joins two different DOIs). A record with no key is a paper of its own. |
 | Records screened | Those distinct papers. |
 | Records excluded | `excluded.nix` entries with `stage = "screening"`. |
+| Reports sought for retrieval | Records screened minus records excluded. |
 | Reports not retrieved | Declared papers with no `source_url` or no `hash` — what `pax check` reports as not fetched. Decided from `papers.nix` alone, without the network, so a recorded source that has since gone away isn't counted; `pax check` finds those. |
+| Reports assessed for eligibility | Reports sought minus reports not retrieved. |
 | Reports excluded | `excluded.nix` entries with `stage = "full-text"`, then a count per `reason` (exact text, sorted). |
-| Studies included in review | The papers declared in `papers.nix`. |
+| Studies included in review | The papers declared in `papers.nix` that have a fetchable artifact. A declared paper without one counts only as not retrieved, never as both. |
+
+The boxes balance, as a PRISMA diagram must, when every declared or excluded paper was found by a logged search. A paper added or excluded without one, say by hand, is still counted in its box, so the arithmetic between boxes can be off by those papers.
 
 A library without a search log or `excluded.nix` counts them as empty. A log line whose provider failed retrieved nothing: it's skipped, with a warning on stderr saying how many. A log line pax can't read stops `stats` with an error naming its line number, exit 7.
 
-`pax stats --json` prints the same counts as one JSON object, for scripts and agents. Providers are keyed by their log tag, and an object's keys are sorted:
+`pax stats --json` prints the same counts as one JSON object, for scripts and agents. Providers are keyed by their log tag and sorted, as are the reasons:
 
 ```JSON
 {
@@ -220,9 +226,11 @@ A library without a search log or `excluded.nix` counts them as empty. A log lin
   "duplicates_removed": 2,
   "records_screened": 3,
   "excluded_screening": 1,
-  "excluded_full_text": { "total": 1, "reasons": [{ "reason": "not empirical", "count": 1 }] },
+  "reports_sought": 2,
   "not_retrieved": 1,
-  "included": 1,
+  "reports_assessed": 1,
+  "excluded_full_text": { "total": 1, "reasons": [{ "reason": "not empirical", "count": 1 }] },
+  "included": 0,
   "skipped_log_lines": 1
 }
 ```
