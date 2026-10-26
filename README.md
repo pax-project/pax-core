@@ -1,4 +1,4 @@
-[![Release](https://img.shields.io/github/v/tag/pax-project/pax-core?label=release)](https://github.com/pax-project/pax-core/releases/tag/1.1.0)
+[![Release](https://img.shields.io/github/v/tag/pax-project/pax-core?label=release)](https://github.com/pax-project/pax-core/releases/latest)
 
 **PAX** is a Rust CLI for discovering, declaring, managing, and reproducibly acquiring academic papers using Nix as the artifact backend.
 
@@ -32,11 +32,11 @@ Search → Select → Declare → Fetch → Manage → Reproduce
 
 ## Installation
 
-**Prebuilt binary (x86_64 Linux):** download `pax-1.1.0-x86_64-linux.tar.gz` from the [1.1.0 release](https://github.com/pax-project/pax-core/releases/tag/1.1.0), extract it, and put `pax` on your `PATH`:
+**Prebuilt binary (x86_64 Linux):** download `pax-v2.0.0-x86_64-linux.tar.gz` from the [v2.0.0 release](https://github.com/pax-project/pax-core/releases/tag/v2.0.0), extract it, and put `pax` on your `PATH`:
 
 ```Bash
-curl -LO https://github.com/pax-project/pax-core/releases/download/1.1.0/pax-1.1.0-x86_64-linux.tar.gz
-tar xzf pax-1.1.0-x86_64-linux.tar.gz
+curl -LO https://github.com/pax-project/pax-core/releases/download/v2.0.0/pax-v2.0.0-x86_64-linux.tar.gz
+tar xzf pax-v2.0.0-x86_64-linux.tar.gz
 ./pax --version
 ```
 
