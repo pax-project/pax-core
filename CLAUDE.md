@@ -47,6 +47,7 @@ src/
   merge.rs        # merge_works/merge_pages: duplicates collapsed into MergedWork, with before/after/unmatched counts
   exclusions.rs   # Exclusions::load()/save() against research/excluded.nix; exclusion_key()
   search_log.rs   # research/search-log.jsonl: one JSON line per provider per search; *_logged() variants
+  stats.rs        # stats(): PRISMA 2020 flow-diagram counts from the search log, excluded.nix and papers.nix
   nix_attrs.rs    # the attrset subset both files use: tokenizer, parser, field writers, atomic write
   nix.rs          # init_library(): scaffolds research/flake.nix + research/papers.nix from templates/
   citation_key.rs # generates a citation key for a newly declared paper (surname+year, disambiguated)
