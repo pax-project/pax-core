@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::sync::Mutex;
 
 use ::crossref::query::ResultControl;
 use ::crossref::{
@@ -75,7 +75,7 @@ impl Provider for CrossrefProvider {
     ) -> Result<SearchPage, ProviderError> {
         let plan = FilterPlan::new(&options.filters);
         // Works the language filter kept without a language to check.
-        let language_unknown = RefCell::new(Vec::new());
+        let language_unknown = Mutex::new(Vec::new());
         let page = collect_pages(
             options,
             MAX_PAGE_SIZE,
@@ -102,7 +102,10 @@ impl Provider for CrossrefProvider {
                         }
                         let work = CandidateWork::from(work);
                         if verdict == Verdict::KeepLanguageUnknown {
-                            language_unknown.borrow_mut().push(work.id.clone());
+                            language_unknown
+                                .lock()
+                                .expect("language_unknown lock")
+                                .push(work.id.clone());
                         }
                         works.push(work);
                     }
@@ -115,7 +118,9 @@ impl Provider for CrossrefProvider {
             },
         )
         .await?;
-        let mut language_unknown = language_unknown.into_inner();
+        let mut language_unknown = language_unknown
+            .into_inner()
+            .expect("language_unknown lock");
         // Paging may have truncated the last page's works.
         language_unknown.retain(|id| page.works.iter().any(|work| &work.id == id));
         Ok(page

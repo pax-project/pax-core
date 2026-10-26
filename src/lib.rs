@@ -1998,3 +1998,43 @@ mod resolve_artifact_path_tests {
         fs::remove_dir_all(&root).unwrap();
     }
 }
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+
+    fn assert_send<T: Send>(_: T) {}
+
+    /// Async clients on a multi-threaded runtime (an MCP server, a
+    /// `tokio::spawn`ed task) need every public future to be `Send`. These
+    /// futures are only built, never polled, so nothing touches the network.
+    #[test]
+    fn public_futures_are_send() {
+        let config = Config::default();
+        let options = SearchOptions::default();
+        let root = Path::new(".");
+        let id: CandidateId = "openalex:W1".parse().unwrap();
+        assert_send(search_all("q", &config));
+        assert_send(search_by_author("a", &config));
+        assert_send(search_all_paged("q", &options, &config));
+        assert_send(search_by_author_paged("a", &options, &config));
+        assert_send(search_by_doi("10.1/a", &config));
+        assert_send(resolve_candidate(&id, &config));
+        assert_send(add_candidate(&id, root, &config));
+        assert_send(show_reference("k", root, &config));
+        assert_send(exclude_paper(
+            "openalex:W1",
+            "r",
+            ExclusionStage::Screening,
+            None,
+            root,
+            &config,
+        ));
+        assert_send(references("k", &options, root, &config));
+        assert_send(cited_by("k", &options, root, &config));
+        assert_send(search_all_logged("q", &options, root, &config));
+        assert_send(search_by_author_logged("a", &options, root, &config));
+        assert_send(references_logged("k", &options, root, &config));
+        assert_send(cited_by_logged("k", &options, root, &config));
+    }
+}
