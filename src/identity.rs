@@ -98,6 +98,18 @@ pub(crate) fn paper_id_keys(paper: &Paper) -> Vec<IdentityKey> {
     )
 }
 
+/// Every identity key a declared paper has: [`paper_id_keys`], then its
+/// title+year, as [`identity_keys`] gives a record. For matching a paper to
+/// the records it was found as, under [`group`]'s rules.
+pub(crate) fn paper_keys(paper: &Paper) -> Vec<IdentityKey> {
+    let mut keys = paper_id_keys(paper);
+    let title = normalize_title(&paper.identity.title);
+    if let (false, Some(year)) = (title.is_empty(), paper.identity.year) {
+        keys.push(IdentityKey::TitleYear { title, year });
+    }
+    keys
+}
+
 /// The key a bare DOI yields: a DOI key, or an arXiv key for an arXiv DOI.
 /// Empty for a blank DOI.
 pub(crate) fn doi_id_keys(doi: &str) -> Vec<IdentityKey> {

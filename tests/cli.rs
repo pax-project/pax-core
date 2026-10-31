@@ -464,6 +464,7 @@ fn stats_json_is_one_object_for_scripts() {
             "duplicates_removed": 2,
             "records_screened": 3,
             "excluded_screening": 1,
+            "awaiting_screening": 1,
             "reports_sought": 2,
             "not_retrieved": 1,
             "reports_assessed": 1,
@@ -472,7 +473,8 @@ fn stats_json_is_one_object_for_scripts() {
                 "reasons": [{ "reason": "not empirical", "count": 1 }]
             },
             "included": 0,
-            "skipped_log_lines": 1
+            "skipped_log_lines": 1,
+            "decided_outside_log": 1
         })
     );
 }

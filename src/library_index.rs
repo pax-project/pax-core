@@ -124,7 +124,7 @@ pub(crate) fn work_exclusion_keys(work: &CandidateWork) -> (Vec<IdentityKey>, Ve
 /// The DOI and arXiv keys an exclusion key names: a `provider:id` key's own
 /// (an arXiv id, or a Crossref DOI), else the key read as a DOI. Empty for
 /// another provider's opaque id.
-fn exclusion_id_keys(key: &str) -> Vec<IdentityKey> {
+pub(crate) fn exclusion_id_keys(key: &str) -> Vec<IdentityKey> {
     match key.parse::<CandidateId>() {
         Ok(id) => identity::reference_id_keys(&id),
         Err(_) => identity::doi_id_keys(key),
