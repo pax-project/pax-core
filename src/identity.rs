@@ -103,11 +103,18 @@ pub(crate) fn paper_id_keys(paper: &Paper) -> Vec<IdentityKey> {
 /// the records it was found as, under [`group`]'s rules.
 pub(crate) fn paper_keys(paper: &Paper) -> Vec<IdentityKey> {
     let mut keys = paper_id_keys(paper);
-    let title = normalize_title(&paper.identity.title);
-    if let (false, Some(year)) = (title.is_empty(), paper.identity.year) {
-        keys.push(IdentityKey::TitleYear { title, year });
-    }
+    keys.extend(title_year_key(&paper.identity.title, paper.identity.year));
     keys
+}
+
+/// The title+year key for a title and a year, if the title normalizes to
+/// something and the year is known.
+pub(crate) fn title_year_key(title: &str, year: Option<i32>) -> Option<IdentityKey> {
+    let title = normalize_title(title);
+    match (title.is_empty(), year) {
+        (false, Some(year)) => Some(IdentityKey::TitleYear { title, year }),
+        _ => None,
+    }
 }
 
 /// The key a bare DOI yields: a DOI key, or an arXiv key for an arXiv DOI.
