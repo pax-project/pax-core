@@ -4,7 +4,7 @@
 //! (`research/papers.nix`). Nothing new is stored; [`stats`] reads the three
 //! files and counts.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use serde::Serialize;
@@ -57,6 +57,27 @@ pub struct Stats {
     /// Declared or excluded papers that match no logged record, e.g. added
     /// from a DOI the reviewer already knew. Still counted in their box.
     pub decided_outside_log: usize,
+    /// The records identified under each search-log label, labels in the
+    /// order they first appear in the log; unlabelled lines are one group.
+    /// Empty for an empty log.
+    pub by_label: Vec<LabelCounts>,
+}
+
+/// The records identified under one search-log label.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct LabelCounts {
+    /// The label; `None` for the lines without one.
+    pub label: Option<String>,
+    /// Records retrieved by the label's lines.
+    pub identified: usize,
+    /// Distinct papers among them.
+    pub distinct: usize,
+    /// Distinct papers not identified under any earlier label, so summing
+    /// it over every label gives `records_screened`.
+    pub new_distinct: usize,
+    /// Duplicates within the label: `identified - distinct`.
+    pub duplicates: usize,
 }
 
 /// Records identified, per provider (by its log tag, e.g. `openalex`).
@@ -147,6 +168,10 @@ pub struct ReasonCount {
 ///   matching no logged record — one keyed by an opaque `provider:id` with
 ///   no year, say — is counted in `decided_outside_log` instead, so
 ///   `awaiting_screening` never goes wrong or negative.
+/// - **by label**: per search-log label ([`crate::SearchOptions::label`]),
+///   in the order labels first appear, the records identified, the distinct
+///   papers among them, and how many of those no earlier label identified;
+///   that last count sums to `records_screened` over every label.
 /// - **included**: the declared papers with a fetchable artifact, so a paper
 ///   is never both included and not retrieved.
 ///
@@ -167,7 +192,17 @@ pub fn stats(root: &Path) -> Result<Stats, PaxError> {
 
     let mut stats = Stats::default();
     let mut records: Vec<Vec<IdentityKey>> = Vec::new();
+    // Each record's label, as an index into `labels` (first appearance).
+    let mut labels: Vec<Option<String>> = Vec::new();
+    let mut record_labels: Vec<usize> = Vec::new();
     for (line, entry) in entries {
+        let label = match labels.iter().position(|label| *label == entry.label) {
+            Some(index) => index,
+            None => {
+                labels.push(entry.label);
+                labels.len() - 1
+            }
+        };
         let Some(keys) = entry.keys else {
             stats.skipped_log_lines += 1;
             continue;
@@ -191,6 +226,7 @@ pub fn stats(root: &Path) -> Result<Stats, PaxError> {
                 })
                 .collect::<Result<_, _>>()?;
             records.push(parsed);
+            record_labels.push(label);
         }
     }
     stats.identified.total = records.len();
@@ -201,6 +237,7 @@ pub fn stats(root: &Path) -> Result<Stats, PaxError> {
         .chain(exclusions.entries().iter().map(exclusion_keys))
         .collect();
     (stats.awaiting_screening, stats.decided_outside_log) = match_decisions(&records, &decisions);
+    stats.by_label = label_counts(labels, &record_labels, &records);
     stats.records_screened = distinct_papers(records);
     stats.duplicates_removed = stats.identified.total - stats.records_screened;
 
@@ -304,17 +341,68 @@ fn exclusion_keys(exclusion: &Exclusion) -> Vec<IdentityKey> {
 
 /// How many distinct papers `records` hold, by [`identity::group`].
 fn distinct_papers(records: Vec<Vec<IdentityKey>>) -> usize {
+    paper_ids(&records)
+        .into_iter()
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+/// Which paper each of `records` is, by [`identity::group`]: one id per
+/// record, the same id for the same paper.
+fn paper_ids(records: &[Vec<IdentityKey>]) -> Vec<usize> {
     // A record with no key is a paper of its own; of the rest, records with
     // identical keys always group together, so group each key set once — a
     // review's log repeats the same records across many searches.
-    let (keyless, keyed): (Vec<_>, Vec<_>) = records.into_iter().partition(Vec::is_empty);
-    let mut seen = HashSet::new();
-    let unique: Vec<Vec<IdentityKey>> = keyed
+    let mut unique: HashMap<&Vec<IdentityKey>, usize> = HashMap::new();
+    let mut key_sets: Vec<Vec<IdentityKey>> = Vec::new();
+    for keys in records.iter().filter(|keys| !keys.is_empty()) {
+        unique.entry(keys).or_insert_with(|| {
+            key_sets.push(keys.clone());
+            key_sets.len() - 1
+        });
+    }
+    let groups = identity::group(&key_sets);
+    let mut keyless = groups.len();
+    records
+        .iter()
+        .map(|keys| match unique.get(keys) {
+            Some(&set) => groups[set],
+            None => {
+                keyless += 1;
+                keyless
+            }
+        })
+        .collect()
+}
+
+/// The per-label counts: `record_labels` holds each record's index into
+/// `labels`. A paper is new under the first label, in `labels`' order,
+/// that identified it.
+fn label_counts(
+    labels: Vec<Option<String>>,
+    record_labels: &[usize],
+    records: &[Vec<IdentityKey>],
+) -> Vec<LabelCounts> {
+    let ids = paper_ids(records);
+    let mut counts: Vec<LabelCounts> = labels
         .into_iter()
-        .filter(|keys| seen.insert(keys.clone()))
+        .map(|label| LabelCounts {
+            label,
+            ..LabelCounts::default()
+        })
         .collect();
-    let groups: HashSet<usize> = identity::group(&unique).into_iter().collect();
-    keyless.len() + groups.len()
+    let mut papers: Vec<HashSet<usize>> = vec![HashSet::new(); counts.len()];
+    for (&label, &id) in record_labels.iter().zip(&ids) {
+        counts[label].identified += 1;
+        papers[label].insert(id);
+    }
+    let mut seen = HashSet::new();
+    for (count, papers) in counts.iter_mut().zip(papers) {
+        count.distinct = papers.len();
+        count.duplicates = count.identified - count.distinct;
+        count.new_distinct = papers.into_iter().filter(|id| seen.insert(*id)).count();
+    }
+    counts
 }
 
 /// Matches screening decisions to the logged papers: how many distinct
@@ -895,6 +983,82 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// `line` with a `label`.
+    fn labelled(label: &str, line: String) -> String {
+        line.replacen(r#""v":1,"#, &format!(r#""v":1,"label":{label:?},"#), 1)
+    }
+
+    #[test]
+    fn counts_per_label_in_log_order_with_new_papers_summing_to_records_screened() {
+        let root = scratch_library("labels");
+        write_log(
+            &root,
+            &[
+                // An old, unlabelled line: grouped as unlabelled.
+                line("search", "openalex", Some(&[&["doi:10.1/a"]])),
+                labelled(
+                    "R1",
+                    line(
+                        "search",
+                        "openalex",
+                        Some(&[&["doi:10.1/a"], &["doi:10.1/b"], &["doi:10.1/b"]]),
+                    ),
+                ),
+                labelled(
+                    "R2-backward",
+                    line(
+                        "refs",
+                        "openalex",
+                        Some(&[&["doi:10.1/b"], &["doi:10.1/c"], &[]]),
+                    ),
+                ),
+                labelled("R2-backward", line("refs", "semanticscholar", None)),
+                // R1 again: still R1's, and `c` isn't new (R2 came first in
+                // the log, but R1 is the earlier label).
+                labelled(
+                    "R1",
+                    line(
+                        "search",
+                        "arxiv",
+                        Some(&[&["arxiv:1", "doi:10.1/d"], &["doi:10.1/c"]]),
+                    ),
+                ),
+                labelled("R3", line("cited-by", "openalex", None)),
+            ],
+        );
+        let stats = stats(&root).unwrap();
+        let counts =
+            |label: Option<&str>, identified, distinct, new_distinct, duplicates| LabelCounts {
+                label: label.map(str::to_string),
+                identified,
+                distinct,
+                new_distinct,
+                duplicates,
+            };
+        assert_eq!(
+            stats.by_label,
+            vec![
+                counts(None, 1, 1, 1, 0),
+                // a, b, d, c: a was unlabelled first.
+                counts(Some("R1"), 5, 4, 3, 1),
+                // b, c, and a keyless record.
+                counts(Some("R2-backward"), 3, 3, 1, 0),
+                // Every line failed: nothing identified.
+                counts(Some("R3"), 0, 0, 0, 0),
+            ]
+        );
+        assert_eq!(stats.records_screened, 5);
+        assert_eq!(
+            stats
+                .by_label
+                .iter()
+                .map(|label| label.new_distinct)
+                .sum::<usize>(),
+            stats.records_screened
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn serializes_to_the_documented_json_shape() {
         let stats = Stats {
@@ -913,11 +1077,18 @@ mod tests {
                     count: 1,
                 }],
             },
+            by_label: vec![LabelCounts {
+                label: Some("R1".into()),
+                identified: 2,
+                distinct: 1,
+                new_distinct: 1,
+                duplicates: 1,
+            }],
             ..Stats::default()
         };
         assert_eq!(
             serde_json::to_string(&stats).unwrap(),
-            r#"{"identified":{"databases":{"openalex":2},"citation_searching":{},"related_works":{},"total":2},"duplicates_removed":1,"records_screened":1,"excluded_screening":0,"awaiting_screening":0,"reports_sought":0,"not_retrieved":0,"reports_assessed":0,"excluded_full_text":{"total":1,"reasons":[{"reason":"r","count":1}]},"excluded_by_criterion":{"screening":[],"full_text":[]},"included":0,"skipped_log_lines":0,"decided_outside_log":0}"#
+            r#"{"identified":{"databases":{"openalex":2},"citation_searching":{},"related_works":{},"total":2},"duplicates_removed":1,"records_screened":1,"excluded_screening":0,"awaiting_screening":0,"reports_sought":0,"not_retrieved":0,"reports_assessed":0,"excluded_full_text":{"total":1,"reasons":[{"reason":"r","count":1}]},"excluded_by_criterion":{"screening":[],"full_text":[]},"included":0,"skipped_log_lines":0,"decided_outside_log":0,"by_label":[{"label":"R1","identified":2,"distinct":1,"new_distinct":1,"duplicates":1}]}"#
         );
     }
 

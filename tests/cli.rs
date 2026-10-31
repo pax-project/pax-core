@@ -674,7 +674,14 @@ fn stats_json_is_one_object_for_scripts() {
             },
             "included": 0,
             "skipped_log_lines": 1,
-            "decided_outside_log": 1
+            "decided_outside_log": 1,
+            "by_label": [{
+                "label": null,
+                "identified": 5,
+                "distinct": 3,
+                "new_distinct": 3,
+                "duplicates": 2
+            }]
         })
     );
 }
