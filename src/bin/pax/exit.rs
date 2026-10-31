@@ -202,6 +202,29 @@ pub fn citations(results: &CitationResults) -> Code {
     }
 }
 
+/// The exit code of a `refs` / `cited-by` run over several seeds, from each
+/// seed's own code. A seed that fails fails only itself: every seed ending
+/// the same way gives that code (so not found only if no seed resolves);
+/// otherwise, partial if any seed got a list. With no list at all, a
+/// malformed seed is still a usage error.
+pub fn seeds(codes: impl IntoIterator<Item = Code>) -> Code {
+    let codes: Vec<Code> = codes.into_iter().collect();
+    let Some(&first) = codes.first() else {
+        return Code::Success;
+    };
+    if codes.iter().all(|&code| code == first) {
+        return first;
+    }
+    let listed = codes
+        .iter()
+        .any(|code| matches!(code, Code::Success | Code::Partial));
+    if !listed && codes.contains(&Code::Usage) {
+        Code::Usage
+    } else {
+        Code::Partial
+    }
+}
+
 /// The exit code of a search whose results are good but whose search log
 /// couldn't be written: a failure if the search otherwise succeeded, since
 /// the review's record of it is missing; any other code (partial, not found,
@@ -507,6 +530,25 @@ mod tests {
             ),
         ]);
         assert_eq!(citations(&results), Code::NotFound);
+    }
+
+    #[test]
+    fn a_seed_that_fails_fails_only_itself() {
+        assert_eq!(seeds([Code::Success, Code::Success]), Code::Success);
+        assert_eq!(seeds([Code::Success, Code::NotFound]), Code::Partial);
+        assert_eq!(seeds([Code::Usage, Code::Success]), Code::Partial);
+        assert_eq!(seeds([Code::Success, Code::Partial]), Code::Partial);
+        assert_eq!(
+            seeds([Code::NotFound, Code::ProvidersFailed]),
+            Code::Partial
+        );
+    }
+
+    #[test]
+    fn not_found_only_when_no_seed_resolves() {
+        assert_eq!(seeds([Code::NotFound, Code::NotFound]), Code::NotFound);
+        assert_eq!(seeds([Code::NotFound]), Code::NotFound);
+        assert_eq!(seeds([Code::Usage, Code::NotFound]), Code::Usage);
     }
 
     #[test]

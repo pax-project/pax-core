@@ -384,6 +384,91 @@ fn refs_prints_each_provider_s_reason_next_to_its_count() {
     }
 }
 
+/// [`library_without_ids`] with a second such paper, `milner1980`.
+fn library_with_two_seeds(name: &str) -> PathBuf {
+    let dir = library_without_ids(name);
+    let papers = dir.join("research").join("papers.nix");
+    let text = fs::read_to_string(&papers).unwrap();
+    let second = r#"  milner1980 = {
+    doi = null;
+    title = "A Calculus of Communicating Systems";
+    authors = [ "Robin Milner" ];
+    year = 1980;
+    source_url = null;
+    hash = null;
+    tags = [ ];
+    notes = null;
+  };
+}
+"#;
+    fs::write(
+        &papers,
+        text.trim_end().strip_suffix('}').unwrap().to_string() + second,
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn refs_takes_several_seeds_and_prints_each_one_s_counts() {
+    let dir = library_with_two_seeds("refs-many");
+    let output = pax_offline(&dir, &["refs", "hoare1978", "milner1980", "hoare1978"]);
+    // No seed resolves in any provider: not found.
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "seed hoare1978:\nopenalex: no list [unresolved]\nsemanticscholar: no list [unresolved]\n\
+         seed milner1980:\nopenalex: no list [unresolved]\nsemanticscholar: no list [unresolved]\n\
+         seed hoare1978: same paper as hoare1978\nopenalex: no list [unresolved]\nsemanticscholar: no list [unresolved]\n"
+    );
+    assert!(
+        stderr(&output).contains("(seed milner1980)"),
+        "{}",
+        stderr(&output)
+    );
+    // One line per seed per provider, all sharing the command's run id.
+    let log = fs::read_to_string(dir.join("research").join("search-log.jsonl")).unwrap();
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 6);
+    let run = |line: &str| {
+        let start = line.find(r#""run":""#).expect(line) + 7;
+        line[start..start + line[start..].find('"').unwrap()].to_string()
+    };
+    assert!(lines.iter().all(|line| run(line) == run(lines[0])));
+}
+
+#[test]
+fn a_seed_missing_from_the_library_fails_only_itself() {
+    let dir = library_with_two_seeds("refs-many-invalid");
+    let output = pax_offline(&dir, &["cited-by", "nosuchkey2000", "hoare1978"]);
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+    assert!(stdout(&output).contains("seed hoare1978:\nopenalex: no list [unresolved]"));
+    assert!(
+        stderr(&output).contains("(seed nosuchkey2000)"),
+        "{}",
+        stderr(&output)
+    );
+    let log = fs::read_to_string(dir.join("research").join("search-log.jsonl")).unwrap();
+    assert_eq!(log.lines().count(), 2, "only hoare1978 is logged");
+}
+
+#[test]
+fn refs_needs_a_seed() {
+    let dir = library_with_two_seeds("refs-no-seed");
+    assert_eq!(pax_offline(&dir, &["refs"]).status.code(), Some(2));
+}
+
+#[test]
+fn several_seeds_in_one_command_give_the_same_stats_as_one_at_a_time() {
+    let together = library_with_two_seeds("stats-together");
+    pax_offline(&together, &["refs", "hoare1978", "milner1980"]);
+    let apart = library_with_two_seeds("stats-apart");
+    pax_offline(&apart, &["refs", "hoare1978"]);
+    pax_offline(&apart, &["refs", "milner1980"]);
+    let stats = |dir: &PathBuf| stdout(&pax(dir, &["stats", "--json"]));
+    assert_eq!(stats(&together), stats(&apart));
+}
+
 #[test]
 fn an_unwritable_search_log_is_a_warning() {
     let dir = library_without_ids("search-log-unwritable");

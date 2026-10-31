@@ -31,19 +31,21 @@ enum Command {
         #[command(flatten)]
         paging: PageArgs,
     },
-    ///List the papers a paper cites, from OpenAlex and Semantic Scholar
+    ///List the papers one or more papers cite, from OpenAlex and Semantic Scholar
     Refs {
-        /// A reference from `search` (e.g. openalex:W2072794470) or a
-        /// library citation key (e.g. turing1936)
-        reference: String,
+        /// One or more seeds: a reference from `search` (e.g.
+        /// openalex:W2072794470) or a library citation key (e.g. turing1936)
+        #[arg(required = true, value_name = "SEED")]
+        seeds: Vec<String>,
         #[command(flatten)]
         paging: PageArgs,
     },
-    ///List the papers citing a paper, from OpenAlex and Semantic Scholar
+    ///List the papers citing one or more papers, from OpenAlex and Semantic Scholar
     CitedBy {
-        /// A reference from `search` (e.g. openalex:W2072794470) or a
-        /// library citation key (e.g. turing1936)
-        reference: String,
+        /// One or more seeds: a reference from `search` (e.g.
+        /// openalex:W2072794470) or a library citation key (e.g. turing1936)
+        #[arg(required = true, value_name = "SEED")]
+        seeds: Vec<String>,
         #[command(flatten)]
         paging: PageArgs,
     },
@@ -273,53 +275,66 @@ fn provider_failed<'a>(
     }
 }
 
-/// Prints each citation provider's count, marked with why its list is
-/// incomplete if it is, then one list merged across them, the way `search`
-/// does.
-fn show_citations(
-    sink: &mut impl Sink,
-    results: Result<pax_core::CitationResults, pax_core::PaxError>,
-) -> Code {
-    let results = match results {
-        Ok(results) => results,
-        Err(e) => return fail(sink, &e),
-    };
+/// Prints each seed's provider counts, marked with why a list is incomplete
+/// if it is, then one list merged across every seed and provider, the way
+/// `search` does. With one seed the output is that seed's alone; with
+/// several, each seed's counts sit under a `seed <seed>:` line and each
+/// merged row names the seeds that returned it.
+fn show_citations(sink: &mut impl Sink, results: &pax_core::SeedResults) -> Code {
     let index = pax_core::LibraryIndex::load(Path::new("."));
-    let listed = results.values().any(Result::is_ok);
-    for provider in pax_core::CITATION_PROVIDERS {
-        let Some(result) = results.get(&provider) else {
-            continue;
+    let several = results.seeds.len() > 1;
+    let mut codes = Vec::new();
+    for seed in &results.seeds {
+        // With several seeds, stderr lines name theirs.
+        let of_seed = |message: String| {
+            if several {
+                format!("{message} (seed {})", seed.seed)
+            } else {
+                message
+            }
         };
-        let reason = pax_core::incomplete_reason(result);
-        sink.citation_header(provider, result.as_ref().ok(), reason);
-        if let Err(e) = result {
-            sink.provider_error(provider, &e.to_string());
+        if several {
+            let same_as = seed.same_as.map(|i| results.seeds[i].seed.as_str());
+            sink.seed_header(&seed.seed, same_as);
         }
+        let lists = match &seed.results {
+            Ok(lists) => lists,
+            Err(e) => {
+                let failure = Failure::from(e);
+                sink.error(&of_seed(failure.to_string()));
+                codes.push(exit::code(failure));
+                continue;
+            }
+        };
+        for provider in pax_core::CITATION_PROVIDERS {
+            let Some(result) = lists.get(&provider) else {
+                continue;
+            };
+            let reason = pax_core::incomplete_reason(result);
+            sink.citation_header(provider, result.as_ref().ok(), reason);
+            if let Err(e) = result {
+                sink.provider_error(provider, &of_seed(e.to_string()));
+            }
+        }
+        codes.push(exit::citations(lists));
     }
-    if listed {
+    if results.any_listed() {
         let language_unknown = |work: &pax_core::CandidateWork| {
             results
-                .values()
-                .flatten()
+                .seeds
+                .iter()
+                .filter_map(|seed| seed.results.as_ref().ok())
+                .flat_map(|lists| lists.values().flatten())
                 .any(|page| page.is_language_unknown(work))
         };
-        sink.merged(&pax_core::merge_pages(&results), &index, &language_unknown);
-    }
-    exit::citations(&results)
-}
-
-/// [`show_citations`] for a logged lookup, then [`report_log`].
-fn show_logged_citations(
-    sink: &mut impl Sink,
-    logged: Result<pax_core::Logged<pax_core::CitationResults>, pax_core::PaxError>,
-) -> Code {
-    match logged {
-        Ok(pax_core::Logged { results, log, .. }) => {
-            let code = show_citations(sink, Ok(results));
-            report_log(sink, log, code)
+        if several {
+            let seeds: Vec<&str> = results.seeds.iter().map(|s| s.seed.as_str()).collect();
+            sink.merged_seeds(&results.merge(), &seeds, &index, &language_unknown);
+        } else if let Some(Ok(lists)) = results.seeds.first().map(|seed| &seed.results) {
+            sink.merged(&pax_core::merge_pages(lists), &index, &language_unknown);
         }
-        Err(e) => show_citations(sink, Err(e)),
     }
+    exit::seeds(codes)
 }
 
 /// Notes on stderr when a search wasn't logged, and fails a search whose
@@ -353,15 +368,17 @@ async fn main() -> ExitCode {
 }
 
 /// Whether `command` reads or writes the library in the current directory.
-/// A `show`, `refs` or `cited-by` reference with a `:` is a provider
-/// reference, which needs no library; without one it's a citation key.
+/// A `show` reference or `refs` / `cited-by` seed with a `:` is a provider
+/// reference, which needs no library; without one it's a citation key, so
+/// one such seed among several needs the library.
 /// `search --local` is checked after its arguments are.
 fn needs_library(command: &Command) -> bool {
     match command {
         Command::Init | Command::Search { .. } => false,
-        Command::Show { reference }
-        | Command::Refs { reference, .. }
-        | Command::CitedBy { reference, .. } => !reference.contains(':'),
+        Command::Show { reference } => !reference.contains(':'),
+        Command::Refs { seeds, .. } | Command::CitedBy { seeds, .. } => {
+            seeds.iter().any(|seed| !seed.contains(':'))
+        }
         Command::Add { .. }
         | Command::List { .. }
         | Command::Remove { .. }
@@ -491,17 +508,19 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             sink.merged(&pax_core::merge_pages(&results), &index, &language_unknown);
             report_log(sink, log, exit::provider_results(results.values()))
         }
-        Command::Refs { reference, paging } => {
+        Command::Refs { seeds, paging } => {
             let options = paging.options();
-            let results =
-                pax_core::references_logged(&reference, &options, Path::new("."), config).await;
-            show_logged_citations(sink, results)
+            let pax_core::Logged { results, log, .. } =
+                pax_core::references_many_logged(&seeds, &options, Path::new("."), config).await;
+            let code = show_citations(sink, &results);
+            report_log(sink, log, code)
         }
-        Command::CitedBy { reference, paging } => {
+        Command::CitedBy { seeds, paging } => {
             let options = paging.options();
-            let results =
-                pax_core::cited_by_logged(&reference, &options, Path::new("."), config).await;
-            show_logged_citations(sink, results)
+            let pax_core::Logged { results, log, .. } =
+                pax_core::cited_by_many_logged(&seeds, &options, Path::new("."), config).await;
+            let code = show_citations(sink, &results);
+            report_log(sink, log, code)
         }
         Command::Show { reference } => {
             match pax_core::show_reference(&reference, Path::new("."), config).await {
