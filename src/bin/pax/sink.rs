@@ -7,8 +7,8 @@
 //! stdout (`pax search … > results.txt`) captures the results alone.
 
 use pax_core::{
-    CandidateWork, CheckReport, CheckStatus, FetchOutcome, FilterApplication, LibraryIndex,
-    MergeReport, Paper, ProviderId, SearchPage, Stats,
+    CandidateWork, CheckReport, CheckStatus, FetchOutcome, FilterApplication, IncompleteReason,
+    LibraryIndex, MergeReport, Paper, ProviderId, SearchPage, Stats,
 };
 
 pub trait Sink {
@@ -24,6 +24,15 @@ pub trait Sink {
     fn provider_note(&mut self, provider: ProviderId, message: &str);
     fn provider_header(&mut self, provider: ProviderId);
     fn page_header(&mut self, provider: ProviderId, page: &SearchPage);
+    /// One citation provider's count, as [`Sink::page_header`], marked with
+    /// why the list is incomplete, if it is. `page` is `None` when the
+    /// provider returned no list.
+    fn citation_header(
+        &mut self,
+        provider: ProviderId,
+        page: Option<&SearchPage>,
+        reason: Option<IncompleteReason>,
+    );
     /// Results, each marked if it's in the library or excluded.
     fn candidates(&mut self, candidates: &[CandidateWork], index: &LibraryIndex);
     /// Search or citation results merged across providers. A row is marked
@@ -76,46 +85,21 @@ impl Sink for TextSink {
     }
 
     fn page_header(&mut self, provider: ProviderId, page: &SearchPage) {
-        let retrieved = page.retrieved();
-        let Some(total) = page.total else {
-            println!("{provider}: retrieved {retrieved} (total not reported)");
-            return;
-        };
-        let scanned = page.scanned;
-        let skipped = scanned.saturating_sub(retrieved as u64);
-        println!("{provider}: retrieved {retrieved} of {total}");
-        if page.is_complete() {
-            if skipped > 0 && !page.has_post_retrieval_filter() {
-                // e.g. references Semantic Scholar couldn't match to a paper.
-                self.warning(&format!(
-                    "{provider}: {skipped} entries without a {provider} record skipped"
-                ));
-            }
-        } else if let Some(max) = page.max_retrievable.filter(|&max| scanned >= max) {
-            self.warning(&format!("{provider} serves at most {max} per query"));
-        } else {
-            self.warning(&format!(
-                "{provider}: more results available; use --limit N or --all for more"
-            ));
-        }
-        for filter in &page.filters {
-            match filter.application {
-                FilterApplication::PostRetrieval => self.warning(&format!(
-                    "{provider}: {} filter applied post-retrieval to the {scanned} records fetched; the total counts records before it",
-                    filter.kind
-                )),
-                FilterApplication::NotApplied => self.warning(&format!(
-                    "{provider}: {} filter not applied: {provider} has no such data, so these results ignore it",
-                    filter.kind
-                )),
-                _ => {}
-            }
-        }
-        let unknown = page.language_unknown.len();
-        if unknown > 0 {
-            self.warning(&format!(
-                "{provider}: {unknown} records have no language, so the language filter couldn't check them; kept and marked [language unknown]"
-            ));
+        self.counts(provider, page, "");
+    }
+
+    fn citation_header(
+        &mut self,
+        provider: ProviderId,
+        page: Option<&SearchPage>,
+        reason: Option<IncompleteReason>,
+    ) {
+        let mark = reason
+            .map(|reason| format!(" [{reason}]"))
+            .unwrap_or_default();
+        match page {
+            Some(page) => self.counts(provider, page, &mark),
+            None => println!("{provider}: no list{mark}"),
         }
     }
 
@@ -293,6 +277,54 @@ impl Sink for TextSink {
             "{}",
             serde_json::to_string_pretty(stats).expect("Stats serializes")
         );
+    }
+}
+
+impl TextSink {
+    /// A provider's `retrieved N of M` line, ending in `mark`, then the
+    /// warnings about what the page leaves out.
+    fn counts(&mut self, provider: ProviderId, page: &SearchPage, mark: &str) {
+        let retrieved = page.retrieved();
+        let Some(total) = page.total else {
+            println!("{provider}: retrieved {retrieved} (total not reported){mark}");
+            return;
+        };
+        let scanned = page.scanned;
+        let skipped = scanned.saturating_sub(retrieved as u64);
+        println!("{provider}: retrieved {retrieved} of {total}{mark}");
+        if page.is_complete() {
+            if skipped > 0 && !page.has_post_retrieval_filter() {
+                // e.g. references Semantic Scholar couldn't match to a paper.
+                self.warning(&format!(
+                    "{provider}: {skipped} entries without a {provider} record skipped"
+                ));
+            }
+        } else if let Some(max) = page.max_retrievable.filter(|&max| scanned >= max) {
+            self.warning(&format!("{provider} serves at most {max} per query"));
+        } else {
+            self.warning(&format!(
+                "{provider}: more results available; use --limit N or --all for more"
+            ));
+        }
+        for filter in &page.filters {
+            match filter.application {
+                FilterApplication::PostRetrieval => self.warning(&format!(
+                    "{provider}: {} filter applied post-retrieval to the {scanned} records fetched; the total counts records before it",
+                    filter.kind
+                )),
+                FilterApplication::NotApplied => self.warning(&format!(
+                    "{provider}: {} filter not applied: {provider} has no such data, so these results ignore it",
+                    filter.kind
+                )),
+                _ => {}
+            }
+        }
+        let unknown = page.language_unknown.len();
+        if unknown > 0 {
+            self.warning(&format!(
+                "{provider}: {unknown} records have no language, so the language filter couldn't check them; kept and marked [language unknown]"
+            ));
+        }
     }
 }
 
