@@ -108,12 +108,7 @@ impl SemanticScholarProvider {
                         ("fields", PAPER_FIELDS.to_string()),
                     ];
                     let response: ListResponse = self.get_json(&path, &query).await?;
-                    let entries = response.data.ok_or_else(|| {
-                        ProviderError::Request(format!(
-                            "Semantic Scholar withholds this paper's {} at the publisher's request",
-                            list.endpoint()
-                        ))
-                    })?;
+                    let entries = response.data.ok_or_else(|| withheld(list))?;
                     let fetched = entries.len();
                     let works = entries
                         .into_iter()
@@ -246,6 +241,17 @@ const MAX_CITATIONS_RETRIEVABLE: u64 = 9_999;
 /// asks for its own defaults, which leave out the DOI, date, venue and PDF.
 const PAPER_FIELDS: &str =
     "paperId,title,authors,year,publicationDate,externalIds,venue,openAccessPdf,publicationTypes";
+
+/// The error for a list page that came back with `data: null`: the
+/// publisher has Semantic Scholar withhold the list.
+fn withheld(list: CitationList) -> ProviderError {
+    ProviderError::Withheld {
+        message: format!(
+            "Semantic Scholar withholds this paper's {} at the publisher's request",
+            list.endpoint()
+        ),
+    }
+}
 
 /// Maps an error looking up one paper (a seed, or `get`'s id or DOI): one
 /// Semantic Scholar doesn't have is [`ProviderError::NotFound`].
@@ -604,5 +610,17 @@ mod tests {
     fn pdf_url_is_none_when_not_open_access() {
         let work = CandidateWork::from(paper("Paywalled Paper"));
         assert_eq!(work.pdf_url, None);
+    }
+
+    #[test]
+    fn a_list_with_null_data_is_withheld_with_a_readable_message() {
+        let response: ListResponse = serde_json::from_str(r#"{"data":null}"#).unwrap();
+        assert!(response.data.is_none());
+        let error = withheld(CitationList::References);
+        assert!(matches!(error, ProviderError::Withheld { .. }));
+        assert_eq!(
+            error.to_string(),
+            "Semantic Scholar withholds this paper's references at the publisher's request"
+        );
     }
 }
