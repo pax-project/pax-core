@@ -130,6 +130,21 @@ Error: semanticscholar: Semantic Scholar withholds this paper's references at th
 
 Any `withheld`, `failed` or `unresolved` list makes the command exit 3 while another provider returned a list (4 when no provider knows the paper at all); `truncated` alone exits 0, since you asked for that limit. In the library, `pax_core::incomplete_lists` returns the same reasons per provider.
 
+#### Several seeds
+
+A snowballing round starts from a set of papers, so `refs` and `cited-by` take several seeds at once, each a `provider:id` reference or a citation key:
+
+```Bash
+pax refs vaswani2017 he2016 openalex:W2194775991
+pax cited-by vaswani2017 arxiv:1810.04805 --year 2020-
+```
+
+Each seed's provider counts print under a `seed <seed>:` line, with the same reasons as for one seed. Then one list is merged across every seed and provider, and each row gets a `seeds:` line naming the seeds whose lists returned it. `--limit`, `--all` and the filters apply per seed per provider, as for one seed. Seeds are looked up one after another, not all at once, because Semantic Scholar's unauthenticated rate limit is tight.
+
+Two seeds that are the same paper (the same string, or sharing a provider id, DOI or arXiv id, e.g. a citation key and the `openalex:` id of the same work) are looked up once. The later one prints `same paper as <seed>`, and its lists count as the earlier one's. A seed that doesn't resolve (a malformed reference, or a citation key not in the library) fails only itself, and the other seeds still answer. The command exits 4 only when no seed resolves, and exits 3 when some seeds fail while others return lists.
+
+With one seed, the output is exactly as above. In the library, `pax_core::references_many` / `cited_by_many` (and `references_many_logged` / `cited_by_many_logged`) return a `SeedResults`: each seed's per-provider lists and `incomplete()` reasons, and `merge()`, the merged list whose rows report their `seeds()` and `providers()`.
+
 ### Search log
 
 Inside a library, every `search` (a query or `--author`), `refs` and `cited-by` appends to `research/search-log.jsonl`: the record of every source a review searched, when, and with what search string, filters and limit — what PRISMA 2020 asks a review to report — plus every record retrieved, so duplicates can be counted across the whole review, not just one command. It's always on, created on the first search, and append-only: pax never rewrites a line, so commit it with the library. `search --doi` and `search --local` aren't logged: one resolves a known paper and the other reads your own library, neither searches a database. Outside a library a search still works, isn't logged, and says so on stderr. If the log can't be written, the results still print with a warning on stderr, and a search that otherwise succeeded exits 1.
@@ -148,6 +163,7 @@ Each line is one JSON object for one provider's part in one command, so a comman
 | `seed` | The paper as given: a `provider:id` reference or a citation key. Only on `refs` / `cited-by`. |
 | `provider` | `openalex`, `crossref`, `semanticscholar` or `arxiv`. |
 | `date` | When the command ran, ISO 8601 in UTC to the second. Every line of one command has the same date. |
+| `run` | An opaque id shared by every line one command wrote, and by no other command's. It ties together the lines of a `refs` / `cited-by` run over several seeds. Lines written before pax recorded it don't have it. |
 | `limit` | The `--limit` per provider, or `"all"` for `--all`. |
 | `filters` | One object per `--year` / `--type` / `--lang` given: `filter` (`year`, `type`, `language`), `value` as given, and `applied`: `server-side` (in the provider's query, so `total` reflects it), `post-retrieval` (by pax on the retrieved records), or `not-applied` (the provider has no such data). `applied` is absent when the provider failed. Empty without filters. |
 | `total` | How many records the provider reported matching; `null` when it doesn't say, or failed. |
@@ -155,9 +171,11 @@ Each line is one JSON object for one provider's part in one command, so a comman
 | `keys` | One array per retrieved record, in order: the record's identity keys, strongest first — `doi:<doi>`, `arxiv:<id>` (no version), `title:<normalized title>\|<year>` — the same keys `search` merges by. An empty array is a record with none, which can't be matched. Absent when the provider failed. |
 | `error` | Why the provider returned nothing: a failed request, or not knowing the `refs` / `cited-by` seed. Only present when it failed. |
 | `reason` | What kind of failure `error` is: `withheld`, `failed` or `unresolved` (see [Citation graph](#citation-graph)). Only present when it failed. |
-| `merge` | The command's merge counts across every provider that answered: `before` (records), `after` (distinct papers) and `unmatched` (records with no key), as `search` prints them. |
+| `merge` | The command's merge counts (with several seeds, that seed's) across every provider that answered: `before` (records), `after` (distinct papers) and `unmatched` (records with no key), as `search` prints them. |
 
 The merge counts sit on every line of a command rather than on a separate summary line, so every line has the same shape and a reader never has to tell two kinds apart; to read a command's counts, take them from any one of its lines. Keys are kept per record rather than pooled, because whether two records are the same paper depends on all of each one's keys (a title match never joins two different DOIs).
+
+A `refs` or `cited-by` with several seeds writes one line per seed per provider. Each line has `seed` set to its own seed and `merge` set to that seed's own counts, exactly as if each seed had been run alone, so `pax stats` gives the same numbers either way. A seed that's the same paper as an earlier one repeats that seed's lines under its own `seed`, as running it alone would. An invalid seed writes no lines. The cross-seed merge isn't logged, but the shared `run` id lets you recompute it from the lines.
 
 The project is designed to be:
 - local-first
@@ -279,7 +297,7 @@ Every command exits with a code a script can branch on:
 | 1 | Any other failure, e.g. `nix` failing to fetch or build; also `check` or `sync` finding problems in the library, or a `search`, `refs` or `cited-by` that succeeded but couldn't write the [search log](#search-log). |
 | 2 | Wrong arguments: an unknown command or flag, a malformed `provider:id` or citation key, or flags that can't be combined. |
 | 3 | Partial: in `search`, `refs` or `cited-by`, at least one provider failed (network, rate limit, provider error) while others answered, so the results are incomplete. In `refs` and `cited-by` that includes a list withheld by the provider or a provider that can't look the seed up, since its list is still missing; a list cut short by `--limit` isn't (see [Citation graph](#citation-graph)). In `search --doi`, a provider that has no record of the DOI isn't a failure: it answered, so when the others returned results `pax` exits 0 and notes it on stderr. |
-| 4 | Not found: a reference, seed or citation key doesn't resolve, e.g. no provider has a record of the `refs` / `cited-by` seed or the `search --doi` DOI, or `unexclude` names a paper that isn't excluded. |
+| 4 | Not found: a reference, seed or citation key doesn't resolve, e.g. no provider has a record of the `refs` / `cited-by` seed (with several seeds, of any of them) or the `search --doi` DOI, or `unexclude` names a paper that isn't excluded. |
 | 5 | Refused: the library rejected the operation, e.g. adding or excluding a paper already declared, adding an excluded paper, renaming to a citation key in use, fetching a paper with no PDF source, or `init` where a library exists. |
 | 6 | Every provider failed (network, rate limit, provider error). |
 | 7 | The library is missing, not initialized, or unreadable. A command that needs a library checks for `research/papers.nix` before doing anything else, so `add` fails before any network call, and so do a citation key given to `show`, `refs` or `cited-by` and `search --local`; a `provider:id` reference and a plain `search` work without one. |
