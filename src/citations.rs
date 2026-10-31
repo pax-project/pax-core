@@ -50,9 +50,99 @@ pub struct SeedLookupError {
     pub error: ProviderError,
 }
 
+impl CitationError {
+    /// Why this error leaves the provider's list missing.
+    pub fn reason(&self) -> IncompleteReason {
+        match self {
+            CitationError::Unresolvable { .. } | CitationError::SeedNotFound { .. } => {
+                IncompleteReason::Unresolved
+            }
+            CitationError::Provider(ProviderError::Withheld { .. }) => IncompleteReason::Withheld,
+            // `references_page`/`citations_page` report a missing seed as
+            // `NotFound`, which `seed_error` names `SeedNotFound`.
+            CitationError::Provider(ProviderError::NotFound) => IncompleteReason::Unresolved,
+            CitationError::Provider(_) => IncompleteReason::Failed,
+        }
+    }
+}
+
+/// Why one provider's citation list for a seed is incomplete, so a caller
+/// knows not to treat it as the paper's whole list — and, for a review, to
+/// fall back to the paper's own bibliography.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum IncompleteReason {
+    /// The provider holds the list back, e.g. at the publisher's request.
+    Withheld,
+    /// The request failed: network, rate limit, an unreadable response.
+    Failed,
+    /// The seed can't be looked up in this provider: no id, DOI or arXiv id
+    /// is known for it there, or the provider has no record of it.
+    Unresolved,
+    /// The limit stopped retrieval before the provider's total (see
+    /// [`SearchPage::is_complete`]). The list returned is good, just short —
+    /// the only reason that isn't a failure.
+    Truncated,
+}
+
+impl IncompleteReason {
+    /// The reason's name, as the CLI prints it and the search log records
+    /// it: `withheld`, `failed`, `unresolved` or `truncated`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IncompleteReason::Withheld => "withheld",
+            IncompleteReason::Failed => "failed",
+            IncompleteReason::Unresolved => "unresolved",
+            IncompleteReason::Truncated => "truncated",
+        }
+    }
+
+    /// Whether the provider returned no list at all, rather than a short
+    /// one. Every reason but [`IncompleteReason::Truncated`].
+    pub fn is_missing(self) -> bool {
+        self != IncompleteReason::Truncated
+    }
+}
+
+impl std::fmt::Display for IncompleteReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One provider whose citation list for a seed is incomplete, and why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Incomplete {
+    pub provider: ProviderId,
+    pub reason: IncompleteReason,
+}
+
 /// Each citation provider's list, by provider. A provider's own failure —
 /// including not knowing the seed — doesn't fail the others.
 pub type CitationResults = HashMap<ProviderId, Result<SearchPage, CitationError>>;
+
+/// Why one provider's result is incomplete, if it is: the error's
+/// [`CitationError::reason`], or [`IncompleteReason::Truncated`] for a list
+/// retrieval stopped short of the provider's total.
+pub fn incomplete_reason(result: &Result<SearchPage, CitationError>) -> Option<IncompleteReason> {
+    match result {
+        Ok(page) => (!page.is_complete()).then_some(IncompleteReason::Truncated),
+        Err(e) => Some(e.reason()),
+    }
+}
+
+/// Every provider in `results` whose list is incomplete, with why, in
+/// [`CITATION_PROVIDERS`] order. Empty when every list is whole.
+pub fn incomplete_lists(results: &CitationResults) -> Vec<Incomplete> {
+    CITATION_PROVIDERS
+        .iter()
+        .filter_map(|&provider| {
+            let reason = incomplete_reason(results.get(&provider)?)?;
+            Some(Incomplete { provider, reason })
+        })
+        .collect()
+}
 
 /// The providers [`references`] and [`cited_by`] ask, in display order.
 /// Crossref isn't one: its reference lists are publisher-deposited and often
@@ -536,6 +626,88 @@ mod tests {
         );
         let report = crate::merge_pages(&results);
         assert_eq!((report.before, report.after), (1, 1));
+    }
+
+    #[test]
+    fn each_citation_error_has_a_reason() {
+        let cases = [
+            (
+                CitationError::Unresolvable {
+                    provider: ProviderId::OpenAlex,
+                    lookup_error: None,
+                },
+                IncompleteReason::Unresolved,
+            ),
+            (
+                CitationError::SeedNotFound {
+                    provider: ProviderId::OpenAlex,
+                    key: "W1".to_string(),
+                },
+                IncompleteReason::Unresolved,
+            ),
+            (
+                CitationError::Provider(ProviderError::Withheld {
+                    message: "withheld".to_string(),
+                }),
+                IncompleteReason::Withheld,
+            ),
+            (
+                CitationError::Provider(ProviderError::Request("429".to_string())),
+                IncompleteReason::Failed,
+            ),
+        ];
+        for (error, reason) in cases {
+            assert_eq!(error.reason(), reason, "{error}");
+        }
+    }
+
+    #[test]
+    fn incomplete_lists_name_each_provider_and_reason_in_order() {
+        let a = work(ProviderId::OpenAlex, "W1", "A Study", Some("10.1/a"));
+        let mut results: CitationResults = HashMap::new();
+        // Retrieved one of 40: the limit cut it short.
+        results.insert(
+            ProviderId::OpenAlex,
+            Ok(SearchPage::new(vec![a.clone()], Some(40), None)),
+        );
+        results.insert(
+            ProviderId::SemanticScholar,
+            Err(CitationError::Provider(ProviderError::Withheld {
+                message: "withheld".to_string(),
+            })),
+        );
+        assert_eq!(
+            incomplete_lists(&results),
+            [
+                Incomplete {
+                    provider: ProviderId::OpenAlex,
+                    reason: IncompleteReason::Truncated,
+                },
+                Incomplete {
+                    provider: ProviderId::SemanticScholar,
+                    reason: IncompleteReason::Withheld,
+                },
+            ]
+        );
+
+        results.insert(
+            ProviderId::OpenAlex,
+            Ok(SearchPage::new(vec![a], Some(1), None)),
+        );
+        results.remove(&ProviderId::SemanticScholar);
+        assert!(incomplete_lists(&results).is_empty());
+    }
+
+    #[test]
+    fn only_truncated_leaves_a_list() {
+        assert!(!IncompleteReason::Truncated.is_missing());
+        for reason in [
+            IncompleteReason::Withheld,
+            IncompleteReason::Failed,
+            IncompleteReason::Unresolved,
+        ] {
+            assert!(reason.is_missing(), "{reason}");
+        }
     }
 
     #[test]
