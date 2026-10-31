@@ -208,10 +208,10 @@ Papers you've screened and decided against go in `research/excluded.nix`, next t
 
 ```Bash
 pax exclude openalex:W2072794470 --reason "not empirical" --stage screening
-pax exclude 10.1145/3474085.3475385 --reason "wrong domain" --stage full-text
+pax exclude 10.1145/3474085.3475385 --reason "wrong domain" --stage full-text --criterion X3 --round R1
 ```
 
-The reference is a DOI or a `search` result. pax looks up the title, and keys the entry by the paper's DOI when it has one (so the exclusion matches it from any provider), otherwise by the `provider:id`. Keys are version-less: `arxiv:2301.01234v2` is keyed as `arxiv:2301.01234`, and every version of an excluded paper counts as excluded. `--stage` is `screening` (title/abstract) or `full-text`, the two exclusion stages a PRISMA flow diagram reports. `--title` sets the title yourself, and is required when the reference can't be resolved. The entry also records the publication year when the provider gives one; `--year YYYY` sets it yourself, like `--title`. Excluding the same paper again replaces its entry, updating its reason and stage; a paper already in `papers.nix` can't be excluded until it's removed.
+The reference is a DOI or a `search` result. pax looks up the title, and keys the entry by the paper's DOI when it has one (so the exclusion matches it from any provider), otherwise by the `provider:id`. Keys are version-less: `arxiv:2301.01234v2` is keyed as `arxiv:2301.01234`, and every version of an excluded paper counts as excluded. `--stage` is `screening` (title/abstract) or `full-text`, the two exclusion stages a PRISMA flow diagram reports. `--title` sets the title yourself, and is required when the reference can't be resolved. The entry also records the publication year when the provider gives one; `--year YYYY` sets it yourself, like `--title`. `--criterion` records the protocol's exclusion criterion (e.g. `X3`) and `--round` the screening round (e.g. `R1`, the same label you'd give that round's searches). Both are optional free text that pax doesn't check against your protocol, and `--reason` is still required. Excluding the same paper again replaces its reason, stage, year, criterion and round; a paper already in `papers.nix` can't be excluded until it's removed.
 
 ```Nix
 {
@@ -220,6 +220,8 @@ The reference is a DOI or a `search` result. pax looks up the title, and keys th
     year = 2021;
     reason = "wrong domain";
     stage = "full-text";
+    criterion = "X3";
+    round = "R1";
   };
 }
 ```
@@ -275,6 +277,7 @@ Included
 | Reports not retrieved | Declared papers with no `source_url` or no `hash` — what `pax check` reports as not fetched. Decided from `papers.nix` alone, without the network, so a recorded source that has since gone away isn't counted; `pax check` finds those. |
 | Reports assessed for eligibility | Reports sought minus reports not retrieved. |
 | Reports excluded | `excluded.nix` entries with `stage = "full-text"`, then a count per `reason` (exact text, sorted). |
+| …by criterion | Under both excluded boxes, a count per `criterion` (exact text, sorted, `no criterion` last). Listed only once some exclusion records a criterion; `--json` always has it. |
 | Studies included in review | The papers declared in `papers.nix` that have a fetchable artifact. A declared paper without one counts only as not retrieved, never as both. |
 
 Records from [`pax related`](#related-works) are counted in their own box, not with citation searching. PRISMA 2020 puts both under identification via other methods, and asks for each such source to be reported separately. A provider's recommendation isn't a citation edge, so counting it as citation searching would overstate what reference lists and forward citations found. In the diagram, report the box as its own "other methods" source (e.g. "related-works recommendations (OpenAlex, Semantic Scholar)"). Records found by both are still one paper when duplicates are removed, since that count runs across the whole log.
@@ -301,6 +304,10 @@ A library without a search log or `excluded.nix` counts them as empty. A log lin
   "not_retrieved": 1,
   "reports_assessed": 1,
   "excluded_full_text": { "total": 1, "reasons": [{ "reason": "not empirical", "count": 1 }] },
+  "excluded_by_criterion": {
+    "screening": [{ "criterion": null, "count": 1 }],
+    "full_text": [{ "criterion": null, "count": 1 }]
+  },
   "included": 0,
   "skipped_log_lines": 1,
   "decided_outside_log": 1
