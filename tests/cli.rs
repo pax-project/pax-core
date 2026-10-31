@@ -167,6 +167,71 @@ fn adding_a_declared_paper_is_refused_with_5() {
     assert_eq!(papers.matches("doi = ").count(), 1, "nothing was added");
 }
 
+/// A library with `lamport1978` declared and one paper excluded under its
+/// DOI.
+fn library_with_exclusion(name: &str) -> PathBuf {
+    let dir = library(name);
+    fs::write(
+        dir.join("research").join("excluded.nix"),
+        r#"{
+  "10.1/abc" = { title = "A"; reason = "not empirical"; stage = "screening"; };
+}
+"#,
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn adding_an_excluded_paper_is_refused_with_5_until_it_is_unexcluded() {
+    let dir = library_with_exclusion("add-excluded");
+    let papers = fs::read_to_string(dir.join("research").join("papers.nix")).unwrap();
+
+    let output = pax_offline(&dir, &["add", "crossref:10.1/ABC"]);
+    assert_eq!(output.status.code(), Some(5), "{}", stderr(&output));
+    assert!(stdout(&output).is_empty());
+    assert_eq!(
+        stderr(&output).trim_end(),
+        "Error: crossref:10.1/ABC was excluded at screening (\"not empirical\", key 10.1/abc); \
+         run `pax unexclude 10.1/abc` first to reverse that decision"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("research").join("papers.nix")).unwrap(),
+        papers
+    );
+
+    let output = pax(&dir, &["unexclude", "10.1/abc"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "Unexcluded 10.1/abc (screening, \"not empirical\"): A\n"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("research").join("excluded.nix")).unwrap(),
+        "{\n}\n"
+    );
+
+    // No longer refused: offline, resolving the reference is what fails now.
+    let output = pax_offline(&dir, &["add", "crossref:10.1/ABC"]);
+    assert_eq!(output.status.code(), Some(6), "{}", stderr(&output));
+}
+
+#[test]
+fn unexcluding_what_isnt_excluded_exits_4() {
+    let dir = library_with_exclusion("unexclude-missing");
+    for reference in ["10.1/other", "crossref:10.1/other"] {
+        let output = pax_offline(&dir, &["unexclude", reference]);
+        assert_eq!(output.status.code(), Some(4), "pax unexclude {reference}");
+        assert!(stdout(&output).is_empty());
+        assert!(stderr(&output).contains("isn't excluded"));
+    }
+    assert!(
+        fs::read_to_string(dir.join("research").join("excluded.nix"))
+            .unwrap()
+            .contains("10.1/abc")
+    );
+}
+
 /// The same paper added twice: the second `add` names the first one's key.
 #[test]
 #[ignore = "needs the network"]

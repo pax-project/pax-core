@@ -101,10 +101,12 @@ pub fn code(failure: Failure<'_>) -> Code {
             | PaxError::MissingExclusionReason => Code::Usage,
             PaxError::NotFound(_)
             | PaxError::NoSuchPaper(_)
+            | PaxError::NotExcluded(_)
             | PaxError::ExclusionTitleUnresolved(..) => Code::NotFound,
             PaxError::CitationKeyExists(_)
             | PaxError::ExcludingDeclaredPaper(..)
             | PaxError::AlreadyDeclared { .. }
+            | PaxError::AlreadyExcluded { .. }
             | PaxError::NoSourceUrl(_) => Code::Refused,
             PaxError::Fetch(_) | PaxError::Build(_) | PaxError::Upload(_) => Code::Failure,
             // A variant added later, until it is mapped here.
@@ -198,6 +200,11 @@ mod tests {
 
     fn pax(e: PaxError) -> Code {
         code(Failure::Pax(&e))
+    }
+
+    #[test]
+    fn unexcluding_what_isnt_excluded_is_not_found() {
+        assert_eq!(pax(PaxError::NotExcluded("10.1/x".into())), Code::NotFound);
     }
 
     #[test]
@@ -377,6 +384,15 @@ mod tests {
             pax(PaxError::AlreadyDeclared {
                 reference: "crossref:10.1/x".into(),
                 citation_key: "a2020".into(),
+            }),
+            Code::Refused
+        );
+        assert_eq!(
+            pax(PaxError::AlreadyExcluded {
+                reference: "openalex:W1".into(),
+                key: "10.1/x".into(),
+                stage: pax_core::ExclusionStage::Screening,
+                reason: "not empirical".into(),
             }),
             Code::Refused
         );

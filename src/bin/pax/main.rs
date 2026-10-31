@@ -89,6 +89,12 @@ enum Command {
         #[arg(long)]
         title: Option<String>,
     },
+    ///Reverse an exclusion: remove a paper's entry from research/excluded.nix
+    Unexclude {
+        /// The exclusion key (as `add` names it), a DOI, or a reference from
+        /// `search`, e.g. openalex:W2072794470
+        reference: String,
+    },
     ///Modify a declared paper's tags, notes, citation key, or metadata
     Edit {
         /// The paper's citation key, e.g. turing1936
@@ -348,6 +354,7 @@ fn needs_library(command: &Command) -> bool {
         | Command::List { .. }
         | Command::Remove { .. }
         | Command::Exclude { .. }
+        | Command::Unexclude { .. }
         | Command::Edit { .. }
         | Command::Export { .. }
         | Command::Fetch { .. }
@@ -556,6 +563,18 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 Err(e @ pax_core::PaxError::ExclusionTitleUnresolved(..)) => {
                     sink.error(&format!("{e} with --title"));
                     exit::code(Failure::Pax(&e))
+                }
+                Err(e) => fail(sink, &e),
+            }
+        }
+        Command::Unexclude { reference } => {
+            match pax_core::unexclude_paper(&reference, Path::new("."), config).await {
+                Ok(exclusion) => {
+                    sink.message(&format!(
+                        "Unexcluded {} ({}, {:?}): {}",
+                        exclusion.key, exclusion.stage, exclusion.reason, exclusion.title
+                    ));
+                    Code::Success
                 }
                 Err(e) => fail(sink, &e),
             }
