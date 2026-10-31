@@ -94,6 +94,10 @@ pub struct SearchLogEntry {
     /// was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
+    /// The search's label ([`SearchOptions::label`]), the same on every line
+    /// of one command; absent when it had none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// How many records were asked for per provider.
     pub limit: LoggedLimit,
     /// Every requested filter, with how this provider applied it.
@@ -233,6 +237,7 @@ pub fn log_entries<E: fmt::Display>(
                 provider: provider.to_string(),
                 date: date.clone(),
                 run: None,
+                label: options.label.clone(),
                 limit: options.limit.into(),
                 filters: Vec::new(),
                 total: None,
@@ -937,6 +942,43 @@ mod tests {
                 entry
             );
         }
+    }
+
+    #[test]
+    fn a_label_is_on_every_line_and_absent_without_one() {
+        let labelled = log_entries(
+            SearchCommand::Refs,
+            "lamport1978",
+            &filtered_options().with_label("R2-backward"),
+            &search_results(),
+            date(),
+        );
+        assert_eq!(labelled.len(), 3);
+        for entry in &labelled {
+            assert_eq!(entry.label.as_deref(), Some("R2-backward"));
+            let line = serde_json::to_string(entry).unwrap();
+            assert!(line.contains(r#""label":"R2-backward""#), "{line}");
+        }
+
+        let unlabelled = log_entries(
+            SearchCommand::Refs,
+            "lamport1978",
+            &filtered_options(),
+            &search_results(),
+            date(),
+        );
+        for entry in &unlabelled {
+            assert_eq!(entry.label, None);
+            let line = serde_json::to_string(entry).unwrap();
+            assert!(!line.contains("label"), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_line_written_before_labels_reads_as_unlabelled() {
+        let line = r#"{"v":1,"command":"search","query":"q","provider":"openalex","date":"2026-01-01T00:00:00Z","limit":50,"filters":[],"total":null,"retrieved":0,"keys":[],"merge":{"before":0,"after":0,"unmatched":0}}"#;
+        let entry: SearchLogEntry = serde_json::from_str(line).unwrap();
+        assert_eq!(entry.label, None);
     }
 
     fn scratch_library(name: &str) -> PathBuf {
