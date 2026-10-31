@@ -183,6 +183,10 @@ enum Command {
         /// Print the counts as one JSON object, for scripts and agents
         #[arg(long)]
         json: bool,
+        /// Also print the records identified under each search-log label
+        /// (`--label`); `--json` always includes them, as `by_label`
+        #[arg(long = "by-label")]
+        by_label: bool,
     },
 }
 
@@ -205,6 +209,10 @@ struct PageArgs {
     /// Language, as an ISO 639-1 code (e.g. en)
     #[arg(long)]
     lang: Option<String>,
+    /// Label the search in the search log, e.g. R2-backward, for `stats
+    /// --by-label`; doesn't change what is searched
+    #[arg(long)]
+    label: Option<String>,
 }
 
 impl PageArgs {
@@ -215,6 +223,7 @@ impl PageArgs {
             || self.year.is_some()
             || self.doc_type.is_some()
             || self.lang.is_some()
+            || self.label.is_some()
     }
 
     fn options(self) -> SearchOptions {
@@ -234,7 +243,11 @@ impl PageArgs {
         if let Some(lang) = self.lang {
             filters = filters.with_language(lang);
         }
-        defaults.with_limit(limit).with_filters(filters)
+        let options = defaults.with_limit(limit).with_filters(filters);
+        match self.label {
+            Some(label) => options.with_label(label),
+            None => options,
+        }
     }
 }
 
@@ -472,7 +485,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 return fail(
                     sink,
                     Failure::Usage(
-                        "--limit, --all, --year, --type, and --lang only apply to QUERY and --author searches",
+                        "--limit, --all, --year, --type, --lang, and --label only apply to QUERY and --author searches",
                     ),
                 );
             }
@@ -761,12 +774,15 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             }
             Err(e) => fail(sink, &e),
         },
-        Command::Stats { json } => match pax_core::stats(Path::new(".")) {
+        Command::Stats { json, by_label } => match pax_core::stats(Path::new(".")) {
             Ok(stats) => {
                 if json {
                     sink.stats_json(&stats);
                 } else {
                     sink.stats(&stats);
+                    if by_label {
+                        sink.stats_by_label(&stats);
+                    }
                 }
                 Code::Success
             }

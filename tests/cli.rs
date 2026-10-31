@@ -786,3 +786,72 @@ fn stats_names_a_malformed_log_line() {
         stderr(&output)
     );
 }
+
+#[test]
+fn stats_by_label_prints_a_row_per_label_in_log_order() {
+    let dir = library("stats-by-label");
+    let line = |label: &str, keys: &str| {
+        let label = if label.is_empty() {
+            String::new()
+        } else {
+            format!(r#""label":"{label}","#)
+        };
+        format!(
+            r#"{{"v":1,{label}"command":"refs","seed":"lamport1978","provider":"openalex","date":"2026-01-01T00:00:00Z","limit":50,"filters":[],"total":null,"retrieved":0,"keys":{keys},"merge":{{"before":0,"after":0,"unmatched":0}}}}"#
+        )
+    };
+    let log = [
+        line("", r#"[["doi:10.1/a"]]"#),
+        line("R1", r#"[["doi:10.1/a"],["doi:10.1/b"],["doi:10.1/b"]]"#),
+        line("R2-backward", r#"[["doi:10.1/b"],["doi:10.1/c"]]"#),
+    ];
+    fs::write(
+        dir.join("research").join("search-log.jsonl"),
+        log.join("\n") + "\n",
+    )
+    .unwrap();
+
+    let output = pax(&dir, &["stats", "--by-label"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(
+        stdout.ends_with(
+            "\n
+By label
+  Label         Identified  Distinct  New  Duplicates
+  (unlabelled)           1         1    1           0
+  R1                     3         2    1           1
+  R2-backward            2         2    1           0
+"
+        ),
+        "{stdout}"
+    );
+    // Without the flag, no table.
+    assert!(!String::from_utf8_lossy(&pax(&dir, &["stats"]).stdout).contains("By label"));
+
+    let output = pax(&dir, &["stats", "--by-label", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        json["by_label"],
+        serde_json::json!([
+            { "label": null, "identified": 1, "distinct": 1, "new_distinct": 1, "duplicates": 0 },
+            { "label": "R1", "identified": 3, "distinct": 2, "new_distinct": 1, "duplicates": 1 },
+            { "label": "R2-backward", "identified": 2, "distinct": 2, "new_distinct": 1, "duplicates": 0 }
+        ])
+    );
+    assert_eq!(json["records_screened"], 3);
+}
+
+#[test]
+fn label_is_accepted_by_logged_searches_only() {
+    let dir = scratch("label-flag");
+    // Parsed, then refused for want of a library before any network call.
+    for command in ["refs", "cited-by"] {
+        let output = pax(&dir, &[command, "lamport1978", "--label", "R2"]);
+        assert_eq!(output.status.code(), Some(7), "pax {command}");
+    }
+    let output = pax(&dir, &["search", "--doi", "10.1/a", "--label", "R1"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("--label"), "{}", stderr(&output));
+}

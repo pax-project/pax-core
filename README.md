@@ -111,7 +111,7 @@ pax cited-by vaswani2017 --year 2023- --type journal-article
 
 The paper can be any `provider:id` reference from `search`, or the citation key of a paper in your library. pax looks it up in each provider by that provider's own id when it has one, otherwise by DOI, otherwise by arXiv id (for a library paper without a DOI, read from an arxiv.org source URL); a provider it can't be found in says so, and the other still answers.
 
-Like `search`, each provider reports its `retrieved N of M` count, then the two lists are merged into one, with the same `merged: X → Y (Z duplicates, U unmatched)` line and one row per paper listing every provider's reference. Papers already in your library are marked `[in library]`, and excluded ones `[excluded]` (see [Excluding papers](#excluding-papers)). They take the same `--limit`, `--all`, `--year`, `--type` and `--lang` flags. OpenAlex applies the filters server-side; Semantic Scholar's citation lists take no filters, so year and type are applied there after retrieval, and language not at all. Semantic Scholar serves at most 9,999 entries of a list, and skips references it couldn't match to a paper.
+Like `search`, each provider reports its `retrieved N of M` count, then the two lists are merged into one, with the same `merged: X → Y (Z duplicates, U unmatched)` line and one row per paper listing every provider's reference. Papers already in your library are marked `[in library]`, and excluded ones `[excluded]` (see [Excluding papers](#excluding-papers)). They take the same `--limit`, `--all`, `--year`, `--type`, `--lang` and `--label` flags. OpenAlex applies the filters server-side; Semantic Scholar's citation lists take no filters, so year and type are applied there after retrieval, and language not at all. Semantic Scholar serves at most 9,999 entries of a list, and skips references it couldn't match to a paper.
 
 A list that isn't the paper's whole list says why, next to that provider's count, so a review never mistakes a partial list for a complete one (and knows to fall back to the paper's own bibliography):
 
@@ -167,6 +167,8 @@ Neither provider says how many related papers there are, so each count reads `re
 
 Inside a library, every `search` (a query or `--author`), `refs`, `cited-by` and `related` appends to `research/search-log.jsonl`: the record of every source a review searched, when, and with what search string, filters and limit — what PRISMA 2020 asks a review to report — plus every record retrieved, so duplicates can be counted across the whole review, not just one command. It's always on, created on the first search, and append-only: pax never rewrites a line, so commit it with the library. `search --doi` and `search --local` aren't logged: one resolves a known paper and the other reads your own library, neither searches a database. Outside a library a search still works, isn't logged, and says so on stderr. If the log can't be written, the results still print with a warning on stderr, and a search that otherwise succeeded exits 1.
 
+`--label <text>` on `search`, `refs` or `cited-by` tags every line the command writes, e.g. `pax refs lamport1978 --label R2-backward`. It's free text for your own bookkeeping, typically a screening round, and never changes what's searched; `pax stats --by-label` counts records per label. Lines without one, including every line written before labels existed, are unlabelled.
+
 Each line is one JSON object for one provider's part in one command, so a command writes a line per provider it asked, including a provider that failed:
 
 ```JSON
@@ -182,6 +184,7 @@ Each line is one JSON object for one provider's part in one command, so a comman
 | `provider` | `openalex`, `crossref`, `semanticscholar` or `arxiv`. |
 | `date` | When the command ran, ISO 8601 in UTC to the second. Every line of one command has the same date. |
 | `run` | An opaque id shared by every line one command wrote, and by no other command's. It ties together the lines of a `refs` / `cited-by` / `related` run over several seeds. Lines written before pax recorded it don't have it. |
+| `label` | The `--label` given, e.g. `R2-backward`; the same on every line of one command. Absent without one. |
 | `limit` | The `--limit` per provider, or `"all"` for `--all`. |
 | `filters` | One object per `--year` / `--type` / `--lang` given: `filter` (`year`, `type`, `language`), `value` as given, and `applied`: `server-side` (in the provider's query, so `total` reflects it), `post-retrieval` (by pax on the retrieved records), or `not-applied` (the provider has no such data). `applied` is absent when the provider failed. Empty without filters. |
 | `total` | How many records the provider reported matching; `null` when it doesn't say (never on `related`), or failed. |
@@ -286,7 +289,24 @@ The boxes balance, as a PRISMA diagram must, when every declared or excluded pap
 
 A library without a search log or `excluded.nix` counts them as empty. A log line whose provider failed retrieved nothing: it's skipped, with a warning on stderr saying how many. A log line pax can't read stops `stats` with an error naming its line number, exit 7.
 
-`pax stats --json` prints the same counts as one JSON object, for scripts and agents. Providers are keyed by their log tag and sorted, as are the reasons:
+`pax stats --by-label` adds a table of the records identified under each [search-log label](#search-log), labels in the order they first appear in the log, and the unlabelled lines as one more row:
+
+```
+By label
+  Label         Identified  Distinct  New  Duplicates
+  R1-search             40        35   35           5
+  R2-backward           60        52   30           8
+  (unlabelled)           2         2    1           0
+```
+
+| Column | Meaning |
+| --- | --- |
+| Identified | Records retrieved by the label's lines. |
+| Distinct | Distinct papers among them, by the same identity keys as duplicate counting. |
+| New | Distinct papers no earlier label identified. Summed over every label, it's the records screened. |
+| Duplicates | Records identified minus distinct: duplicates within the label. |
+
+`pax stats --json` prints the same counts as one JSON object, for scripts and agents, the per-label counts always included as `by_label` (`label` is `null` for the unlabelled lines). Providers are keyed by their log tag and sorted, as are the reasons:
 
 ```JSON
 {
@@ -310,7 +330,8 @@ A library without a search log or `excluded.nix` counts them as empty. A log lin
   },
   "included": 0,
   "skipped_log_lines": 1,
-  "decided_outside_log": 1
+  "decided_outside_log": 1,
+  "by_label": [{ "label": null, "identified": 5, "distinct": 3, "new_distinct": 3, "duplicates": 2 }]
 }
 ```
 
