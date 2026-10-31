@@ -13,8 +13,13 @@
 //! {
 //!   "10.1145/123456" = { title = "Some paper"; reason = "not empirical"; stage = "full-text"; };
 //!   "arxiv:2301.01234" = { title = "..."; reason = "..."; stage = "screening"; };
+//!   "openalex:W123" = { title = "..."; year = 2019; reason = "..."; stage = "screening"; };
 //! }
 //! ```
+//!
+//! `year` is optional and written only when known. With the title, it lets
+//! `stats` match an entry keyed by an opaque `provider:id` to the records it
+//! was made on.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -23,7 +28,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use crate::error::PaxError;
-use crate::nix_attrs::{self, Value, take_string, write_field_string};
+use crate::nix_attrs::{self, Value, take_int_opt, take_string, write_field_string};
 use crate::provider::{CandidateId, CandidateWork, ProviderId};
 
 /// When in the screening process a paper was excluded. PRISMA 2020 reports
@@ -89,6 +94,8 @@ pub struct Exclusion {
     pub title: String,
     pub reason: String,
     pub stage: ExclusionStage,
+    /// The paper's publication year, when known.
+    pub year: Option<i32>,
 }
 
 impl Exclusion {
@@ -98,7 +105,14 @@ impl Exclusion {
             title,
             reason,
             stage,
+            year: None,
         }
+    }
+
+    /// This exclusion with its publication year set, or cleared for `None`.
+    pub fn with_year(mut self, year: Option<i32>) -> Self {
+        self.year = year;
+        self
     }
 }
 
@@ -155,6 +169,9 @@ impl Exclusions {
         for entry in &entries {
             let _ = writeln!(out, "  {} = {{", nix_attrs::format_key(&entry.key));
             write_field_string(&mut out, "title", &entry.title);
+            if let Some(year) = entry.year {
+                let _ = writeln!(out, "    year = {year};");
+            }
             write_field_string(&mut out, "reason", &entry.reason);
             write_field_string(&mut out, "stage", entry.stage.as_str());
             out.push_str("  };\n");
@@ -169,6 +186,7 @@ fn exclusion_from_fields(
     mut fields: HashMap<String, Value>,
 ) -> Result<Exclusion, PaxError> {
     let title = take_string(&mut fields, "title")?;
+    let year = take_int_opt(&mut fields, "year")?;
     let reason = take_string(&mut fields, "reason")?;
     let stage =
         take_string(&mut fields, "stage")?
@@ -188,6 +206,7 @@ fn exclusion_from_fields(
         title,
         reason,
         stage,
+        year,
     })
 }
 
@@ -270,6 +289,43 @@ mod tests {
         let loaded = Exclusions::load(&path).unwrap();
         // Saved sorted by key, which is also `sample`'s insertion order.
         assert_eq!(loaded, original);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_year_round_trips_and_is_written_only_when_known() {
+        let path = scratch_path("year");
+        let mut original = sample();
+        original.upsert(
+            Exclusion::new(
+                "openalex:W123".to_string(),
+                "A grey-literature report".to_string(),
+                "not empirical".to_string(),
+                ExclusionStage::Screening,
+            )
+            .with_year(Some(2019)),
+        );
+        original.save(&path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("year =").count(), 1, "{text}");
+        assert!(text.contains("    year = 2019;\n"));
+
+        let loaded = Exclusions::load(&path).unwrap();
+        assert_eq!(loaded, original);
+        assert_eq!(loaded.get("openalex:W123").unwrap().year, Some(2019));
+        assert_eq!(loaded.get("10.1145/123456").unwrap().year, None);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_file_without_years_saves_unchanged() {
+        let path = scratch_path("no-year");
+        sample().save(&path).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        Exclusions::load(&path).unwrap().save(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert!(!before.contains("year"));
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
