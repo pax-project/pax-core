@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::exclusions::{Exclusions, candidate_exclusion_key, exclusion_key};
+use crate::exclusions::{Exclusion, Exclusions, candidate_exclusion_key, exclusion_key};
 use crate::identity::{self, IdentityKey};
 use crate::library::Library;
 use crate::nix;
@@ -92,6 +92,33 @@ impl LibraryIndex {
                 .excluded_ids
                 .contains(&candidate_exclusion_key(&work.id))
     }
+}
+
+/// The entry in `exclusions` that excludes a paper with DOI and arXiv keys
+/// `id_keys` and exclusion keys `keys`: one sharing any of the former, or
+/// keyed by one of the latter. The same match as
+/// [`LibraryIndex::is_excluded`], for a caller that needs the entry itself
+/// (see [`work_exclusion_keys`] for a work's two lists).
+pub(crate) fn find_exclusion<'a>(
+    exclusions: &'a Exclusions,
+    id_keys: &[IdentityKey],
+    keys: &[String],
+) -> Option<&'a Exclusion> {
+    exclusions.entries().iter().find(|entry| {
+        keys.contains(&entry.key)
+            || exclusion_id_keys(&entry.key)
+                .iter()
+                .any(|key| id_keys.contains(key))
+    })
+}
+
+/// The DOI and arXiv keys, and the exclusion keys, that
+/// [`LibraryIndex::is_excluded`] matches `work` by: for [`find_exclusion`].
+pub(crate) fn work_exclusion_keys(work: &CandidateWork) -> (Vec<IdentityKey>, Vec<String>) {
+    (
+        identity::work_id_keys(work),
+        vec![exclusion_key(work), candidate_exclusion_key(&work.id)],
+    )
 }
 
 /// The DOI and arXiv keys an exclusion key names: a `provider:id` key's own
@@ -197,6 +224,46 @@ mod tests {
         let index = excluding(&["openalex:W123"]);
         assert!(index.is_excluded(&work(ProviderId::OpenAlex, "W123", None)));
         assert!(!index.is_excluded(&work(ProviderId::OpenAlex, "W124", None)));
+    }
+
+    #[test]
+    fn find_exclusion_matches_what_is_excluded_flags() {
+        let index_keys = ["arxiv:1706.03762", "10.1145/abc", "openalex:W123"];
+        let mut exclusions = Exclusions::default();
+        for key in index_keys {
+            exclusions.upsert(Exclusion::new(
+                key.to_string(),
+                "T".to_string(),
+                "R".to_string(),
+                ExclusionStage::Screening,
+            ));
+        }
+        let index = excluding(&index_keys);
+        for (record, expected) in [
+            (
+                work(ProviderId::ArXiv, "1706.03762v3", None),
+                Some("arxiv:1706.03762"),
+            ),
+            (
+                work(ProviderId::SemanticScholar, "s1", Some("10.1145/ABC")),
+                Some("10.1145/abc"),
+            ),
+            (
+                work(ProviderId::OpenAlex, "W123", None),
+                Some("openalex:W123"),
+            ),
+            (work(ProviderId::OpenAlex, "W124", Some("10.1/other")), None),
+        ] {
+            let (id_keys, keys) = work_exclusion_keys(&record);
+            let found = find_exclusion(&exclusions, &id_keys, &keys);
+            assert_eq!(found.map(|e| e.key.as_str()), expected, "{}", record.id);
+            assert_eq!(
+                index.is_excluded(&record),
+                expected.is_some(),
+                "{}",
+                record.id
+            );
+        }
     }
 
     #[test]

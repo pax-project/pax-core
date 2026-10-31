@@ -290,6 +290,13 @@ pub async fn resolve_candidate(
 /// DOI, or the same arXiv id in any version ([`identity_keys`]). A Crossref
 /// or arXiv reference names its DOI or arXiv id itself, so it's checked
 /// before it's resolved too.
+///
+/// A paper excluded in `excluded.nix` is refused the same way, with
+/// [`PaxError::AlreadyExcluded`] naming the entry's key, stage and reason: it
+/// matches by the same keys [`LibraryIndex::is_excluded`] flags a result by.
+/// A paper can't be both included and excluded, so reversing the exclusion
+/// is its own step, [`unexclude_paper`]. Either refusal comes before any
+/// write.
 pub async fn add_candidate(
     id: &CandidateId,
     root: &Path,
@@ -297,10 +304,20 @@ pub async fn add_candidate(
 ) -> Result<PaperRef, PaxError> {
     let path = nix::papers_path(root);
     let mut library = Library::load(&path)?;
+    let exclusions = Exclusions::load(&nix::excluded_path(root))?;
     refuse_declared(&library, id, &identity::reference_id_keys(id))?;
+    refuse_excluded(
+        &exclusions,
+        id,
+        &identity::reference_id_keys(id),
+        &[candidate_exclusion_key(id)],
+    )?;
 
     let work = resolve_candidate(id, config).await?;
     refuse_declared(&library, id, &identity_keys(&work))?;
+    let (id_keys, mut keys) = library_index::work_exclusion_keys(&work);
+    keys.push(candidate_exclusion_key(id));
+    refuse_excluded(&exclusions, id, &id_keys, &keys)?;
     let source_url = match (&work.pdf_url, &work.doi) {
         (Some(pdf_url), _) => Some(pdf_url.clone()),
         (None, Some(doi)) => first_pdf_url(
@@ -357,6 +374,26 @@ fn refuse_declared(
         Some(paper) => Err(PaxError::AlreadyDeclared {
             reference: id.to_string(),
             citation_key: paper.local.citation_key.clone(),
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Refuses adding `id` when an entry in `exclusions` matches the DOI and
+/// arXiv keys `id_keys` or the exclusion keys `keys`
+/// ([`library_index::find_exclusion`]).
+fn refuse_excluded(
+    exclusions: &Exclusions,
+    id: &CandidateId,
+    id_keys: &[IdentityKey],
+    keys: &[String],
+) -> Result<(), PaxError> {
+    match library_index::find_exclusion(exclusions, id_keys, keys) {
+        Some(exclusion) => Err(PaxError::AlreadyExcluded {
+            reference: id.to_string(),
+            key: exclusion.key.clone(),
+            stage: exclusion.stage,
+            reason: exclusion.reason.clone(),
         }),
         None => Ok(()),
     }
@@ -1035,6 +1072,150 @@ mod exclude_paper_tests {
 }
 
 #[cfg(test)]
+mod excluded_add_tests {
+    use super::*;
+    use std::fs;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
+    /// Polls a future that never waits: these tests only take the paths that
+    /// need no network (a refusal before resolving, or a local match).
+    fn block_on<F: Future>(future: F) -> F::Output {
+        match pin!(future)
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("unexpectedly waited on the network"),
+        }
+    }
+
+    const PAPERS: &str = "{\n}\n";
+
+    /// An empty library with three exclusions: by DOI, by version-less arXiv
+    /// id, and by an opaque `provider:id`.
+    fn library(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "pax-excluded-add-test-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("research")).unwrap();
+        fs::write(nix::papers_path(&root), PAPERS).unwrap();
+        fs::write(
+            nix::excluded_path(&root),
+            r#"{
+  "10.1/abc" = { title = "A"; reason = "not empirical"; stage = "screening"; };
+  "arxiv:2301.01234" = { title = "B"; reason = "wrong domain"; stage = "full-text"; };
+  "openalex:W123" = { title = "C"; reason = "duplicate"; stage = "screening"; };
+}
+"#,
+        )
+        .unwrap();
+        root
+    }
+
+    fn add(root: &Path, reference: &str) -> Result<PaperRef, PaxError> {
+        block_on(add_candidate(
+            &reference.parse().unwrap(),
+            root,
+            &Config::default(),
+        ))
+    }
+
+    fn unexclude(root: &Path, reference: &str) -> Result<Exclusion, PaxError> {
+        block_on(unexclude_paper(reference, root, &Config::default()))
+    }
+
+    fn excluded_keys_in(root: &Path) -> Vec<String> {
+        Exclusions::load(&nix::excluded_path(root))
+            .unwrap()
+            .entries()
+            .iter()
+            .map(|e| e.key.clone())
+            .collect()
+    }
+
+    #[test]
+    fn an_excluded_paper_is_refused_by_doi_arxiv_id_in_any_version_and_provider_key() {
+        let root = library("refused");
+        for (reference, expected) in [
+            ("crossref:10.1/abc", "10.1/abc"),
+            ("crossref:https://doi.org/10.1/ABC", "10.1/abc"),
+            ("arxiv:2301.01234v3", "arxiv:2301.01234"),
+            ("arxiv:2301.01234", "arxiv:2301.01234"),
+            ("openalex:W123", "openalex:W123"),
+        ] {
+            match add(&root, reference) {
+                Err(PaxError::AlreadyExcluded { key, .. }) => {
+                    assert_eq!(key, expected, "{reference}")
+                }
+                other => panic!("{reference}: {other:?}"),
+            }
+        }
+        assert_eq!(
+            fs::read_to_string(nix::papers_path(&root)).unwrap(),
+            PAPERS,
+            "papers.nix is untouched"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_refusal_names_the_stage_reason_and_how_to_reverse_it() {
+        let root = library("message");
+        let error = add(&root, "arxiv:2301.01234v2").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "arxiv:2301.01234v2 was excluded at full-text (\"wrong domain\", key \
+             arxiv:2301.01234); run `pax unexclude arxiv:2301.01234` first to reverse that \
+             decision"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unexclude_removes_exactly_that_entry() {
+        let root = library("unexclude");
+        let removed = unexclude(&root, "arxiv:2301.01234v5").unwrap();
+        assert_eq!(removed.key, "arxiv:2301.01234");
+        assert_eq!(removed.reason, "wrong domain");
+        assert_eq!(excluded_keys_in(&root), ["10.1/abc", "openalex:W123"]);
+
+        assert_eq!(
+            unexclude(&root, "https://doi.org/10.1/ABC").unwrap().key,
+            "10.1/abc"
+        );
+        assert_eq!(
+            unexclude(&root, "openalex:W123").unwrap().key,
+            "openalex:W123"
+        );
+        assert!(excluded_keys_in(&root).is_empty());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unexcluding_what_isnt_excluded_is_not_excluded() {
+        let root = library("not-excluded");
+        for reference in ["10.1/other", "crossref:10.1/other"] {
+            assert!(
+                matches!(
+                    unexclude(&root, reference),
+                    Err(PaxError::NotExcluded(r)) if r == reference
+                ),
+                "{reference}"
+            );
+        }
+        assert!(matches!(
+            unexclude(&root, "actor model"),
+            Err(PaxError::InvalidExclusionReference(_))
+        ));
+        assert_eq!(excluded_keys_in(&root).len(), 3);
+        fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[cfg(test)]
 mod local_filter_tests {
     use super::*;
     use std::fs;
@@ -1280,6 +1461,72 @@ pub async fn exclude_paper(
     exclusions.upsert(exclusion.clone());
     exclusions.save(&path)?;
     Ok(exclusion)
+}
+
+/// Reverses an exclusion: removes the paper's entry from
+/// `research/excluded.nix` and returns it, so [`add_candidate`] accepts the
+/// paper again.
+///
+/// `reference` is an entry's exclusion key (what
+/// [`PaxError::AlreadyExcluded`] names), a DOI, or a provider reference. It
+/// matches an entry by the same keys [`LibraryIndex::is_excluded`] does: a
+/// DOI, an arXiv id in any version, or a `provider:id` key. A provider
+/// reference that matches no entry by itself is resolved, so a paper
+/// excluded under its DOI is found from any provider's reference to it;
+/// a key or a DOI needs no network. Only one entry is removed: the exact
+/// key if there is one, else the first match. Fails with
+/// [`PaxError::NotExcluded`] when nothing matches.
+pub async fn unexclude_paper(
+    reference: &str,
+    root: &Path,
+    config: &Config,
+) -> Result<Exclusion, PaxError> {
+    let reference = reference.trim();
+    let path = nix::excluded_path(root);
+    let mut exclusions = Exclusions::load(&path)?;
+
+    let key = match unexclude_match(&exclusions, reference, config).await? {
+        Some(exclusion) => exclusion.key.clone(),
+        None => return Err(PaxError::NotExcluded(reference.to_string())),
+    };
+    let exclusion = exclusions
+        .remove(&key)
+        .expect("the matched entry is in exclusions");
+    exclusions.save(&path)?;
+    Ok(exclusion)
+}
+
+/// The entry [`unexclude_paper`] removes for `reference`, if any.
+async fn unexclude_match<'a>(
+    exclusions: &'a Exclusions,
+    reference: &str,
+    config: &Config,
+) -> Result<Option<&'a Exclusion>, PaxError> {
+    if let Some(exclusion) = exclusions.get(reference) {
+        return Ok(Some(exclusion));
+    }
+    if doi_exclusion_key(reference).starts_with("10.") {
+        return Ok(library_index::find_exclusion(
+            exclusions,
+            &identity::doi_id_keys(reference),
+            &[doi_exclusion_key(reference)],
+        ));
+    }
+    let id: CandidateId = reference
+        .parse()
+        .map_err(|_| PaxError::InvalidExclusionReference(reference.to_string()))?;
+    let found = library_index::find_exclusion(
+        exclusions,
+        &identity::reference_id_keys(&id),
+        &[candidate_exclusion_key(&id)],
+    );
+    // A Crossref id is a DOI, already matched; resolving learns nothing more.
+    if found.is_some() || id.provider == ProviderId::Crossref {
+        return Ok(found);
+    }
+    let work = resolve_candidate(&id, config).await?;
+    let (id_keys, keys) = library_index::work_exclusion_keys(&work);
+    Ok(library_index::find_exclusion(exclusions, &id_keys, &keys))
 }
 
 /// What [`exclude_paper`] learned about the paper it's excluding.
@@ -2030,6 +2277,7 @@ mod send_tests {
             root,
             &config,
         ));
+        assert_send(unexclude_paper("openalex:W1", root, &config));
         assert_send(references("k", &options, root, &config));
         assert_send(cited_by("k", &options, root, &config));
         assert_send(search_all_logged("q", &options, root, &config));

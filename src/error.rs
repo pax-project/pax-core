@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use crate::exclusions::ExclusionStage;
 use crate::provider::{CandidateIdParseError, ProviderError};
 
 #[derive(Debug, Error)]
@@ -57,4 +58,22 @@ pub enum PaxError {
         reference: String,
         citation_key: String,
     },
+    /// The paper `reference` resolves to is excluded in `excluded.nix`, under
+    /// `key`: by the same DOI, the same arXiv id in any version, or the same
+    /// `provider:id`. Reversing that decision is its own step
+    /// ([`crate::unexclude_paper`]).
+    #[error(
+        "{reference} was excluded at {stage} ({reason:?}, key {key}); run `pax unexclude {key}` \
+         first to reverse that decision"
+    )]
+    AlreadyExcluded {
+        reference: String,
+        key: String,
+        stage: ExclusionStage,
+        reason: String,
+    },
+    /// Nothing in `excluded.nix` matches the reference given to
+    /// [`crate::unexclude_paper`].
+    #[error("{0:?} isn't excluded: no entry in research/excluded.nix matches it")]
+    NotExcluded(String),
 }
