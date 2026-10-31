@@ -337,7 +337,111 @@ impl From<Work> for CandidateWork {
                 .find(|link| link.content_type.as_deref() == Some("application/pdf"))
                 .map(|link| link.url),
             venue: value.container_title.into_iter().next(),
-            abstract_text: value.abstract_text,
+            abstract_text: value.abstract_text.as_deref().and_then(plain_abstract),
+        }
+    }
+}
+
+/// A Crossref abstract as plain text. Crossref serves abstracts as JATS XML
+/// (`<jats:p>…</jats:p>`, sometimes plain HTML `<p>`): tags are dropped,
+/// block elements become paragraphs separated by a blank line, entities are
+/// decoded, and whitespace inside a paragraph is collapsed. A leading
+/// "Abstract" heading is dropped too, since it only labels the text. `None`
+/// when no text is left.
+fn plain_abstract(raw: &str) -> Option<String> {
+    let mut paragraphs = Vec::new();
+    let mut current = String::new();
+    let mut rest = raw;
+    while let Some(start) = rest.find('<') {
+        let Some(len) = rest[start..].find('>') else {
+            break;
+        };
+        current.push_str(&rest[..start]);
+        if is_block_tag(&rest[start + 1..start + len]) {
+            paragraphs.push(std::mem::take(&mut current));
+        }
+        rest = &rest[start + len + 1..];
+    }
+    current.push_str(rest);
+    paragraphs.push(current);
+
+    let mut paragraphs: Vec<String> = paragraphs
+        .iter()
+        .map(|paragraph| {
+            decode_entities(paragraph)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|paragraph| !paragraph.is_empty())
+        .collect();
+    if paragraphs
+        .first()
+        .is_some_and(|first| first.eq_ignore_ascii_case("abstract"))
+    {
+        paragraphs.remove(0);
+    }
+    (!paragraphs.is_empty()).then(|| paragraphs.join("\n\n"))
+}
+
+/// Whether `tag` (the text between `<` and `>`) opens or closes an element
+/// that starts a new paragraph: a JATS `p`, `title`, `sec` or `list-item`,
+/// with or without the `jats:` prefix, or an HTML `br`.
+fn is_block_tag(tag: &str) -> bool {
+    let name = tag
+        .trim_start_matches('/')
+        .split(|c: char| c.is_whitespace() || c == '/')
+        .next()
+        .unwrap_or_default();
+    let local = name.rsplit(':').next().unwrap_or_default();
+    ["p", "title", "sec", "list-item", "br"]
+        .iter()
+        .any(|block| local.eq_ignore_ascii_case(block))
+}
+
+/// `text` with XML's named entities and numeric character references
+/// decoded. An unknown or malformed entity is kept as written.
+fn decode_entities(text: &str) -> String {
+    let mut decoded = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('&') {
+        decoded.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let entity = rest
+            .find(';')
+            .filter(|&end| end <= 10)
+            .and_then(|end| Some((decode_entity(&rest[1..end])?, end)));
+        match entity {
+            Some((c, end)) => {
+                decoded.push(c);
+                rest = &rest[end + 1..];
+            }
+            None => {
+                decoded.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    decoded.push_str(rest);
+    decoded
+}
+
+/// The character an entity names: `amp`, `#169` or `#xA9`.
+fn decode_entity(name: &str) -> Option<char> {
+    match name {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "nbsp" => Some('\u{a0}'),
+        _ => {
+            let number = name.strip_prefix('#')?;
+            let code = match number.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => number.parse().ok()?,
+            };
+            char::from_u32(code)
         }
     }
 }
@@ -387,6 +491,45 @@ mod tests {
         assert_eq!(works[1].authors, ["Some Consortium"]);
         assert_eq!(works[1].publish_date, "");
         assert_eq!(works[1].doi.as_deref(), Some("10.5555/untitled"));
+    }
+
+    #[test]
+    fn a_jats_abstract_becomes_plain_text() {
+        let body = r#"{"status": "ok", "message-type": "work", "message": {
+            "DOI": "10.1/x",
+            "abstract": "<jats:title>Abstract</jats:title><jats:p>Actors   send\n  messages to <jats:italic>other</jats:italic> actors &amp; wait.</jats:p>\n<jats:p>Second&#160;paragraph: x &lt; y.</jats:p>"
+        }}"#;
+        let work: Work = parse_message(body).unwrap();
+        assert_eq!(
+            CandidateWork::from(work).abstract_text.as_deref(),
+            Some("Actors send messages to other actors & wait.\n\nSecond paragraph: x < y.")
+        );
+    }
+
+    #[test]
+    fn plain_abstract_handles_html_headings_and_empty_markup() {
+        assert_eq!(
+            plain_abstract("<p>One.</p><p>Two.</p>").as_deref(),
+            Some("One.\n\nTwo.")
+        );
+        // A structured abstract's section headings are text, not a label.
+        assert_eq!(
+            plain_abstract(
+                "<jats:sec><jats:title>Background</jats:title><jats:p>Why.</jats:p></jats:sec>"
+            )
+            .as_deref(),
+            Some("Background\n\nWhy.")
+        );
+        assert_eq!(
+            plain_abstract("Plain text, no markup.").as_deref(),
+            Some("Plain text, no markup.")
+        );
+        assert_eq!(
+            plain_abstract("a &bogus; b & c &#xZZ;").as_deref(),
+            Some("a &bogus; b & c &#xZZ;")
+        );
+        assert_eq!(plain_abstract("<jats:p> </jats:p>"), None);
+        assert_eq!(plain_abstract("<jats:title>Abstract</jats:title>"), None);
     }
 
     #[test]
