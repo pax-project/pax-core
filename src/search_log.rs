@@ -29,7 +29,7 @@ use crate::provider::{
     FilterApplication, FilterKind, Filters, Limit, ProviderError, ProviderId, SearchOptions,
     SearchPage,
 };
-use crate::{CitationResults, Config, nix};
+use crate::{CitationError, CitationResults, Config, IncompleteReason, nix};
 
 /// The schema version every entry carries in its `v` field. Bumped when a
 /// field changes meaning or is removed; adding a field doesn't bump it.
@@ -101,6 +101,12 @@ pub struct SearchLogEntry {
     /// seed. Absent when it answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// What kind of failure `error` is, as [`IncompleteReason::as_str`]
+    /// names it: `withheld`, `failed` or `unresolved`. Absent when the
+    /// provider answered, and on lines logged through the generic
+    /// [`log_results`], which can't tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// The command's merge counts across every provider that answered; the
     /// same on every line of one command.
     pub merge: MergeCounts,
@@ -218,6 +224,7 @@ pub fn log_entries<E: fmt::Display>(
                 retrieved: None,
                 keys: None,
                 error: None,
+                reason: None,
                 merge,
             };
             match result {
@@ -343,7 +350,9 @@ pub struct Logged<T> {
 
 /// Logs one command's per-provider results in the library at `root`, dated
 /// now. For a client that runs a search itself rather than through a
-/// `*_logged` function.
+/// `*_logged` function. Generic over the error type, it can't tell what kind
+/// of failure an error is, so its lines carry no `reason`; the `*_logged`
+/// functions record one.
 pub fn log_results<E: fmt::Display>(
     root: &Path,
     command: SearchCommand,
@@ -351,14 +360,71 @@ pub fn log_results<E: fmt::Display>(
     options: &SearchOptions,
     results: &HashMap<ProviderId, Result<SearchPage, E>>,
 ) -> LogOutcome {
+    append_to_library(root, || {
+        log_entries(command, input, options, results, SystemTime::now())
+    })
+}
+
+/// Appends `entries()` to the log of the library at `root`, if there is one.
+fn append_to_library(root: &Path, entries: impl FnOnce() -> Vec<SearchLogEntry>) -> LogOutcome {
     let Some(log) = SearchLog::for_library(root) else {
         return LogOutcome::NoLibrary;
     };
-    let entries = log_entries(command, input, options, results, SystemTime::now());
-    match log.append(&entries) {
+    match log.append(&entries()) {
         Ok(()) => LogOutcome::Written(log.path),
         Err(e) => LogOutcome::Failed(e),
     }
+}
+
+/// An error whose kind of failure a log line records as its `reason`.
+trait FailureReason: fmt::Display {
+    fn failure_reason(&self) -> IncompleteReason;
+}
+
+impl FailureReason for CitationError {
+    fn failure_reason(&self) -> IncompleteReason {
+        self.reason()
+    }
+}
+
+impl FailureReason for ProviderError {
+    fn failure_reason(&self) -> IncompleteReason {
+        CitationError::Provider(self.clone()).reason()
+    }
+}
+
+/// [`log_entries`], with each failed line's `reason`.
+fn entries_with_reasons<E: FailureReason>(
+    command: SearchCommand,
+    input: &str,
+    options: &SearchOptions,
+    results: &HashMap<ProviderId, Result<SearchPage, E>>,
+    date: SystemTime,
+) -> Vec<SearchLogEntry> {
+    let mut entries = log_entries(command, input, options, results, date);
+    for entry in &mut entries {
+        let error = entry
+            .provider
+            .parse::<ProviderId>()
+            .ok()
+            .and_then(|provider| results.get(&provider)?.as_ref().err());
+        entry.reason = error.map(|e| e.failure_reason().as_str().to_string());
+    }
+    entries
+}
+
+/// [`log_results`] for the `*_logged` functions, recording each failed
+/// line's `reason`.
+fn log_with_reasons<E: FailureReason>(
+    root: &Path,
+    command: SearchCommand,
+    input: &str,
+    options: &SearchOptions,
+    results: &HashMap<ProviderId, Result<SearchPage, E>>,
+) -> LogOutcome {
+    append_to_library(root, || {
+        entries_with_reasons(command, input, options, results, SystemTime::now())
+    })
 }
 
 /// Per-provider search results, as [`crate::search_all_paged`] returns them.
@@ -372,7 +438,7 @@ pub async fn search_all_logged(
     config: &Config,
 ) -> Logged<SearchResults> {
     let results = crate::search_all_paged(query, options, config).await;
-    let log = log_results(root, SearchCommand::Search, query, options, &results);
+    let log = log_with_reasons(root, SearchCommand::Search, query, options, &results);
     Logged { results, log }
 }
 
@@ -385,7 +451,7 @@ pub async fn search_by_author_logged(
     config: &Config,
 ) -> Logged<SearchResults> {
     let results = crate::search_by_author_paged(author, options, config).await;
-    let log = log_results(root, SearchCommand::SearchAuthor, author, options, &results);
+    let log = log_with_reasons(root, SearchCommand::SearchAuthor, author, options, &results);
     Logged { results, log }
 }
 
@@ -398,7 +464,7 @@ pub async fn references_logged(
     config: &Config,
 ) -> Result<Logged<CitationResults>, PaxError> {
     let results = crate::references(seed, options, root, config).await?;
-    let log = log_results(root, SearchCommand::Refs, seed, options, &results);
+    let log = log_with_reasons(root, SearchCommand::Refs, seed, options, &results);
     Ok(Logged { results, log })
 }
 
@@ -411,7 +477,7 @@ pub async fn cited_by_logged(
     config: &Config,
 ) -> Result<Logged<CitationResults>, PaxError> {
     let results = crate::cited_by(seed, options, root, config).await?;
-    let log = log_results(root, SearchCommand::CitedBy, seed, options, &results);
+    let log = log_with_reasons(root, SearchCommand::CitedBy, seed, options, &results);
     Ok(Logged { results, log })
 }
 
@@ -647,6 +713,61 @@ mod tests {
         let json = serde_json::to_string(&entries[0]).unwrap();
         assert!(json.starts_with(r#"{"v":1,"command":"cited-by","seed":"openalex:W1","#));
         assert!(json.contains(r#""limit":"all""#), "{json}");
+    }
+
+    #[test]
+    fn a_failed_line_records_its_reason_next_to_the_error() {
+        let results: CitationResults = HashMap::from([
+            (
+                ProviderId::OpenAlex,
+                Err(CitationError::Provider(ProviderError::Request(
+                    "timed out".into(),
+                ))),
+            ),
+            (
+                ProviderId::SemanticScholar,
+                Err(CitationError::Provider(ProviderError::Withheld {
+                    message: "Semantic Scholar withholds this paper's references".into(),
+                })),
+            ),
+        ]);
+        let entries = entries_with_reasons(
+            SearchCommand::Refs,
+            "lamport1978",
+            &SearchOptions::default(),
+            &results,
+            date(),
+        );
+        let reasons: Vec<_> = entries.iter().map(|e| e.reason.as_deref()).collect();
+        assert_eq!(reasons, [Some("failed"), Some("withheld")]);
+        let json = serde_json::to_string(&entries[1]).unwrap();
+        assert!(
+            json.contains(
+                r#""error":"Semantic Scholar withholds this paper's references","reason":"withheld""#
+            ),
+            "{json}"
+        );
+
+        // A search's failed line is `failed`; an answering line has none.
+        let entries = entries_with_reasons(
+            SearchCommand::Search,
+            "attention",
+            &filtered_options(),
+            &search_results(),
+            date(),
+        );
+        let reasons: Vec<_> = entries.iter().map(|e| e.reason.as_deref()).collect();
+        assert_eq!(reasons, [None, Some("failed"), None]);
+        // The generic `log_entries` can't tell, so records none.
+        let json = serde_json::to_string(&log_entries(
+            SearchCommand::Refs,
+            "lamport1978",
+            &SearchOptions::default(),
+            &results,
+            date(),
+        ))
+        .unwrap();
+        assert!(!json.contains("reason"), "{json}");
     }
 
     #[test]
