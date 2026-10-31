@@ -10,6 +10,7 @@ use thiserror::Error;
 
 use crate::error::PaxError;
 use crate::library::Library;
+use crate::merge::MergedWork;
 use crate::paper::Paper;
 use crate::provider::{
     CandidateId, OpenAlexProvider, ProviderError, ProviderId, SearchOptions, SearchPage,
@@ -18,7 +19,7 @@ use crate::provider::{
 use crate::{Config, nix, normalize_doi, resolve_candidate};
 
 /// Why one provider's citation list couldn't be fetched.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 #[non_exhaustive]
 pub enum CitationError {
     /// The seed had no identifier this provider can look a paper up by.
@@ -175,6 +176,232 @@ pub async fn cited_by(
     citation_lists(seed, Direction::CitedBy, options, root, config).await
 }
 
+/// The works each of `seeds` cites, per seed and per provider, as
+/// [`references`] for each one; see [`SeedResults`] for how they're merged
+/// and attributed. Seeds are looked up one after another, as `search_all`
+/// asks providers, since Semantic Scholar's unauthenticated rate limit is
+/// tight and a snowballing round can have dozens of seeds. `options` apply
+/// per seed per provider.
+///
+/// Never fails as a whole: an invalid seed fails only itself, with its error
+/// in its [`SeedResult`]. A seed that's the same paper as an earlier one
+/// (the same string, or sharing a provider id, DOI or arXiv id with it) is
+/// resolved once: its lists are the earlier seed's (see
+/// [`SeedResult::same_as`]).
+pub async fn references_many<S: AsRef<str>>(
+    seeds: &[S],
+    options: &SearchOptions,
+    root: &Path,
+    config: &Config,
+) -> SeedResults {
+    citation_lists_many(seeds, Direction::References, options, root, config).await
+}
+
+/// The works citing each of `seeds`; otherwise as [`references_many`].
+pub async fn cited_by_many<S: AsRef<str>>(
+    seeds: &[S],
+    options: &SearchOptions,
+    root: &Path,
+    config: &Config,
+) -> SeedResults {
+    citation_lists_many(seeds, Direction::CitedBy, options, root, config).await
+}
+
+/// One seed's part in a multi-seed lookup.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct SeedResult {
+    /// The seed as given: a `provider:id` reference or a citation key.
+    pub seed: String,
+    /// The index of an earlier seed that is the same paper, whose lists
+    /// these are, copied rather than fetched again. `None` for a seed looked
+    /// up in its own right.
+    pub same_as: Option<usize>,
+    /// Each citation provider's list for the seed, as [`references`] returns
+    /// it; an error when the seed itself is invalid (a malformed reference,
+    /// or a citation key not in the library).
+    pub results: Result<CitationResults, PaxError>,
+}
+
+impl SeedResult {
+    /// The seed's incomplete provider lists, with why ([`incomplete_lists`]).
+    /// Empty for an invalid seed, whose `results` error says why instead.
+    pub fn incomplete(&self) -> Vec<Incomplete> {
+        self.results
+            .as_ref()
+            .map(incomplete_lists)
+            .unwrap_or_default()
+    }
+}
+
+/// Every seed's lists from [`references_many`] or [`cited_by_many`], in the
+/// order the seeds were given.
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct SeedResults {
+    pub seeds: Vec<SeedResult>,
+}
+
+impl SeedResults {
+    /// One list merged across every seed and provider: seeds in order, and
+    /// within a seed providers in [`crate::merge::PROVIDER_ORDER`], as
+    /// [`crate::merge_pages`] takes them. Each merged work records which seed
+    /// and provider each of its records came from. A seed that's the
+    /// [`same_as`](SeedResult::same_as) an earlier one contributes its copy,
+    /// so its records count, and show up as duplicates, as they would had it
+    /// been looked up on its own.
+    pub fn merge(&self) -> SeedMergeReport {
+        let mut sources = Vec::new();
+        let mut works = Vec::new();
+        for (seed, result) in self.seeds.iter().enumerate() {
+            let Ok(results) = &result.results else {
+                continue;
+            };
+            for provider in crate::merge::PROVIDER_ORDER {
+                if let Some(Ok(page)) = results.get(&provider) {
+                    sources.extend(page.works.iter().map(|_| RecordSource { seed, provider }));
+                    works.extend(page.works.iter().cloned());
+                }
+            }
+        }
+        let (report, positions) = crate::merge::merge_indexed(works);
+        SeedMergeReport {
+            before: report.before,
+            after: report.after,
+            unmatched: report.unmatched,
+            works: report
+                .works
+                .into_iter()
+                .zip(positions)
+                .map(|(merged, positions)| SeedMergedWork {
+                    merged,
+                    sources: positions.into_iter().map(|i| sources[i]).collect(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Whether any seed had any provider return a list.
+    pub fn any_listed(&self) -> bool {
+        self.seeds.iter().any(|seed| {
+            seed.results
+                .as_ref()
+                .is_ok_and(|results| results.values().any(Result::is_ok))
+        })
+    }
+}
+
+/// Where one record of a merged work came from: the seed (an index into
+/// [`SeedResults::seeds`]) whose list held it, and the provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RecordSource {
+    pub seed: usize,
+    pub provider: ProviderId,
+}
+
+/// One paper in a list merged across seeds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SeedMergedWork {
+    /// The merged records, as [`crate::merge_pages`] would group them.
+    pub merged: MergedWork,
+    /// Where each record came from, in [`MergedWork::records`] order.
+    pub sources: Vec<RecordSource>,
+}
+
+impl SeedMergedWork {
+    /// The seeds whose lists returned this paper, without repeats, in seed
+    /// order.
+    pub fn seeds(&self) -> Vec<usize> {
+        let mut seeds: Vec<usize> = self.sources.iter().map(|source| source.seed).collect();
+        seeds.sort_unstable();
+        seeds.dedup();
+        seeds
+    }
+
+    /// The providers that returned this paper, for any seed, without
+    /// repeats, in [`crate::merge::PROVIDER_ORDER`].
+    pub fn providers(&self) -> Vec<ProviderId> {
+        crate::merge::PROVIDER_ORDER
+            .into_iter()
+            .filter(|provider| self.sources.iter().any(|s| s.provider == *provider))
+            .collect()
+    }
+}
+
+/// The outcome of [`SeedResults::merge`]: one [`SeedMergedWork`] per
+/// distinct paper, plus the same counts as [`crate::MergeReport`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct SeedMergeReport {
+    /// One entry per distinct paper, in order of first appearance.
+    pub works: Vec<SeedMergedWork>,
+    /// Records before merging, across every seed and provider.
+    pub before: usize,
+    /// Records after merging (`works.len()`).
+    pub after: usize,
+    /// Records with no identity key, kept as their own rows.
+    pub unmatched: usize,
+}
+
+impl SeedMergeReport {
+    /// Records removed as duplicates (`before - after`).
+    pub fn duplicates(&self) -> usize {
+        self.before - self.after
+    }
+}
+
+async fn citation_lists_many<S: AsRef<str>>(
+    seeds: &[S],
+    direction: Direction,
+    options: &SearchOptions,
+    root: &Path,
+    config: &Config,
+) -> SeedResults {
+    let mut out = SeedResults::default();
+    // The ids of each seed looked up in its own right, by its index.
+    let mut looked_up: Vec<(usize, SeedIds)> = Vec::new();
+    for seed in seeds {
+        let seed = seed.as_ref();
+        // The same string as a seed already looked up needs no resolving.
+        let repeat = looked_up
+            .iter()
+            .map(|(index, _)| *index)
+            .find(|&index| out.seeds[index].seed == seed);
+        let (same_as, results) = match repeat {
+            Some(index) => (Some(index), copy_results(&out.seeds[index])),
+            None => match SeedIds::resolve(seed, root, config).await {
+                Err(e) => (None, Err(e)),
+                Ok(ids) => match looked_up.iter().find(|(_, other)| ids.same_paper(other)) {
+                    Some(&(index, _)) => (Some(index), copy_results(&out.seeds[index])),
+                    None => {
+                        let results = lists_for(&ids, direction, options, config).await;
+                        looked_up.push((out.seeds.len(), ids));
+                        (None, Ok(results))
+                    }
+                },
+            },
+        };
+        out.seeds.push(SeedResult {
+            seed: seed.to_string(),
+            same_as,
+            results,
+        });
+    }
+    out
+}
+
+/// A copy of a looked-up seed's lists, for a later seed that's the same
+/// paper.
+fn copy_results(seed: &SeedResult) -> Result<CitationResults, PaxError> {
+    Ok(seed
+        .results
+        .as_ref()
+        .expect("only a seed with lists is looked up")
+        .clone())
+}
+
 #[derive(Clone, Copy)]
 enum Direction {
     References,
@@ -189,6 +416,16 @@ async fn citation_lists(
     config: &Config,
 ) -> Result<CitationResults, PaxError> {
     let ids = SeedIds::resolve(seed, root, config).await?;
+    Ok(lists_for(&ids, direction, options, config).await)
+}
+
+/// Each citation provider's list for the seed `ids` describes.
+async fn lists_for(
+    ids: &SeedIds,
+    direction: Direction,
+    options: &SearchOptions,
+    config: &Config,
+) -> CitationResults {
     let mut results = HashMap::new();
 
     let openalex = match ids.openalex_key() {
@@ -227,7 +464,7 @@ async fn citation_lists(
     };
     results.insert(ProviderId::SemanticScholar, semantic_scholar);
 
-    Ok(results)
+    results
 }
 
 /// Names a provider's `NotFound` as the seed missing there under `key`.
@@ -346,6 +583,20 @@ impl SeedIds {
             .clone()
             .or_else(|| self.doi.as_ref().map(|doi| format!("DOI:{doi}")))
             .or_else(|| self.arxiv.as_ref().map(|arxiv| format!("ARXIV:{arxiv}")))
+    }
+
+    /// Whether `other` is the same paper: they share a provider id, a DOI
+    /// (case-insensitively) or an arXiv id.
+    fn same_paper(&self, other: &SeedIds) -> bool {
+        let shared = |a: &Option<String>, b: &Option<String>| {
+            a.as_deref()
+                .zip(b.as_deref())
+                .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+        };
+        shared(&self.openalex, &other.openalex)
+            || shared(&self.semantic_scholar, &other.semantic_scholar)
+            || shared(&self.doi, &other.doi)
+            || shared(&self.arxiv, &other.arxiv)
     }
 }
 
@@ -720,5 +971,166 @@ mod tests {
             poll,
             std::task::Poll::Ready(Err(PaxError::NoSuchPaper(_)))
         ));
+    }
+
+    #[test]
+    fn seeds_sharing_an_id_doi_or_arxiv_id_are_the_same_paper() {
+        let doi = SeedIds::from_doi(Some("10.1145/359545.359563"));
+        let openalex = SeedIds {
+            openalex: Some("W1".to_string()),
+            doi: Some("10.1145/359545.359563".to_uppercase()),
+            ..SeedIds::default()
+        };
+        assert!(doi.same_paper(&openalex));
+        let arxiv = SeedIds {
+            arxiv: Some("1706.03762".to_string()),
+            ..SeedIds::default()
+        };
+        assert!(arxiv.same_paper(&SeedIds::from_doi(Some("10.48550/arXiv.1706.03762"))));
+        assert!(!doi.same_paper(&arxiv));
+        // Knowing nothing is never a match.
+        assert!(!SeedIds::default().same_paper(&SeedIds::default()));
+    }
+
+    fn page(works: Vec<CandidateWork>) -> Result<SearchPage, CitationError> {
+        let total = works.len() as u64;
+        Ok(SearchPage::new(works, Some(total), None))
+    }
+
+    fn seed_result(seed: &str, results: Result<CitationResults, PaxError>) -> SeedResult {
+        SeedResult {
+            seed: seed.to_string(),
+            same_as: None,
+            results,
+        }
+    }
+
+    #[test]
+    fn a_merged_hit_names_every_seed_and_provider_that_returned_it() {
+        let shared = |provider, id| work(provider, id, "Shared", Some("10.1/shared"));
+        let results = SeedResults {
+            seeds: vec![
+                seed_result(
+                    "a2020",
+                    Ok(HashMap::from([
+                        (
+                            ProviderId::OpenAlex,
+                            page(vec![
+                                shared(ProviderId::OpenAlex, "W1"),
+                                work(ProviderId::OpenAlex, "W2", "Only A", Some("10.1/a")),
+                            ]),
+                        ),
+                        (
+                            ProviderId::SemanticScholar,
+                            Err(CitationError::Provider(ProviderError::Withheld {
+                                message: "withheld".to_string(),
+                            })),
+                        ),
+                    ])),
+                ),
+                seed_result("nosuchkey", Err(PaxError::NoSuchPaper("nosuchkey".into()))),
+                seed_result(
+                    "openalex:W9",
+                    Ok(HashMap::from([(
+                        ProviderId::SemanticScholar,
+                        page(vec![shared(ProviderId::SemanticScholar, "s1")]),
+                    )])),
+                ),
+            ],
+        };
+        let report = results.merge();
+        assert_eq!(
+            (report.before, report.after, report.duplicates()),
+            (3, 2, 1)
+        );
+        let hit = &report.works[0];
+        assert_eq!(hit.merged.work.id.native_id, "W1");
+        assert_eq!(hit.seeds(), [0, 2]);
+        assert_eq!(
+            hit.providers(),
+            [ProviderId::OpenAlex, ProviderId::SemanticScholar]
+        );
+        assert_eq!(
+            hit.sources,
+            [
+                RecordSource {
+                    seed: 0,
+                    provider: ProviderId::OpenAlex
+                },
+                RecordSource {
+                    seed: 2,
+                    provider: ProviderId::SemanticScholar
+                },
+            ]
+        );
+        assert_eq!(report.works[1].seeds(), [0]);
+        assert!(results.any_listed());
+        assert_eq!(
+            results.seeds[0].incomplete(),
+            [Incomplete {
+                provider: ProviderId::SemanticScholar,
+                reason: IncompleteReason::Withheld,
+            }]
+        );
+        assert!(results.seeds[1].incomplete().is_empty());
+    }
+
+    #[test]
+    fn an_invalid_seed_fails_only_itself_and_a_repeat_is_looked_up_once() {
+        let root = std::env::temp_dir().join(format!("pax-citations-many-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        nix::init_library(&root).unwrap();
+        // No DOI and no arXiv source: neither provider can be asked, so no
+        // network is needed.
+        std::fs::write(
+            nix::papers_path(&root),
+            r#"{
+  hoare1978 = {
+    doi = null;
+    title = "Communicating Sequential Processes";
+    authors = [ "C. A. R. Hoare" ];
+    year = 1978;
+    source_url = null;
+    hash = null;
+    tags = [ ];
+    notes = null;
+  };
+}
+"#,
+        )
+        .unwrap();
+        let config = Config::default();
+        let options = SearchOptions::default();
+        let seeds = ["hoare1978", "nosuchkey2000", "hoare1978", "bad:"];
+        let future = std::pin::pin!(references_many(&seeds, &options, &root, &config));
+        let poll = future.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
+        let std::task::Poll::Ready(results) = poll else {
+            panic!("an offline lookup should finish at once");
+        };
+        let names: Vec<&str> = results.seeds.iter().map(|s| s.seed.as_str()).collect();
+        assert_eq!(names, seeds);
+        assert!(results.seeds[0].results.is_ok());
+        assert!(matches!(
+            results.seeds[1].results,
+            Err(PaxError::NoSuchPaper(_))
+        ));
+        assert_eq!(results.seeds[2].same_as, Some(0));
+        assert!(results.seeds[2].results.is_ok());
+        assert!(matches!(
+            results.seeds[3].results,
+            Err(PaxError::InvalidReference(_))
+        ));
+        let reasons: Vec<_> = results.seeds[0]
+            .incomplete()
+            .into_iter()
+            .map(|incomplete| incomplete.reason)
+            .collect();
+        assert_eq!(
+            reasons,
+            [IncompleteReason::Unresolved, IncompleteReason::Unresolved]
+        );
+        assert!(!results.any_listed());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
