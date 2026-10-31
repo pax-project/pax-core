@@ -88,6 +88,11 @@ enum Command {
         /// reference can't be resolved
         #[arg(long)]
         title: Option<String>,
+        /// Publication year to record; overrides the provider's. With the
+        /// title, it lets `stats` match a paper with no DOI or arXiv id to
+        /// its search-log records
+        #[arg(long)]
+        year: Option<i32>,
     },
     ///Reverse an exclusion: remove a paper's entry from research/excluded.nix
     Unexclude {
@@ -544,18 +549,13 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             reason,
             stage,
             title,
+            year,
         } => {
             let stage: ExclusionStage = stage.parse().expect("clap restricts --stage");
-            match pax_core::exclude_paper(
-                &reference,
-                &reason,
-                stage,
-                title.as_deref(),
-                Path::new("."),
-                config,
-            )
-            .await
-            {
+            let options = pax_core::ExclusionOptions::new(reason, stage)
+                .with_title(title)
+                .with_year(year);
+            match pax_core::exclude_paper_with(&reference, &options, Path::new("."), config).await {
                 Ok(exclusion) => {
                     sink.message(&format!(
                         "Excluded {} ({}): {}",
