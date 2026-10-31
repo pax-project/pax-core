@@ -1019,6 +1019,36 @@ mod exclude_paper_tests {
     }
 
     #[test]
+    fn a_given_year_is_recorded_without_the_network() {
+        let root = library("year");
+        let options = ExclusionOptions::new("not empirical", ExclusionStage::Screening)
+            .with_title(Some("A grey-literature report".to_string()))
+            .with_year(Some(2019));
+        let excluded = block_on(exclude_paper_with(
+            "10.1000/report",
+            &options,
+            &root,
+            &Config::default(),
+        ))
+        .unwrap();
+        assert_eq!(excluded.year, Some(2019));
+        let exclusions = Exclusions::load(&nix::excluded_path(&root)).unwrap();
+        assert_eq!(exclusions.get("10.1000/report").unwrap().year, Some(2019));
+
+        // Without a year, a bare DOI with a title records none.
+        let without = exclude(
+            &root,
+            "10.1000/other",
+            "wrong domain",
+            ExclusionStage::Screening,
+            Some("Other paper"),
+        )
+        .unwrap();
+        assert_eq!(without.year, None);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn a_declared_paper_cannot_be_excluded() {
         let root = library("declared");
         let result = exclude(
@@ -1394,6 +1424,9 @@ pub async fn show_reference(
 /// Refuses a paper already declared in `papers.nix` — matched by DOI, or
 /// for a work without one, by normalized title and year — since a paper
 /// can't be both included and excluded.
+///
+/// The entry records the paper's publication year when the provider gives
+/// one. To set the year yourself, use [`exclude_paper_with`].
 pub async fn exclude_paper(
     reference: &str,
     reason: &str,
@@ -1402,15 +1435,70 @@ pub async fn exclude_paper(
     root: &Path,
     config: &Config,
 ) -> Result<Exclusion, PaxError> {
-    let reason = reason.trim();
+    let options = ExclusionOptions::new(reason, stage).with_title(title.map(str::to_string));
+    exclude_paper_with(reference, &options, root, config).await
+}
+
+/// What [`exclude_paper_with`] records about an exclusion: the required
+/// `reason` and `stage`, and optionally a `title` (as in [`exclude_paper`])
+/// and a publication `year`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ExclusionOptions {
+    pub reason: String,
+    pub stage: ExclusionStage,
+    pub title: Option<String>,
+    /// Overrides the resolved work's year, and supplies one for a reference
+    /// that can't be resolved. With the title, it's how `stats` matches an
+    /// exclusion keyed by an opaque `provider:id` to its logged records.
+    pub year: Option<i32>,
+}
+
+impl ExclusionOptions {
+    /// Options with a reason and stage, and no title or year.
+    pub fn new(reason: impl Into<String>, stage: ExclusionStage) -> Self {
+        ExclusionOptions {
+            reason: reason.into(),
+            stage,
+            title: None,
+            year: None,
+        }
+    }
+
+    pub fn with_title(mut self, title: Option<String>) -> Self {
+        self.title = title;
+        self
+    }
+
+    pub fn with_year(mut self, year: Option<i32>) -> Self {
+        self.year = year;
+        self
+    }
+}
+
+/// [`exclude_paper`], recording everything in `options`: a given `year`
+/// replaces the resolved one. Re-excluding a paper replaces its whole entry,
+/// so a year neither given nor resolved again is cleared.
+pub async fn exclude_paper_with(
+    reference: &str,
+    options: &ExclusionOptions,
+    root: &Path,
+    config: &Config,
+) -> Result<Exclusion, PaxError> {
+    let reason = options.reason.trim();
     if reason.is_empty() {
         return Err(PaxError::MissingExclusionReason);
     }
-    let title = title.map(str::trim).filter(|t| !t.is_empty());
+    let stage = options.stage;
+    let title = options
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
     let library = Library::load(&nix::papers_path(root))?;
 
     let reference = reference.trim();
-    let resolved = if doi_exclusion_key(reference).starts_with("10.") {
+    let mut resolved = if doi_exclusion_key(reference).starts_with("10.") {
         resolve_doi_for_exclusion(reference, title, config).await?
     } else {
         let id: CandidateId = reference
@@ -1447,6 +1535,9 @@ pub async fn exclude_paper(
             },
         }
     };
+    if options.year.is_some() {
+        resolved.year = options.year;
+    }
 
     if let Some(paper) = declared_match(&library, &resolved) {
         return Err(PaxError::ExcludingDeclaredPaper(
@@ -1457,7 +1548,8 @@ pub async fn exclude_paper(
 
     let path = nix::excluded_path(root);
     let mut exclusions = Exclusions::load(&path)?;
-    let exclusion = Exclusion::new(resolved.key, resolved.title, reason.to_string(), stage);
+    let exclusion = Exclusion::new(resolved.key, resolved.title, reason.to_string(), stage)
+        .with_year(resolved.year);
     exclusions.upsert(exclusion.clone());
     exclusions.save(&path)?;
     Ok(exclusion)
