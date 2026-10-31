@@ -154,6 +154,9 @@ enum Command {
     ///Duplicates are counted across the whole log by identity key. "Reports
     ///not retrieved" is the declared papers with no source_url or no hash
     ///(what `check` reports as not fetched), decided without the network.
+    ///"Records awaiting screening" is the logged papers neither excluded nor
+    ///declared yet; "reports sought" is the declared papers plus those
+    ///excluded at full text.
     Stats {
         /// Print the counts as one JSON object, for scripts and agents
         #[arg(long)]

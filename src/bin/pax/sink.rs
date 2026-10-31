@@ -280,6 +280,12 @@ impl Sink for TextSink {
                 stats.skipped_log_lines
             ));
         }
+        if stats.decided_outside_log > 0 {
+            self.warning(&format!(
+                "{} declared or excluded paper(s) match no search-log record: counted in their box, but not among the records screened",
+                stats.decided_outside_log
+            ));
+        }
     }
 
     fn stats_json(&mut self, stats: &Stats) {
@@ -377,6 +383,11 @@ fn stats_lines(stats: &Stats) -> Vec<String> {
         1,
         "Records excluded".into(),
         stats.excluded_screening,
+    ));
+    rows.push(Row::Count(
+        1,
+        "Records awaiting screening".into(),
+        stats.awaiting_screening,
     ));
     rows.push(Row::Count(
         1,

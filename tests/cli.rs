@@ -370,7 +370,8 @@ fn a_search_outside_a_library_notes_it_isnt_logged() {
 }
 
 /// A library with `lamport1978` declared, a search log of four lines (one
-/// failed) and an excluded.nix.
+/// failed) and an excluded.nix: `lamport1978` matches no logged record, and
+/// one logged paper has no decision.
 fn library_with_history(name: &str) -> PathBuf {
     let dir = library(name);
     let line = |command: &str, provider: &str, outcome: &str| {
@@ -431,6 +432,7 @@ Identification
 Screening
   Records screened                            3
   Records excluded                            1
+  Records awaiting screening                  1
   Reports sought for retrieval                2
   Reports not retrieved                       1
   Reports assessed for eligibility            1
@@ -442,7 +444,10 @@ Included
     );
     assert_eq!(
         stderr(&output),
-        "Warning: skipped 1 search-log line(s) whose provider failed, so retrieved no records\n"
+        "\
+Warning: skipped 1 search-log line(s) whose provider failed, so retrieved no records
+Warning: 1 declared or excluded paper(s) match no search-log record: counted in their box, but not among the records screened
+"
     );
 }
 
