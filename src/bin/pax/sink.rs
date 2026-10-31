@@ -433,6 +433,26 @@ fn stats_lines(stats: &Stats) -> Vec<String> {
         Count(usize, String, usize),
     }
     let mut rows = Vec::new();
+    // Listed only once some exclusion records a criterion, so a review that
+    // doesn't use them sees no rows of "no criterion".
+    let criteria = &stats.excluded_by_criterion;
+    let any_criterion = criteria
+        .screening
+        .iter()
+        .chain(&criteria.full_text)
+        .any(|c| c.criterion.is_some());
+    let by_criterion = |rows: &mut Vec<Row>, counts: &[pax_core::CriterionCount]| {
+        if !any_criterion {
+            return;
+        }
+        for count in counts {
+            let label = match &count.criterion {
+                Some(criterion) => format!("criterion {criterion}"),
+                None => "no criterion".to_string(),
+            };
+            rows.push(Row::Count(2, label, count.count));
+        }
+    };
     let by_provider =
         |rows: &mut Vec<Row>, providers: &std::collections::BTreeMap<String, usize>| {
             for (provider, count) in providers {
@@ -477,6 +497,7 @@ fn stats_lines(stats: &Stats) -> Vec<String> {
         "Records excluded".into(),
         stats.excluded_screening,
     ));
+    by_criterion(&mut rows, &criteria.screening);
     rows.push(Row::Count(
         1,
         "Records awaiting screening".into(),
@@ -505,6 +526,7 @@ fn stats_lines(stats: &Stats) -> Vec<String> {
     for reason in &stats.excluded_full_text.reasons {
         rows.push(Row::Count(2, reason.reason.clone(), reason.count));
     }
+    by_criterion(&mut rows, &criteria.full_text);
     rows.push(Row::Phase("Included"));
     rows.push(Row::Count(
         1,
