@@ -73,6 +73,30 @@ fn wrong_arguments_exit_2() {
 }
 
 #[test]
+fn with_abstracts_is_offered_on_search_refs_and_cited_by() {
+    let dir = scratch("with-abstracts-help");
+    for command in ["search", "refs", "cited-by"] {
+        let output = pax(&dir, &[command, "--help"]);
+        assert_eq!(output.status.code(), Some(0), "pax {command} --help");
+        assert!(
+            stdout(&output).contains("--with-abstracts"),
+            "pax {command}"
+        );
+    }
+}
+
+#[test]
+fn with_abstracts_on_a_local_or_doi_search_is_a_usage_error() {
+    let dir = scratch("with-abstracts-usage");
+    for mode in ["--local", "--doi"] {
+        let output = pax(&dir, &["search", mode, "x", "--with-abstracts"]);
+        assert_eq!(output.status.code(), Some(2), "{mode}");
+        assert!(stdout(&output).is_empty());
+        assert!(stderr(&output).contains("--with-abstracts only apply to"));
+    }
+}
+
+#[test]
 fn an_unknown_citation_key_exits_4() {
     let dir = library("not-found");
     let output = pax(&dir, &["show", "bogus2000"]);

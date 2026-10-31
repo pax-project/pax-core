@@ -38,12 +38,17 @@ pub trait Sink {
     /// Search or citation results merged across providers. A row is marked
     /// in library or excluded if any of its records is. `language_unknown` says
     /// whether a record's language couldn't be checked by the filter; a
-    /// merged row is marked only if that holds for every record in it.
+    /// merged row is marked only if that holds for every record in it. With
+    /// `abstracts` set, each row's abstract ([`MergedWork::abstract_text`])
+    /// follows it.
+    ///
+    /// [`MergedWork::abstract_text`]: pax_core::MergedWork::abstract_text
     fn merged(
         &mut self,
         report: &MergeReport,
         index: &LibraryIndex,
         language_unknown: &dyn Fn(&CandidateWork) -> bool,
+        abstracts: bool,
     );
     /// The line a seed's counts sit under in a multi-seed `refs` /
     /// `cited-by` / `related`; `same_as` is the earlier seed it's the same
@@ -58,6 +63,7 @@ pub trait Sink {
         seeds: &[&str],
         index: &LibraryIndex,
         language_unknown: &dyn Fn(&CandidateWork) -> bool,
+        abstracts: bool,
     );
     fn candidate(&mut self, candidate: &CandidateWork);
     fn papers(&mut self, papers: &[Paper]);
@@ -130,6 +136,7 @@ impl Sink for TextSink {
         report: &MergeReport,
         index: &LibraryIndex,
         language_unknown: &dyn Fn(&CandidateWork) -> bool,
+        abstracts: bool,
     ) {
         println!(
             "merged: {} → {} ({} duplicates, {} unmatched)",
@@ -145,6 +152,9 @@ impl Sink for TextSink {
                 ..Marks::of(merged.records(), index)
             };
             print_work(&merged.work, &ids.join(" · "), &marks, None);
+            if abstracts {
+                print_abstract(merged.abstract_text());
+            }
         }
     }
 
@@ -161,6 +171,7 @@ impl Sink for TextSink {
         seeds: &[&str],
         index: &LibraryIndex,
         language_unknown: &dyn Fn(&CandidateWork) -> bool,
+        abstracts: bool,
     ) {
         println!(
             "merged: {} → {} ({} duplicates, {} unmatched)",
@@ -179,6 +190,9 @@ impl Sink for TextSink {
             let names: Vec<&str> = row.seeds().into_iter().map(|i| seeds[i]).collect();
             let line = format!("seeds: {}", names.join(", "));
             print_work(&merged.work, &ids.join(" · "), &marks, Some(&line));
+            if abstracts {
+                print_abstract(merged.abstract_text());
+            }
         }
     }
 
@@ -491,6 +505,44 @@ fn label_lines(labels: &[LabelCounts]) -> Vec<String> {
         .collect()
 }
 
+/// The width a row's abstract is wrapped to, not counting its indent.
+const ABSTRACT_WIDTH: usize = 80;
+
+/// A row's abstract, under its details at the same indent, wrapped; or a
+/// placeholder when no record had one, like `(no doi)`.
+fn print_abstract(abstract_text: Option<&str>) {
+    let text = abstract_text.unwrap_or("(no abstract)");
+    for line in abstract_lines(&format!("Abstract: {text}"), ABSTRACT_WIDTH) {
+        println!("\t\t{line}");
+    }
+}
+
+/// `text` wrapped to lines of at most `width` characters (a longer word
+/// gets a line of its own). Whitespace within a paragraph is collapsed, so
+/// hard line breaks in an abstract (arXiv's) don't survive; paragraphs,
+/// separated by a blank line, are kept apart by an empty line.
+fn abstract_lines(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for paragraph in text.split("\n\n").filter(|p| !p.trim().is_empty()) {
+        if !lines.is_empty() {
+            lines.push(String::new());
+        }
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            let needed = if line.is_empty() { 0 } else { 1 } + word.chars().count();
+            if !line.is_empty() && line.chars().count() + needed > width {
+                lines.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        lines.push(line);
+    }
+    lines
+}
+
 /// The PRISMA 2020 flow-diagram boxes, one per line: a phase heading, then
 /// each box's label with its count, the counts right-aligned in one column.
 /// Per-provider and per-reason breakdowns are indented under their box.
@@ -631,4 +683,32 @@ fn stats_lines(stats: &Stats) -> Vec<String> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_abstract_wraps_at_the_width_and_keeps_paragraphs() {
+        let text = "Abstract: Actors send\nmessages   to other actors.\n\nSecond paragraph.";
+        assert_eq!(
+            abstract_lines(text, 20),
+            [
+                "Abstract: Actors",
+                "send messages to",
+                "other actors.",
+                "",
+                "Second paragraph.",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_word_longer_than_the_width_gets_its_own_line() {
+        assert_eq!(
+            abstract_lines("see https://example.org/a/very/long/path here", 10),
+            ["see", "https://example.org/a/very/long/path", "here"]
+        );
+    }
 }

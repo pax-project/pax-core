@@ -213,6 +213,9 @@ struct PageArgs {
     /// --by-label`; doesn't change what is searched
     #[arg(long)]
     label: Option<String>,
+    /// Print each result's abstract under it (larger, slower responses)
+    #[arg(long)]
+    with_abstracts: bool,
 }
 
 impl PageArgs {
@@ -224,6 +227,7 @@ impl PageArgs {
             || self.doc_type.is_some()
             || self.lang.is_some()
             || self.label.is_some()
+            || self.with_abstracts
     }
 
     fn options(self) -> SearchOptions {
@@ -243,7 +247,10 @@ impl PageArgs {
         if let Some(lang) = self.lang {
             filters = filters.with_language(lang);
         }
-        let options = defaults.with_limit(limit).with_filters(filters);
+        let options = defaults
+            .with_limit(limit)
+            .with_filters(filters)
+            .with_abstracts(self.with_abstracts);
         match self.label {
             Some(label) => options.with_label(label),
             None => options,
@@ -316,13 +323,19 @@ enum Lists {
 /// if it is, then one list merged across every seed and provider, the way
 /// `search` does. With one seed the output is that seed's alone; with
 /// several, each seed's counts sit under a `seed <seed>:` line and each
-/// merged row names the seeds that returned it.
+/// merged row names the seeds that returned it. With `abstracts`, each row
+/// is followed by its abstract.
 ///
 /// For `related`, only a missing list is marked: a related list never has a
 /// total, so it's never complete, and `truncated` (the limit stopping short
 /// of a total) would say something untrue; its count line already says the
 /// total isn't reported.
-fn show_citations(sink: &mut impl Sink, results: &pax_core::SeedResults, kind: Lists) -> Code {
+fn show_citations(
+    sink: &mut impl Sink,
+    results: &pax_core::SeedResults,
+    kind: Lists,
+    abstracts: bool,
+) -> Code {
     let index = pax_core::LibraryIndex::load(Path::new("."));
     let several = results.seeds.len() > 1;
     let mut codes = Vec::new();
@@ -372,9 +385,20 @@ fn show_citations(sink: &mut impl Sink, results: &pax_core::SeedResults, kind: L
         };
         if several {
             let seeds: Vec<&str> = results.seeds.iter().map(|s| s.seed.as_str()).collect();
-            sink.merged_seeds(&results.merge(), &seeds, &index, &language_unknown);
+            sink.merged_seeds(
+                &results.merge(),
+                &seeds,
+                &index,
+                &language_unknown,
+                abstracts,
+            );
         } else if let Some(Ok(lists)) = results.seeds.first().map(|seed| &seed.results) {
-            sink.merged(&pax_core::merge_pages(lists), &index, &language_unknown);
+            sink.merged(
+                &pax_core::merge_pages(lists),
+                &index,
+                &language_unknown,
+                abstracts,
+            );
         }
     }
     exit::seeds(codes)
@@ -485,7 +509,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 return fail(
                     sink,
                     Failure::Usage(
-                        "--limit, --all, --year, --type, --lang, and --label only apply to QUERY and --author searches",
+                        "--limit, --all, --year, --type, --lang, --label, and --with-abstracts only apply to QUERY and --author searches",
                     ),
                 );
             }
@@ -548,28 +572,33 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                     .flatten()
                     .any(|page| page.is_language_unknown(work))
             };
-            sink.merged(&pax_core::merge_pages(&results), &index, &language_unknown);
+            sink.merged(
+                &pax_core::merge_pages(&results),
+                &index,
+                &language_unknown,
+                options.abstracts,
+            );
             report_log(sink, log, exit::provider_results(results.values()))
         }
         Command::Refs { seeds, paging } => {
             let options = paging.options();
             let pax_core::Logged { results, log, .. } =
                 pax_core::references_many_logged(&seeds, &options, Path::new("."), config).await;
-            let code = show_citations(sink, &results, Lists::Citations);
+            let code = show_citations(sink, &results, Lists::Citations, options.abstracts);
             report_log(sink, log, code)
         }
         Command::CitedBy { seeds, paging } => {
             let options = paging.options();
             let pax_core::Logged { results, log, .. } =
                 pax_core::cited_by_many_logged(&seeds, &options, Path::new("."), config).await;
-            let code = show_citations(sink, &results, Lists::Citations);
+            let code = show_citations(sink, &results, Lists::Citations, options.abstracts);
             report_log(sink, log, code)
         }
         Command::Related { seeds, paging } => {
             let options = paging.options();
             let pax_core::Logged { results, log, .. } =
                 pax_core::related_many_logged(&seeds, &options, Path::new("."), config).await;
-            let code = show_citations(sink, &results, Lists::Related);
+            let code = show_citations(sink, &results, Lists::Related, options.abstracts);
             report_log(sink, log, code)
         }
         Command::Show { reference } => {
