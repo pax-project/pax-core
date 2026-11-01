@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.1.0](https://github.com/pax-project/pax-core/compare/v2.0.0...v2.1.0) - 2026-11-01
 
+### Changed
+
+- *(stats)* `reports_sought` counts the papers that passed screening, declared plus excluded at full text, instead of `records_screened - excluded_screening`, which counted every undecided paper as screened in. The two agree once every logged paper has a decision ([#57](https://github.com/pax-project/pax-core/pull/57))
+- *(cli)* `refs` and `cited-by` exit 3 when a provider withheld its list, failed, or couldn't resolve the seed while another provider answered; a provider with no record of the seed used to leave the exit code at 0. A list cut short by `--limit` still exits 0 ([#56](https://github.com/pax-project/pax-core/pull/56))
+
 ### Features
 
 - *(citations)* snowballing from several seeds with per-seed attribution ([#61](https://github.com/pax-project/pax-core/pull/61))
