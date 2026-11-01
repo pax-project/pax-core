@@ -51,8 +51,8 @@ pub use provider::{
 };
 pub use search_log::{
     LogOutcome, Logged, SearchCommand, SearchLog, SearchLogEntry, cited_by_logged,
-    cited_by_many_logged, log_results, references_logged, references_many_logged,
-    search_all_logged, search_by_author_logged,
+    cited_by_many_logged, log_results, references_logged, references_many_logged, related_logged,
+    related_many_logged, search_all_logged, search_by_author_logged,
 };
 pub use stats::{FullTextExclusions, Identified, ReasonCount, Stats, stats};
 
