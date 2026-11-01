@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0](https://github.com/pax-project/pax-core/compare/v2.1.0...v2.2.0) - 2026-11-01
+
+### Features
+
+- *(related)* pax related <seed>... ([#67](https://github.com/pax-project/pax-core/pull/67))
+- *(related)* related / related_many, logged as related and counted in their own PRISMA box ([#66](https://github.com/pax-project/pax-core/pull/66))
+- *(related)* provider support for related works (OpenAlex related_works, Semantic Scholar recommendations) ([#65](https://github.com/pax-project/pax-core/pull/65))
+
 ## [2.1.0](https://github.com/pax-project/pax-core/compare/v2.0.0...v2.1.0) - 2026-11-01
 
 ### Changed
