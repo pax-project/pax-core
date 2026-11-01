@@ -1,7 +1,8 @@
 //! Citation graph lookups: a seed paper's references (what it cites) and the
 //! papers citing it, from the providers that expose real citation edges —
-//! OpenAlex and Semantic Scholar. Results stay per provider: each list is
-//! that provider's own, with its own total.
+//! OpenAlex and Semantic Scholar — and the papers those providers recommend
+//! as related to it ([`related`]), resolved and merged the same way. Results
+//! stay per provider: each list is that provider's own, with its own total.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -145,9 +146,9 @@ pub fn incomplete_lists(results: &CitationResults) -> Vec<Incomplete> {
         .collect()
 }
 
-/// The providers [`references`] and [`cited_by`] ask, in display order.
-/// Crossref isn't one: its reference lists are publisher-deposited and often
-/// incomplete, and it has no forward citations.
+/// The providers [`references`], [`cited_by`] and [`related`] ask, in display
+/// order. Crossref isn't one: its reference lists are publisher-deposited
+/// and often incomplete, and it has no forward citations or related works.
 pub const CITATION_PROVIDERS: [ProviderId; 2] = [ProviderId::OpenAlex, ProviderId::SemanticScholar];
 
 /// The works `seed` cites, per provider, paged up to `options.limit` with
@@ -207,6 +208,46 @@ pub async fn cited_by_many<S: AsRef<str>>(
     citation_lists_many(seeds, Direction::CitedBy, options, root, config).await
 }
 
+/// The papers the providers themselves recommend as related to `seed`, per
+/// provider: OpenAlex's `related_works` (chosen from shared concepts) and
+/// Semantic Scholar's Recommendations API. Not citation edges, so they reach
+/// papers outside the seed's citation neighbourhood, as a diverse snowballing
+/// start set wants; deterministic for a given provider state. `seed`,
+/// `options` and the errors are as for [`references`]; filters apply
+/// server-side in OpenAlex and, for year and type, after retrieval in
+/// Semantic Scholar.
+///
+/// Neither provider reports a total, so every page's `total` is `None`, and
+/// [`incomplete_reason`] gives [`IncompleteReason::Truncated`] for every list
+/// returned: a related list is never presented as complete. Only an error
+/// means a provider's list is missing.
+pub async fn related(
+    seed: &str,
+    options: &SearchOptions,
+    root: &Path,
+    config: &Config,
+) -> Result<CitationResults, PaxError> {
+    citation_lists(seed, Direction::Related, options, root, config).await
+}
+
+/// The related works of each of `seeds`, one seed after another; otherwise
+/// as [`related`] for each, merged and attributed as [`references_many`]'s
+/// are (see [`SeedResults`]).
+///
+/// Each seed's recommendations are fetched on their own, so every record
+/// can be attributed to the seed it was recommended for, and each seed logs
+/// what it would alone. Semantic Scholar's multi-paper endpoint, which
+/// recommends for a set of papers taken together, isn't used: its list
+/// belongs to no one seed.
+pub async fn related_many<S: AsRef<str>>(
+    seeds: &[S],
+    options: &SearchOptions,
+    root: &Path,
+    config: &Config,
+) -> SeedResults {
+    citation_lists_many(seeds, Direction::Related, options, root, config).await
+}
+
 /// One seed's part in a multi-seed lookup.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -234,8 +275,8 @@ impl SeedResult {
     }
 }
 
-/// Every seed's lists from [`references_many`] or [`cited_by_many`], in the
-/// order the seeds were given.
+/// Every seed's lists from [`references_many`], [`cited_by_many`] or
+/// [`related_many`], in the order the seeds were given.
 #[derive(Debug, Default)]
 #[non_exhaustive]
 pub struct SeedResults {
@@ -402,10 +443,14 @@ fn copy_results(seed: &SeedResult) -> Result<CitationResults, PaxError> {
         .clone())
 }
 
+/// Which of a seed's lists to fetch.
 #[derive(Clone, Copy)]
 enum Direction {
     References,
     CitedBy,
+    /// The providers' related works: not a citation edge, but resolved and
+    /// merged the same way.
+    Related,
 }
 
 async fn citation_lists(
@@ -438,6 +483,7 @@ async fn lists_for(
             let page = match direction {
                 Direction::References => provider.references_page(&key, options).await,
                 Direction::CitedBy => provider.citations_page(&key, options).await,
+                Direction::Related => provider.related_page(&key, options).await,
             };
             seed_error(ProviderId::OpenAlex, key, page)
         }
@@ -456,6 +502,7 @@ async fn lists_for(
                     let page = match direction {
                         Direction::References => provider.references_page(&key, options).await,
                         Direction::CitedBy => provider.citations_page(&key, options).await,
+                        Direction::Related => provider.recommendations_page(&key, options).await,
                     };
                     seed_error(ProviderId::SemanticScholar, key, page)
                 }
@@ -959,6 +1006,71 @@ mod tests {
         ] {
             assert!(reason.is_missing(), "{reason}");
         }
+    }
+
+    #[test]
+    fn a_related_list_without_a_total_is_never_complete() {
+        let a = work(ProviderId::OpenAlex, "W1", "A Study", Some("10.1/a"));
+        let related: Result<SearchPage, CitationError> = Ok(SearchPage::new(vec![a], None, None));
+        assert_eq!(
+            incomplete_reason(&related),
+            Some(IncompleteReason::Truncated)
+        );
+        let empty: Result<SearchPage, CitationError> = Ok(SearchPage::new(Vec::new(), None, None));
+        assert_eq!(incomplete_reason(&empty), Some(IncompleteReason::Truncated));
+    }
+
+    #[test]
+    fn related_works_of_seeds_resolve_like_citation_lists() {
+        let root = std::env::temp_dir().join(format!("pax-related-many-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        nix::init_library(&root).unwrap();
+        // No DOI and no arXiv source: neither provider can be asked, so no
+        // network is needed.
+        std::fs::write(
+            nix::papers_path(&root),
+            r#"{
+  hoare1978 = {
+    doi = null;
+    title = "Communicating Sequential Processes";
+    authors = [ "C. A. R. Hoare" ];
+    year = 1978;
+    source_url = null;
+    hash = null;
+    tags = [ ];
+    notes = null;
+  };
+}
+"#,
+        )
+        .unwrap();
+        let config = Config::default();
+        let options = SearchOptions::default();
+        let seeds = ["hoare1978", "nosuchkey2000", "hoare1978"];
+        let future = std::pin::pin!(related_many(&seeds, &options, &root, &config));
+        let poll = future.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
+        let std::task::Poll::Ready(results) = poll else {
+            panic!("an offline lookup should finish at once");
+        };
+        let reasons: Vec<_> = results.seeds[0]
+            .incomplete()
+            .into_iter()
+            .map(|incomplete| (incomplete.provider, incomplete.reason))
+            .collect();
+        assert_eq!(
+            reasons,
+            [
+                (ProviderId::OpenAlex, IncompleteReason::Unresolved),
+                (ProviderId::SemanticScholar, IncompleteReason::Unresolved),
+            ]
+        );
+        assert!(matches!(
+            results.seeds[1].results,
+            Err(PaxError::NoSuchPaper(_))
+        ));
+        assert_eq!(results.seeds[2].same_as, Some(0));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

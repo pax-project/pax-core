@@ -27,7 +27,8 @@ use std::path::{Path, PathBuf};
 pub use citations::{
     CITATION_PROVIDERS, CitationError, CitationResults, Incomplete, IncompleteReason, RecordSource,
     SeedLookupError, SeedMergeReport, SeedMergedWork, SeedResult, SeedResults, cited_by,
-    cited_by_many, incomplete_lists, incomplete_reason, references, references_many,
+    cited_by_many, incomplete_lists, incomplete_reason, references, references_many, related,
+    related_many,
 };
 pub use error::PaxError;
 pub use exclusions::{
