@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0](https://github.com/pax-project/pax-core/compare/v2.0.0...v2.1.0) - 2026-11-01
+
+### Features
+
+- *(citations)* snowballing from several seeds with per-seed attribution ([#61](https://github.com/pax-project/pax-core/pull/61))
+- *(citations)* typed reasons when a citation list is incomplete ([#56](https://github.com/pax-project/pax-core/pull/56))
+- *(stats)* count papers awaiting a screening decision ([#57](https://github.com/pax-project/pax-core/pull/57))
+
+### Fixed
+
+- *(stats)* match exclusions keyed by provider id to the log by title+year ([#63](https://github.com/pax-project/pax-core/pull/63))
+- *(add)* refuse excluded papers, and pax unexclude reverses an exclusion ([#55](https://github.com/pax-project/pax-core/pull/55))
+
 ## [2.0.0](https://github.com/pax-project/pax-core/compare/v1.1.1...v2.0.0) - 2026-10-26
 
 ### Breaking changes
