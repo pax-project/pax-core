@@ -184,11 +184,11 @@ where
     )
 }
 
-/// The exit code of a `refs` / `cited-by` lookup: [`provider_results`],
-/// except that a provider not knowing the seed is no longer an answer when
-/// another provider returned a list — that provider's list is still missing,
-/// so the results are partial. A list cut short by `--limit` (truncated)
-/// isn't: the user asked for that limit.
+/// The exit code of a `refs` / `cited-by` / `related` lookup:
+/// [`provider_results`], except that a provider not knowing the seed is no
+/// longer an answer when another provider returned a list — that provider's
+/// list is still missing, so the results are partial. A list cut short by
+/// `--limit` (truncated), or a related list with no total, isn't: it's there.
 pub fn citations(results: &CitationResults) -> Code {
     match provider_results(results.values()) {
         Code::Success
@@ -202,8 +202,8 @@ pub fn citations(results: &CitationResults) -> Code {
     }
 }
 
-/// The exit code of a `refs` / `cited-by` run over several seeds, from each
-/// seed's own code. A seed that fails fails only itself: every seed ending
+/// The exit code of a `refs` / `cited-by` / `related` run over several
+/// seeds, from each seed's own code. A seed that fails fails only itself: every seed ending
 /// the same way gives that code (so not found only if no seed resolves);
 /// otherwise, partial if any seed got a list. With no list at all, a
 /// malformed seed is still a usage error.

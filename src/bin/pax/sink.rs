@@ -46,7 +46,8 @@ pub trait Sink {
         language_unknown: &dyn Fn(&CandidateWork) -> bool,
     );
     /// The line a seed's counts sit under in a multi-seed `refs` /
-    /// `cited-by`; `same_as` is the earlier seed it's the same paper as.
+    /// `cited-by` / `related`; `same_as` is the earlier seed it's the same
+    /// paper as.
     fn seed_header(&mut self, seed: &str, same_as: Option<&str>);
     /// Citation results merged across several seeds, as [`Sink::merged`],
     /// each row also naming the seeds that returned it; `seeds` are their

@@ -145,6 +145,24 @@ Two seeds that are the same paper (the same string, or sharing a provider id, DO
 
 With one seed, the output is exactly as above. In the library, `pax_core::references_many` / `cited_by_many` (and `references_many_logged` / `cited_by_many_logged`) return a `SeedResults`: each seed's per-provider lists and `incomplete()` reasons, and `merge()`, the merged list whose rows report their `seeds()` and `providers()`.
 
+### Related works
+
+`pax related` lists the papers the providers themselves recommend as related to a paper. Wohlin (2014) recommends a diverse start set for snowballing; a paper's related works reach outside its own citation neighbourhood, which `refs` and `cited-by` can't:
+
+```Bash
+pax related vaswani2017
+pax related openalex:W2741809807 arxiv:1810.04805 --year 2020-
+```
+
+- **OpenAlex:** the work's `related_works`, chosen algorithmically from shared concepts (usually 10 to 20). pax fetches them as works, so `--year`, `--type` and `--lang` apply server-side.
+- **Semantic Scholar:** its [Recommendations API](https://api.semanticscholar.org/api-docs/recommendations), up to 500 papers, drawn from its default `recent` pool: recently published papers from every field. The other pool, `all-cs`, covers computer science only, so it isn't used. A paper with no recent related work gets an empty list. Year and type are applied after retrieval, and language not at all.
+
+Both come from the providers' current state, so the same paper gives the same list until a provider updates it. Embedding-based similarity is a different method, and isn't part of pax-core.
+
+`related` takes seeds, flags, and multi-seed behaviour like `refs` and `cited-by` (see [Several seeds](#several-seeds)). Seeds are resolved the same way, results are merged and flagged `[in library]` / `[excluded]`, and each run is [logged](#search-log) with command `related`. Each seed's recommendations are fetched separately, so every row can name the seeds it came from. Semantic Scholar's multi-paper endpoint returns one list for the whole set, which can't be split by seed, so pax doesn't use it.
+
+Neither provider says how many related papers there are, so each count reads `retrieved N (total not reported)`. A related list is never shown as complete, and isn't marked `truncated`, since no total was cut short. A provider that returned no list is marked `failed` or `unresolved` as in `refs`, and exit codes follow the same rules. In `pax stats`, related-works records get their own box (see [PRISMA counts](#prisma-counts)). In the library, `pax_core::related` / `related_many` (and `related_logged` / `related_many_logged`) return the same `CitationResults` / `SeedResults` as `references`.
+
 ### Search log
 
 Inside a library, every `search` (a query or `--author`), `refs`, `cited-by` and `related` appends to `research/search-log.jsonl`: the record of every source a review searched, when, and with what search string, filters and limit — what PRISMA 2020 asks a review to report — plus every record retrieved, so duplicates can be counted across the whole review, not just one command. It's always on, created on the first search, and append-only: pax never rewrites a line, so commit it with the library. `search --doi` and `search --local` aren't logged: one resolves a known paper and the other reads your own library, neither searches a database. Outside a library a search still works, isn't logged, and says so on stderr. If the log can't be written, the results still print with a warning on stderr, and a search that otherwise succeeded exits 1.
@@ -206,7 +224,7 @@ The reference is a DOI or a `search` result. pax looks up the title, and keys th
 }
 ```
 
-`search`, `refs` and `cited-by` mark excluded papers `[excluded]`. A row is flagged when any of its records shares a DOI or arXiv id with an entry, so every arXiv version of an excluded paper is flagged, and so is the same paper from any provider. `[in library]` works the same way: a paper you added as a preprint is marked when its published version comes up carrying the same arXiv id.
+`search`, `refs`, `cited-by` and `related` mark excluded papers `[excluded]`. A row is flagged when any of its records shares a DOI or arXiv id with an entry, so every arXiv version of an excluded paper is flagged, and so is the same paper from any provider. `[in library]` works the same way: a paper you added as a preprint is marked when its published version comes up carrying the same arXiv id.
 
 A paper can't be both included and excluded, so `add` refuses an excluded paper, matched by the same DOI, arXiv id (any version) or `provider:id` key that flags it `[excluded]`, before anything is written:
 
@@ -298,13 +316,13 @@ Every command exits with a code a script can branch on:
 | Code | Meaning |
 | --- | --- |
 | 0 | Success. |
-| 1 | Any other failure, e.g. `nix` failing to fetch or build; also `check` or `sync` finding problems in the library, or a `search`, `refs` or `cited-by` that succeeded but couldn't write the [search log](#search-log). |
+| 1 | Any other failure, e.g. `nix` failing to fetch or build; also `check` or `sync` finding problems in the library, or a `search`, `refs`, `cited-by` or `related` that succeeded but couldn't write the [search log](#search-log). |
 | 2 | Wrong arguments: an unknown command or flag, a malformed `provider:id` or citation key, or flags that can't be combined. |
-| 3 | Partial: in `search`, `refs` or `cited-by`, at least one provider failed (network, rate limit, provider error) while others answered, so the results are incomplete. In `refs` and `cited-by` that includes a list withheld by the provider or a provider that can't look the seed up, since its list is still missing; a list cut short by `--limit` isn't (see [Citation graph](#citation-graph)). In `search --doi`, a provider that has no record of the DOI isn't a failure: it answered, so when the others returned results `pax` exits 0 and notes it on stderr. |
-| 4 | Not found: a reference, seed or citation key doesn't resolve, e.g. no provider has a record of the `refs` / `cited-by` seed (with several seeds, of any of them) or the `search --doi` DOI, or `unexclude` names a paper that isn't excluded. |
+| 3 | Partial: in `search`, `refs`, `cited-by` or `related`, at least one provider failed (network, rate limit, provider error) while others answered, so the results are incomplete. In `refs`, `cited-by` and `related` that includes a list withheld by the provider or a provider that can't look the seed up, since its list is still missing; a list cut short by `--limit` isn't (see [Citation graph](#citation-graph)). In `search --doi`, a provider that has no record of the DOI isn't a failure: it answered, so when the others returned results `pax` exits 0 and notes it on stderr. |
+| 4 | Not found: a reference, seed or citation key doesn't resolve, e.g. no provider has a record of the `refs` / `cited-by` / `related` seed (with several seeds, of any of them) or the `search --doi` DOI, or `unexclude` names a paper that isn't excluded. |
 | 5 | Refused: the library rejected the operation, e.g. adding or excluding a paper already declared, adding an excluded paper, renaming to a citation key in use, fetching a paper with no PDF source, or `init` where a library exists. |
 | 6 | Every provider failed (network, rate limit, provider error). |
-| 7 | The library is missing, not initialized, or unreadable. A command that needs a library checks for `research/papers.nix` before doing anything else, so `add` fails before any network call, and so do a citation key given to `show`, `refs` or `cited-by` and `search --local`; a `provider:id` reference and a plain `search` work without one. |
+| 7 | The library is missing, not initialized, or unreadable. A command that needs a library checks for `research/papers.nix` before doing anything else, so `add` fails before any network call, and so do a citation key given to `show`, `refs`, `cited-by` or `related` and `search --local`; a `provider:id` reference and a plain `search` work without one. |
 
 ## License
 
