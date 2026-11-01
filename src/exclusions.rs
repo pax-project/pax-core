@@ -9,11 +9,22 @@
 //! normalized DOI, or `provider:id` for a work without one. An arXiv id is
 //! keyed without its version: the paper, not a version, is what's excluded.
 //!
+//! An entry may also record the protocol's exclusion `criterion` (e.g. `X3`)
+//! and the screening `round` (e.g. `R1`). Both are optional free text pax
+//! doesn't validate, and are only written when set, so a file without them
+//! is read and written back unchanged.
+//!
 //! ```nix
 //! {
 //!   "10.1145/123456" = { title = "Some paper"; reason = "not empirical"; stage = "full-text"; };
-//!   "arxiv:2301.01234" = { title = "..."; reason = "..."; stage = "screening"; };
 //!   "openalex:W123" = { title = "..."; year = 2019; reason = "..."; stage = "screening"; };
+//!   "arxiv:2301.01234" = {
+//!     title = "...";
+//!     reason = "...";
+//!     stage = "screening";
+//!     criterion = "X3";
+//!     round = "R1";
+//!   };
 //! }
 //! ```
 //!
@@ -28,7 +39,9 @@ use std::path::Path;
 use std::str::FromStr;
 
 use crate::error::PaxError;
-use crate::nix_attrs::{self, Value, take_int_opt, take_string, write_field_string};
+use crate::nix_attrs::{
+    self, Value, take_int_opt, take_string, take_string_opt, write_field_string,
+};
 use crate::provider::{CandidateId, CandidateWork, ProviderId};
 
 /// When in the screening process a paper was excluded. PRISMA 2020 reports
@@ -96,9 +109,18 @@ pub struct Exclusion {
     pub stage: ExclusionStage,
     /// The paper's publication year, when known.
     pub year: Option<i32>,
+    /// The protocol's exclusion criterion, e.g. `X3`: free text, not
+    /// validated.
+    pub criterion: Option<String>,
+    /// The screening round, e.g. `R1`: free text, not validated. Meant to
+    /// take the same values as the search log's round labels, so both can be
+    /// grouped by round.
+    pub round: Option<String>,
 }
 
 impl Exclusion {
+    /// An exclusion with no criterion or round; see
+    /// [`Exclusion::with_criterion`] and [`Exclusion::with_round`].
     pub fn new(key: String, title: String, reason: String, stage: ExclusionStage) -> Self {
         Exclusion {
             key,
@@ -106,12 +128,26 @@ impl Exclusion {
             reason,
             stage,
             year: None,
+            criterion: None,
+            round: None,
         }
     }
 
     /// This exclusion with its publication year set, or cleared for `None`.
     pub fn with_year(mut self, year: Option<i32>) -> Self {
         self.year = year;
+        self
+    }
+
+    /// Records the exclusion criterion (`None` clears it).
+    pub fn with_criterion(mut self, criterion: Option<String>) -> Self {
+        self.criterion = criterion;
+        self
+    }
+
+    /// Records the screening round (`None` clears it).
+    pub fn with_round(mut self, round: Option<String>) -> Self {
+        self.round = round;
         self
     }
 }
@@ -174,6 +210,11 @@ impl Exclusions {
             }
             write_field_string(&mut out, "reason", &entry.reason);
             write_field_string(&mut out, "stage", entry.stage.as_str());
+            for (field, value) in [("criterion", &entry.criterion), ("round", &entry.round)] {
+                if let Some(value) = value {
+                    write_field_string(&mut out, field, value);
+                }
+            }
             out.push_str("  };\n");
         }
         out.push_str("}\n");
@@ -194,6 +235,8 @@ fn exclusion_from_fields(
             .map_err(|e: UnknownExclusionStage| {
                 PaxError::LibraryParse(format!("{e} in excluded entry {key:?}"))
             })?;
+    let criterion = take_string_opt(&mut fields, "criterion")?;
+    let round = take_string_opt(&mut fields, "round")?;
 
     if let Some(unknown) = fields.keys().next() {
         return Err(PaxError::LibraryParse(format!(
@@ -207,6 +250,8 @@ fn exclusion_from_fields(
         reason,
         stage,
         year,
+        criterion,
+        round,
     })
 }
 
@@ -319,6 +364,40 @@ mod tests {
     }
 
     #[test]
+    fn criterion_and_round_round_trip_and_are_omitted_when_unset() {
+        let path = scratch_path("criterion");
+        let mut original = sample();
+        original.upsert(
+            Exclusion::new(
+                "10.1/x".to_string(),
+                "T".to_string(),
+                "off topic".to_string(),
+                ExclusionStage::Screening,
+            )
+            .with_criterion(Some("X3".to_string()))
+            .with_round(Some("R1".to_string())),
+        );
+        original.save(&path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("criterion = \"X3\";").count(), 1);
+        assert_eq!(text.matches("round = \"R1\";").count(), 1);
+        assert_eq!(text.matches("criterion").count(), 1, "omitted when unset");
+
+        let loaded = Exclusions::load(&path).unwrap();
+        assert_eq!(
+            loaded.get("10.1/x").unwrap().criterion.as_deref(),
+            Some("X3")
+        );
+        assert_eq!(loaded.get("10.1/x").unwrap().round.as_deref(), Some("R1"));
+        assert_eq!(loaded.get("10.1145/123456").unwrap().criterion, None);
+        let mut expected = original.entries().to_vec();
+        expected.sort_by(|a, b| a.key.cmp(&b.key));
+        assert_eq!(loaded.entries(), expected);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
     fn a_file_without_years_saves_unchanged() {
         let path = scratch_path("no-year");
         sample().save(&path).unwrap();
@@ -326,6 +405,16 @@ mod tests {
         Exclusions::load(&path).unwrap().save(&path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         assert!(!before.contains("year"));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_file_without_criteria_is_written_back_unchanged() {
+        let path = scratch_path("unchanged");
+        let text = "{\n  \"10.1/a\" = {\n    title = \"A\";\n    reason = \"R\";\n    stage = \"screening\";\n  };\n}\n";
+        std::fs::write(&path, text).unwrap();
+        Exclusions::load(&path).unwrap().save(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 

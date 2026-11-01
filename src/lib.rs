@@ -54,7 +54,9 @@ pub use search_log::{
     cited_by_many_logged, log_results, references_logged, references_many_logged, related_logged,
     related_many_logged, search_all_logged, search_by_author_logged,
 };
-pub use stats::{FullTextExclusions, Identified, ReasonCount, Stats, stats};
+pub use stats::{
+    CriterionCount, CriterionExclusions, FullTextExclusions, Identified, ReasonCount, Stats, stats,
+};
 
 /// Per-installation settings a caller (e.g. the CLI, reading `.env`) supplies
 /// so `pax-core` never reads the environment itself. Both fields are
@@ -1053,6 +1055,45 @@ mod exclude_paper_tests {
     }
 
     #[test]
+    fn a_criterion_and_round_are_recorded_and_re_excluding_without_them_clears_them() {
+        let root = library("criterion");
+        let options = ExclusionOptions::new("not empirical", ExclusionStage::Screening)
+            .with_title(Some("Some paper".to_string()))
+            .with_criterion(Some(" X3 ".to_string()))
+            .with_round(Some("R1".to_string()));
+        let excluded = block_on(exclude_paper_with(
+            "10.1000/abc",
+            &options,
+            &root,
+            &Config::default(),
+        ))
+        .unwrap();
+        assert_eq!(excluded.criterion.as_deref(), Some("X3"));
+        let entry = Exclusions::load(&nix::excluded_path(&root)).unwrap();
+        let entry = entry.get("10.1000/abc").unwrap();
+        assert_eq!(entry.criterion.as_deref(), Some("X3"));
+        assert_eq!(entry.round.as_deref(), Some("R1"));
+
+        let blank = options
+            .with_criterion(Some("  ".to_string()))
+            .with_round(None);
+        block_on(exclude_paper_with(
+            "10.1000/abc",
+            &blank,
+            &root,
+            &Config::default(),
+        ))
+        .unwrap();
+        let entry = Exclusions::load(&nix::excluded_path(&root)).unwrap();
+        let entry = entry.get("10.1000/abc").unwrap();
+        assert_eq!(
+            (entry.criterion.as_deref(), entry.round.as_deref()),
+            (None, None)
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn a_declared_paper_cannot_be_excluded() {
         let root = library("declared");
         let result = exclude(
@@ -1430,7 +1471,8 @@ pub async fn show_reference(
 /// can't be both included and excluded.
 ///
 /// The entry records the paper's publication year when the provider gives
-/// one. To set the year yourself, use [`exclude_paper_with`].
+/// one. To set the year yourself, or to also record a criterion and round,
+/// use [`exclude_paper_with`].
 pub async fn exclude_paper(
     reference: &str,
     reason: &str,
@@ -1444,8 +1486,10 @@ pub async fn exclude_paper(
 }
 
 /// What [`exclude_paper_with`] records about an exclusion: the required
-/// `reason` and `stage`, and optionally a `title` (as in [`exclude_paper`])
-/// and a publication `year`.
+/// `reason` and `stage`, and optionally a `title` (as in [`exclude_paper`]),
+/// a publication `year`, the protocol's `criterion` (e.g. `X3`) and the
+/// screening `round` (e.g. `R1`). Criterion and round are free text pax
+/// doesn't validate; blank ones count as unset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ExclusionOptions {
@@ -1456,16 +1500,21 @@ pub struct ExclusionOptions {
     /// that can't be resolved. With the title, it's how `stats` matches an
     /// exclusion keyed by an opaque `provider:id` to its logged records.
     pub year: Option<i32>,
+    pub criterion: Option<String>,
+    pub round: Option<String>,
 }
 
 impl ExclusionOptions {
-    /// Options with a reason and stage, and no title or year.
+    /// Options with a reason and stage, and no title, year, criterion or
+    /// round.
     pub fn new(reason: impl Into<String>, stage: ExclusionStage) -> Self {
         ExclusionOptions {
             reason: reason.into(),
             stage,
             title: None,
             year: None,
+            criterion: None,
+            round: None,
         }
     }
 
@@ -1478,11 +1527,22 @@ impl ExclusionOptions {
         self.year = year;
         self
     }
+
+    pub fn with_criterion(mut self, criterion: Option<String>) -> Self {
+        self.criterion = criterion;
+        self
+    }
+
+    pub fn with_round(mut self, round: Option<String>) -> Self {
+        self.round = round;
+        self
+    }
 }
 
 /// [`exclude_paper`], recording everything in `options`: a given `year`
-/// replaces the resolved one. Re-excluding a paper replaces its whole entry,
-/// so a year neither given nor resolved again is cleared.
+/// replaces the resolved one, and the criterion and round are recorded.
+/// Re-excluding a paper replaces its whole entry, so a year neither given nor
+/// resolved again, or a criterion or round not given again, is cleared.
 pub async fn exclude_paper_with(
     reference: &str,
     options: &ExclusionOptions,
@@ -1494,6 +1554,13 @@ pub async fn exclude_paper_with(
         return Err(PaxError::MissingExclusionReason);
     }
     let stage = options.stage;
+    let set = |value: &Option<String>| {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
     let title = options
         .title
         .as_deref()
@@ -1553,7 +1620,9 @@ pub async fn exclude_paper_with(
     let path = nix::excluded_path(root);
     let mut exclusions = Exclusions::load(&path)?;
     let exclusion = Exclusion::new(resolved.key, resolved.title, reason.to_string(), stage)
-        .with_year(resolved.year);
+        .with_year(resolved.year)
+        .with_criterion(set(&options.criterion))
+        .with_round(set(&options.round));
     exclusions.upsert(exclusion.clone());
     exclusions.save(&path)?;
     Ok(exclusion)
@@ -2370,6 +2439,12 @@ mod send_tests {
             "r",
             ExclusionStage::Screening,
             None,
+            root,
+            &config,
+        ));
+        assert_send(exclude_paper_with(
+            "openalex:W1",
+            &ExclusionOptions::new("r", ExclusionStage::Screening),
             root,
             &config,
         ));

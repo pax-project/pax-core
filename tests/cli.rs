@@ -668,9 +668,74 @@ fn stats_json_is_one_object_for_scripts() {
                 "total": 1,
                 "reasons": [{ "reason": "not empirical", "count": 1 }]
             },
+            "excluded_by_criterion": {
+                "screening": [{ "criterion": null, "count": 1 }],
+                "full_text": [{ "criterion": null, "count": 1 }]
+            },
             "included": 0,
             "skipped_log_lines": 1,
             "decided_outside_log": 1
+        })
+    );
+}
+
+#[test]
+fn exclude_records_a_criterion_and_round_and_stats_groups_by_criterion() {
+    let dir = library_with_history("stats-criteria");
+    let output = pax(
+        &dir,
+        &[
+            "exclude",
+            "10.1/d",
+            "--reason",
+            "not empirical",
+            "--stage",
+            "full-text",
+            "--title",
+            "D",
+            "--criterion",
+            "X3",
+            "--round",
+            "R1",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "Excluded 10.1/d (full-text, criterion X3, round R1): D\n"
+    );
+    let excluded = fs::read_to_string(dir.join("research").join("excluded.nix")).unwrap();
+    assert!(
+        excluded.contains("    criterion = \"X3\";\n    round = \"R1\";\n"),
+        "{excluded}"
+    );
+
+    let output = pax(&dir, &["stats"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains(
+            "  Records excluded                            1\n    no criterion                              1\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "  Reports excluded                            2\n    not empirical                             2\n    criterion X3                              1\n    no criterion                              1\n"
+        ),
+        "{text}"
+    );
+
+    let output = pax(&dir, &["stats", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        json["excluded_by_criterion"],
+        serde_json::json!({
+            "screening": [{ "criterion": null, "count": 1 }],
+            "full_text": [
+                { "criterion": "X3", "count": 1 },
+                { "criterion": null, "count": 1 }
+            ]
         })
     );
 }

@@ -104,6 +104,12 @@ enum Command {
         /// its search-log records
         #[arg(long)]
         year: Option<i32>,
+        /// The protocol's exclusion criterion, e.g. X3 (free text)
+        #[arg(long)]
+        criterion: Option<String>,
+        /// The screening round, e.g. R1 (free text)
+        #[arg(long)]
+        round: Option<String>,
     },
     ///Reverse an exclusion: remove a paper's entry from research/excluded.nix
     Unexclude {
@@ -604,16 +610,27 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             stage,
             title,
             year,
+            criterion,
+            round,
         } => {
             let stage: ExclusionStage = stage.parse().expect("clap restricts --stage");
             let options = pax_core::ExclusionOptions::new(reason, stage)
                 .with_title(title)
-                .with_year(year);
+                .with_year(year)
+                .with_criterion(criterion)
+                .with_round(round);
             match pax_core::exclude_paper_with(&reference, &options, Path::new("."), config).await {
                 Ok(exclusion) => {
+                    let mut decision = exclusion.stage.to_string();
+                    if let Some(criterion) = &exclusion.criterion {
+                        decision.push_str(&format!(", criterion {criterion}"));
+                    }
+                    if let Some(round) = &exclusion.round {
+                        decision.push_str(&format!(", round {round}"));
+                    }
                     sink.message(&format!(
-                        "Excluded {} ({}): {}",
-                        exclusion.key, exclusion.stage, exclusion.title
+                        "Excluded {} ({decision}): {}",
+                        exclusion.key, exclusion.title
                     ));
                     Code::Success
                 }

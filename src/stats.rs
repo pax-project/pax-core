@@ -46,6 +46,8 @@ pub struct Stats {
     pub reports_assessed: usize,
     /// Papers excluded after reading the full text, by reason.
     pub excluded_full_text: FullTextExclusions,
+    /// Papers excluded at each stage, by the protocol's criterion.
+    pub excluded_by_criterion: CriterionExclusions,
     /// Declared papers with a fetchable artifact. A declared paper without
     /// one is only counted in `not_retrieved`.
     pub included: usize,
@@ -86,6 +88,27 @@ pub struct FullTextExclusions {
     pub reasons: Vec<ReasonCount>,
 }
 
+/// Exclusions at each stage, grouped by criterion.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct CriterionExclusions {
+    /// Title/abstract screening exclusions.
+    pub screening: Vec<CriterionCount>,
+    /// Full-text exclusions.
+    pub full_text: Vec<CriterionCount>,
+}
+
+/// How many papers were excluded under one criterion. One entry per distinct
+/// criterion (exact text), sorted by criterion, then one with `criterion:
+/// None` for exclusions recording none; a stage with no exclusions has no
+/// entries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct CriterionCount {
+    pub criterion: Option<String>,
+    pub count: usize,
+}
+
 /// How many papers were excluded for one reason.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
@@ -107,7 +130,8 @@ pub struct ReasonCount {
 ///   title+year match never joins two different non-arXiv DOIs); a record
 ///   with no key is a paper of its own.
 /// - **excluded at screening / full text**: `excluded.nix` entries by
-///   `stage`, the full-text ones grouped by `reason`.
+///   `stage`, the full-text ones grouped by `reason`, and both grouped by
+///   `criterion` (`excluded_by_criterion`).
 /// - **not retrieved**: declared papers with no `source_url` or no `hash` —
 ///   those `check_library` reports as not fetched. Decided from
 ///   `papers.nix` alone, with no network: a recorded artifact whose source
@@ -181,12 +205,39 @@ pub fn stats(root: &Path) -> Result<Stats, PaxError> {
     stats.duplicates_removed = stats.identified.total - stats.records_screened;
 
     let mut reasons: BTreeMap<&str, usize> = BTreeMap::new();
+    let (mut screening, mut full_text) = (BTreeMap::new(), BTreeMap::new());
     for exclusion in exclusions.entries() {
-        match exclusion.stage {
-            ExclusionStage::Screening => stats.excluded_screening += 1,
-            ExclusionStage::FullText => *reasons.entry(&exclusion.reason).or_default() += 1,
-        }
+        let criteria = match exclusion.stage {
+            ExclusionStage::Screening => {
+                stats.excluded_screening += 1;
+                &mut screening
+            }
+            ExclusionStage::FullText => {
+                *reasons.entry(&exclusion.reason).or_default() += 1;
+                &mut full_text
+            }
+        };
+        // `None` sorts first in a map; it's listed last instead.
+        *criteria
+            .entry((
+                exclusion.criterion.is_none(),
+                exclusion.criterion.as_deref(),
+            ))
+            .or_default() += 1;
     }
+    let by_criterion = |criteria: BTreeMap<(bool, Option<&str>), usize>| {
+        criteria
+            .into_iter()
+            .map(|((_, criterion), count)| CriterionCount {
+                criterion: criterion.map(str::to_string),
+                count,
+            })
+            .collect()
+    };
+    stats.excluded_by_criterion = CriterionExclusions {
+        screening: by_criterion(screening),
+        full_text: by_criterion(full_text),
+    };
     stats.excluded_full_text = FullTextExclusions {
         total: reasons.values().sum(),
         reasons: reasons
@@ -600,6 +651,18 @@ mod tests {
                 ],
             }
         );
+        // None of them records a criterion.
+        let none = |count| CriterionCount {
+            criterion: None,
+            count,
+        };
+        assert_eq!(
+            stats.excluded_by_criterion,
+            CriterionExclusions {
+                screening: vec![none(2)],
+                full_text: vec![none(3)],
+            }
+        );
         assert_eq!(stats.included, 1);
         assert_eq!(stats.not_retrieved, 2);
         // No log: nothing identified.
@@ -804,6 +867,35 @@ mod tests {
     }
 
     #[test]
+    fn exclusions_are_grouped_by_criterion_per_stage_with_none_last() {
+        let root = scratch_library("criteria");
+        fs::write(
+            nix::excluded_path(&root),
+            r#"{
+  "10.1/a" = { title = "A"; reason = "r"; stage = "screening"; criterion = "X3"; round = "R1"; };
+  "10.1/b" = { title = "B"; reason = "r"; stage = "screening"; };
+  "10.1/c" = { title = "C"; reason = "r"; stage = "screening"; criterion = "X1"; };
+  "10.1/d" = { title = "D"; reason = "r"; stage = "screening"; criterion = "X3"; };
+  "10.1/e" = { title = "E"; reason = "r"; stage = "full-text"; criterion = "X2"; };
+}
+"#,
+        )
+        .unwrap();
+        let count = |criterion: Option<&str>, count| CriterionCount {
+            criterion: criterion.map(str::to_string),
+            count,
+        };
+        assert_eq!(
+            stats(&root).unwrap().excluded_by_criterion,
+            CriterionExclusions {
+                screening: vec![count(Some("X1"), 1), count(Some("X3"), 2), count(None, 1)],
+                full_text: vec![count(Some("X2"), 1)],
+            }
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn serializes_to_the_documented_json_shape() {
         let stats = Stats {
             identified: Identified {
@@ -825,7 +917,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&stats).unwrap(),
-            r#"{"identified":{"databases":{"openalex":2},"citation_searching":{},"related_works":{},"total":2},"duplicates_removed":1,"records_screened":1,"excluded_screening":0,"awaiting_screening":0,"reports_sought":0,"not_retrieved":0,"reports_assessed":0,"excluded_full_text":{"total":1,"reasons":[{"reason":"r","count":1}]},"included":0,"skipped_log_lines":0,"decided_outside_log":0}"#
+            r#"{"identified":{"databases":{"openalex":2},"citation_searching":{},"related_works":{},"total":2},"duplicates_removed":1,"records_screened":1,"excluded_screening":0,"awaiting_screening":0,"reports_sought":0,"not_retrieved":0,"reports_assessed":0,"excluded_full_text":{"total":1,"reasons":[{"reason":"r","count":1}]},"excluded_by_criterion":{"screening":[],"full_text":[]},"included":0,"skipped_log_lines":0,"decided_outside_log":0}"#
         );
     }
 
