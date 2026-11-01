@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 
 use super::{
     AppliedFilter, CandidateId, CandidateWork, DocType, FilterApplication, FilterKind, Filters,
-    Provider, ProviderError, ProviderId, RawPage, SearchOptions, SearchPage, collect_pages,
+    Limit, Provider, ProviderError, ProviderId, RawPage, SearchOptions, SearchPage, collect_pages,
 };
 
 /// Semantic Scholar's relevance search serves at most 100 papers per request.
@@ -107,7 +107,7 @@ impl SemanticScholarProvider {
                         ("limit", limit.to_string()),
                         ("fields", PAPER_FIELDS.to_string()),
                     ];
-                    let response: ListResponse = self.get_json(&path, &query).await?;
+                    let response: ListResponse = self.get_json(GRAPH_API, &path, &query).await?;
                     let entries = response.data.ok_or_else(|| withheld(list))?;
                     let fetched = entries.len();
                     let works = entries
@@ -128,14 +128,68 @@ impl SemanticScholarProvider {
         Ok(page.with_filters(citation_filters(filters)))
     }
 
-    /// GETs `path` under the Graph API, retrying a rate-limited or failed
-    /// request with backoff the way the `semantic_scholar` client does.
+    /// The papers Semantic Scholar's Recommendations API recommends for
+    /// `paper`, as many as `options.limit` asks for up to
+    /// [`MAX_RECOMMENDATIONS`]. `paper` is as for [`Self::references_page`]:
+    /// the endpoint takes the same id forms. Recommendations come from the
+    /// API's default pool, [`RECOMMENDATION_POOL`].
+    ///
+    /// The endpoint takes no filters and reports no total, so year and type
+    /// are applied after retrieval (see [`citation_filters`]) and the page's
+    /// `total` is `None`: a recommendation list is never presented as
+    /// complete.
+    pub async fn recommendations_page(
+        &self,
+        paper: &str,
+        options: &SearchOptions,
+    ) -> Result<SearchPage, ProviderError> {
+        let filters = &options.filters;
+        let applied = citation_filters(filters);
+        let wanted = match options.limit {
+            Limit::Count(n) => Some(n),
+            Limit::All => None,
+        };
+        if wanted == Some(0) {
+            return Ok(
+                SearchPage::new(Vec::new(), None, Some(MAX_RECOMMENDATIONS)).with_filters(applied)
+            );
+        }
+        let post_filtered = filters.years.is_some() || filters.doc_type.is_some();
+        let limit = recommendation_limit(wanted, post_filtered);
+        let path = format!("/papers/forpaper/{paper}");
+        let query = [
+            ("from", RECOMMENDATION_POOL.to_string()),
+            ("limit", limit.to_string()),
+            ("fields", PAPER_FIELDS.to_string()),
+        ];
+        let response: RecommendationsResponse =
+            self.get_json(RECOMMENDATIONS_API, &path, &query).await?;
+        let fetched = response.recommended_papers.len();
+        let mut works: Vec<CandidateWork> = response
+            .recommended_papers
+            .into_iter()
+            .filter_map(paper_with_id)
+            .filter(|paper| keeps(filters, paper))
+            .map(CandidateWork::from)
+            .collect();
+        if let Some(n) = wanted {
+            works.truncate(n);
+        }
+        Ok(SearchPage::new(works, None, Some(MAX_RECOMMENDATIONS))
+            .with_scanned(fetched as u64)
+            .with_filters(applied))
+    }
+
+    /// GETs `path` under `api` (the Graph or Recommendations API), retrying a
+    /// rate-limited or failed request with backoff the way the
+    /// `semantic_scholar` client does.
     async fn get_json<T: DeserializeOwned>(
         &self,
+        api: &str,
         path: &str,
         query: &[(&str, String)],
     ) -> Result<T, ProviderError> {
-        let url = format!("{GRAPH_API}{path}");
+        let url = format!("{api}{path}");
         let mut backoff = INITIAL_BACKOFF;
         for attempt in 0..=MAX_RETRIES {
             let response = self
@@ -181,6 +235,37 @@ impl SemanticScholarProvider {
 }
 
 const GRAPH_API: &str = "https://api.semanticscholar.org/graph/v1";
+const RECOMMENDATIONS_API: &str = "https://api.semanticscholar.org/recommendations/v1";
+
+/// The Recommendations API serves at most 500 papers per request, and has no
+/// paging.
+const MAX_RECOMMENDATIONS: u64 = 500;
+
+/// The pool recommendations are drawn from: `recent`, the API's default, is
+/// recent papers from every field; the other, `all-cs`, would restrict them
+/// to computer science, which a review in another field can't use.
+const RECOMMENDATION_POOL: &str = "recent";
+
+/// How many recommendations to ask for: `wanted`, or every one the endpoint
+/// serves for `--all` or when a post-retrieval filter may drop most of a
+/// short list (it's cut to `wanted` after filtering).
+fn recommendation_limit(wanted: Option<usize>, post_filtered: bool) -> usize {
+    let max = MAX_RECOMMENDATIONS as usize;
+    match wanted {
+        Some(n) if !post_filtered => n.min(max),
+        _ => max,
+    }
+}
+
+/// A Recommendations API response. Parsed leniently, like the list
+/// endpoints: an entry without a `paperId` is skipped rather than failing
+/// the page.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecommendationsResponse {
+    #[serde(default)]
+    recommended_papers: Vec<serde_json::Value>,
+}
 const MAX_RETRIES: u32 = 3;
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 
@@ -220,13 +305,18 @@ impl ListEntry {
     /// The entry's paper, or `None` for one Semantic Scholar couldn't match
     /// to a paper: with no `paperId` it can't be addressed, so it's skipped.
     fn into_paper(self) -> Option<Paper> {
-        let paper = self.cited_paper?;
-        let has_id = paper
-            .get("paperId")
-            .and_then(|id| id.as_str())
-            .is_some_and(|id| !id.is_empty());
-        has_id.then(|| serde_json::from_value(paper).ok()).flatten()
+        paper_with_id(self.cited_paper?)
     }
+}
+
+/// `paper` as a [`Paper`], or `None` when it has no `paperId` (so can't be
+/// addressed) or doesn't parse.
+fn paper_with_id(paper: serde_json::Value) -> Option<Paper> {
+    let has_id = paper
+        .get("paperId")
+        .and_then(|id| id.as_str())
+        .is_some_and(|id| !id.is_empty());
+    has_id.then(|| serde_json::from_value(paper).ok()).flatten()
 }
 
 /// The reference and citation endpoints serve at most 1,000 papers per
@@ -528,6 +618,48 @@ mod tests {
 
         let withheld: ListResponse = serde_json::from_str(r#"{"data": null}"#).unwrap();
         assert!(withheld.data.is_none());
+    }
+
+    #[test]
+    fn recommendations_parse_leniently() {
+        let body = r#"{"recommendedPapers": [
+            {"paperId": "e42e3e09af8a56381c65aa8a8ddaee63fb321936", "title": "Transformer++",
+             "year": 2020, "externalIds": {"ArXiv": "2003.04974"}},
+            {"paperId": null, "title": "Unaddressable"},
+            {"paperId": "2e7ddc611c414a0bf26e546f8dc743a5ac5842cf",
+             "title": "Parallel Attention Mechanisms in Neural Machine Translation"}
+        ]}"#;
+        let response: RecommendationsResponse = serde_json::from_str(body).unwrap();
+        let works: Vec<CandidateWork> = response
+            .recommended_papers
+            .into_iter()
+            .filter_map(paper_with_id)
+            .map(CandidateWork::from)
+            .collect();
+        let titles: Vec<&str> = works.iter().map(|w| w.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Transformer++",
+                "Parallel Attention Mechanisms in Neural Machine Translation"
+            ]
+        );
+        assert_eq!(
+            works[0].pdf_url.as_deref(),
+            Some("https://arxiv.org/pdf/2003.04974")
+        );
+
+        let empty: RecommendationsResponse =
+            serde_json::from_str(r#"{"recommendedPapers": []}"#).unwrap();
+        assert!(empty.recommended_papers.is_empty());
+    }
+
+    #[test]
+    fn recommendations_ask_for_the_limit_or_all_when_filtered_after() {
+        assert_eq!(recommendation_limit(Some(20), false), 20);
+        assert_eq!(recommendation_limit(Some(2000), false), 500);
+        assert_eq!(recommendation_limit(Some(20), true), 500);
+        assert_eq!(recommendation_limit(None, false), 500);
     }
 
     #[test]

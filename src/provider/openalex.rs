@@ -50,6 +50,41 @@ impl OpenAlexProvider {
         self.list_works_page(params, options).await
     }
 
+    /// The works OpenAlex lists as related to `work` (its `related_works`,
+    /// chosen algorithmically from shared concepts), paged, with
+    /// `options.filters` applied server-side. `work` is as for
+    /// [`Self::references_page`].
+    ///
+    /// The ids are fetched as works with one `openalex_id:` OR-filter, so the
+    /// search filters apply as for any list. An OR-filter takes at most
+    /// [`MAX_OR_VALUES`] values; a work lists far fewer related works (10 to
+    /// 20), and any past that are left out. OpenAlex reports no total for
+    /// the relation itself, so the page's `total` is `None`: a related list
+    /// is never presented as complete.
+    pub async fn related_page(
+        &self,
+        work: &str,
+        options: &SearchOptions,
+    ) -> Result<SearchPage, ProviderError> {
+        let params = GetParams {
+            select: Some("id,related_works".to_string()),
+        };
+        let found = self
+            .client
+            .get_work(work, &params)
+            .await
+            .map_err(work_error)?;
+        let Some(filter) = related_filter(found.related_works.as_deref().unwrap_or_default())
+        else {
+            let applied = server_applied(&options.filters);
+            return Ok(SearchPage::new(Vec::new(), None, None).with_filters(applied));
+        };
+        let params = ListParams::builder().filter(filter).build();
+        let mut page = self.list_works_page(params, options).await?;
+        page.total = None;
+        Ok(page)
+    }
+
     /// `work`'s `W…` id, looking it up when given another form (e.g. a DOI);
     /// [`ProviderError::NotFound`] when OpenAlex has no such work.
     async fn work_id(&self, work: &str) -> Result<String, ProviderError> {
@@ -102,14 +137,34 @@ impl OpenAlexProvider {
             },
         )
         .await?;
-        let applied = options
-            .filters
-            .kinds()
-            .into_iter()
-            .map(|kind| AppliedFilter::new(kind, FilterApplication::Server))
-            .collect();
-        Ok(page.with_filters(applied))
+        Ok(page.with_filters(server_applied(&options.filters)))
     }
+}
+
+/// Every requested filter, applied server-side: OpenAlex filters on every
+/// supported criterion.
+fn server_applied(filters: &Filters) -> Vec<AppliedFilter> {
+    filters
+        .kinds()
+        .into_iter()
+        .map(|kind| AppliedFilter::new(kind, FilterApplication::Server))
+        .collect()
+}
+
+/// The most values one OpenAlex OR-filter (`a|b|c`) takes.
+const MAX_OR_VALUES: usize = 100;
+
+/// The `openalex_id:` OR-filter selecting `related` (full work URIs, as
+/// `related_works` gives them), at most [`MAX_OR_VALUES`] of them; `None`
+/// when there are none.
+fn related_filter(related: &[String]) -> Option<String> {
+    let ids: Vec<&str> = related
+        .iter()
+        .map(|uri| uri.rsplit('/').next().unwrap_or(uri))
+        .filter(|id| is_work_id(id))
+        .take(MAX_OR_VALUES)
+        .collect();
+    (!ids.is_empty()).then(|| format!("openalex_id:{}", ids.join("|")))
 }
 
 /// Whether `id` is already an OpenAlex work id (`W` and digits), as opposed
@@ -349,6 +404,32 @@ mod tests {
         assert!(!is_work_id("doi:10.1145/359545.359563"));
         assert!(!is_work_id("W"));
         assert!(!is_work_id("https://openalex.org/W1"));
+    }
+
+    #[test]
+    fn related_works_become_one_openalex_id_or_filter() {
+        let work: papers_openalex::Work = serde_json::from_str(
+            r#"{
+                "id": "https://openalex.org/W2741809807",
+                "related_works": [
+                    "https://openalex.org/W2980172586",
+                    "https://openalex.org/W2745347329",
+                    "not a work id"
+                ]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            related_filter(&work.related_works.unwrap()).as_deref(),
+            Some("openalex_id:W2980172586|W2745347329")
+        );
+        assert_eq!(related_filter(&[]), None);
+
+        let many: Vec<String> = (0..150)
+            .map(|i| format!("https://openalex.org/W{i}"))
+            .collect();
+        let filter = related_filter(&many).unwrap();
+        assert_eq!(filter.matches('|').count(), MAX_OR_VALUES - 1);
     }
 
     #[test]
