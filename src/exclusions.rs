@@ -126,6 +126,12 @@ impl Exclusions {
         }
     }
 
+    /// Removes the entry keyed `key`, returning it; `None` if there's none.
+    pub fn remove(&mut self, key: &str) -> Option<Exclusion> {
+        let index = self.entries.iter().position(|e| e.key == key)?;
+        Some(self.entries.remove(index))
+    }
+
     /// Loads `path`, or returns no exclusions if the file doesn't exist.
     pub fn load(path: &Path) -> Result<Self, PaxError> {
         let text = match std::fs::read_to_string(path) {
@@ -286,6 +292,16 @@ mod tests {
         let updated = exclusions.get("10.1145/123456").unwrap();
         assert_eq!(updated.reason, "duplicate study");
         assert_eq!(updated.stage, ExclusionStage::Screening);
+    }
+
+    #[test]
+    fn remove_takes_out_only_that_key() {
+        let mut exclusions = sample();
+        let removed = exclusions.remove("10.1145/123456").unwrap();
+        assert_eq!(removed.reason, "not empirical");
+        assert_eq!(exclusions.entries().len(), 1);
+        assert!(exclusions.get("arxiv:2301.01234").is_some());
+        assert_eq!(exclusions.remove("10.1145/123456"), None);
     }
 
     #[test]
