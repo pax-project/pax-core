@@ -1,9 +1,9 @@
 //! The search log, `research/search-log.jsonl`: the library's provenance.
-//! Every database search a review runs — `search`, `search --author`,
-//! `refs`, `cited-by` — appends one JSON line per provider asked, recording
-//! what PRISMA 2020 asks a review to report (each source, the date it was
-//! searched, the full search string with its filters and limits) plus the
-//! identity key of every record retrieved, so duplicates can be counted
+//! Every search a review runs — `search`, `search --author`, `refs`,
+//! `cited-by`, `related` — appends one JSON line per provider asked,
+//! recording what PRISMA 2020 asks a review to report (each source, the date
+//! it was searched, the full search string with its filters and limits) plus
+//! the identity key of every record retrieved, so duplicates can be counted
 //! across the whole review, not just within one command.
 //!
 //! Written by the library, not a client, so every client logs the same way:
@@ -54,12 +54,18 @@ pub enum SearchCommand {
     Refs,
     /// The works citing a seed ([`crate::cited_by`]).
     CitedBy,
+    /// The works the providers recommend as related to a seed
+    /// ([`crate::related`]). Logged as `related`.
+    Related,
 }
 
 impl SearchCommand {
     /// Whether the command's input is a seed paper rather than a query.
     fn takes_seed(self) -> bool {
-        matches!(self, SearchCommand::Refs | SearchCommand::CitedBy)
+        matches!(
+            self,
+            SearchCommand::Refs | SearchCommand::CitedBy | SearchCommand::Related
+        )
     }
 }
 
@@ -74,7 +80,7 @@ pub struct SearchLogEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query: Option<String>,
     /// The seed as given (a `provider:id` reference or a citation key), for
-    /// `refs` / `cited-by`.
+    /// `refs` / `cited-by` / `related`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<String>,
     /// The provider's tag, e.g. `openalex`.
@@ -83,8 +89,9 @@ pub struct SearchLogEntry {
     /// command carries the same date.
     pub date: String,
     /// An id shared by every line one command wrote, and by no other
-    /// command's: with several `refs` / `cited-by` seeds, it ties their lines
-    /// together. Opaque. Absent on lines written before it was recorded.
+    /// command's: with several `refs` / `cited-by` / `related` seeds, it
+    /// ties their lines together. Opaque. Absent on lines written before it
+    /// was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
     /// How many records were asked for per provider.
@@ -561,6 +568,35 @@ pub async fn cited_by_many_logged<S: AsRef<str>>(
     Logged { results, log }
 }
 
+/// [`crate::related`], logged in the library at `root` (if any) as a
+/// [`SearchCommand::Related`]. An invalid seed is an error, as there, and
+/// nothing is logged.
+pub async fn related_logged(
+    seed: &str,
+    options: &SearchOptions,
+    root: &Path,
+    config: &Config,
+) -> Result<Logged<CitationResults>, PaxError> {
+    let results = crate::related(seed, options, root, config).await?;
+    let log = log_with_reasons(root, SearchCommand::Related, seed, options, &results);
+    Ok(Logged { results, log })
+}
+
+/// [`crate::related_many`], logged in the library at `root` (if any); as
+/// [`references_many_logged`].
+pub async fn related_many_logged<S: AsRef<str>>(
+    seeds: &[S],
+    options: &SearchOptions,
+    root: &Path,
+    config: &Config,
+) -> Logged<SeedResults> {
+    let results = crate::related_many(seeds, options, root, config).await;
+    let log = append_to_library(root, || {
+        seed_log_entries(SearchCommand::Related, options, &results, SystemTime::now())
+    });
+    Logged { results, log }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -793,6 +829,41 @@ mod tests {
         let json = serde_json::to_string(&entries[0]).unwrap();
         assert!(json.starts_with(r#"{"v":1,"command":"cited-by","seed":"openalex:W1","#));
         assert!(json.contains(r#""limit":"all""#), "{json}");
+    }
+
+    #[test]
+    fn a_related_works_line_logs_its_seed_and_no_total() {
+        let results: CitationResults = HashMap::from([(
+            ProviderId::SemanticScholar,
+            Ok(SearchPage::new(
+                vec![work(ProviderId::SemanticScholar, "s1", Some("10.1/a"), "A")],
+                None,
+                Some(500),
+            )),
+        )]);
+        let entries = entries_with_reasons(
+            SearchCommand::Related,
+            "vaswani2017",
+            &SearchOptions::default(),
+            &results,
+            date(),
+        );
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].seed.as_deref(), Some("vaswani2017"));
+        assert_eq!(entries[0].query, None);
+        assert_eq!(entries[0].total, None);
+        assert_eq!(entries[0].retrieved, Some(1));
+        assert_eq!(entries[0].reason, None);
+        let line = serde_json::to_string(&entries[0]).unwrap();
+        assert!(
+            line.starts_with(r#"{"v":1,"command":"related","seed":"vaswani2017","#),
+            "{line}"
+        );
+        assert!(line.contains(r#""total":null"#), "{line}");
+        assert_eq!(
+            serde_json::from_str::<SearchLogEntry>(&line).unwrap(),
+            entries[0]
+        );
     }
 
     #[test]
