@@ -66,7 +66,14 @@ pub struct Identified {
     /// From citation searching (`refs`, `cited-by`): PRISMA's "other
     /// methods".
     pub citation_searching: BTreeMap<String, usize>,
-    /// Every record identified, from both.
+    /// From the providers' related-works recommendations (`related`): also
+    /// PRISMA's "other methods", but a source of its own, counted apart from
+    /// citation searching. PRISMA 2020 asks for each "other methods" source
+    /// to be reported separately, and a recommendation isn't a citation edge:
+    /// folding it into citation searching would overstate what the reference
+    /// lists and forward citations found.
+    pub related_works: BTreeMap<String, usize>,
+    /// Every record identified, from all three.
     pub total: usize,
 }
 
@@ -91,7 +98,8 @@ pub struct ReasonCount {
 ///
 /// - **identified**: each answering provider's retrieved records, summed per
 ///   provider — `search` / `search --author` lines as databases, `refs` /
-///   `cited-by` lines as citation searching. A line whose provider failed
+///   `cited-by` lines as citation searching, `related` lines as related
+///   works (see [`Identified::related_works`]). A line whose provider failed
 ///   retrieved nothing and is only counted in `skipped_log_lines`.
 /// - **duplicates removed**: identified records minus distinct papers across
 ///   the *whole* log, not per command. Two records are the same paper when
@@ -144,6 +152,7 @@ pub fn stats(root: &Path) -> Result<Stats, PaxError> {
             SearchCommand::Refs | SearchCommand::CitedBy => {
                 &mut stats.identified.citation_searching
             }
+            SearchCommand::Related => &mut stats.identified.related_works,
             _ => &mut stats.identified.databases,
         };
         *column.entry(entry.provider).or_default() += keys.len();
@@ -314,7 +323,7 @@ mod tests {
     /// A log line: `keys` is `None` for a failed provider.
     fn line(command: &str, provider: &str, keys: Option<&[&[&str]]>) -> String {
         let input = match command {
-            "refs" | "cited-by" => r#""seed":"lamport1978""#,
+            "refs" | "cited-by" | "related" => r#""seed":"lamport1978""#,
             _ => r#""query":"q""#,
         };
         let outcome = match keys {
@@ -390,6 +399,43 @@ mod tests {
         assert_eq!(stats.identified.total, 7);
         assert_eq!(stats.duplicates_removed, 0);
         assert_eq!(stats.records_screened, 7);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn related_works_are_counted_apart_from_citation_searching() {
+        let root = scratch_library("related");
+        write_log(
+            &root,
+            &[
+                line("refs", "openalex", Some(&[&["doi:10.1/a"]])),
+                line(
+                    "related",
+                    "openalex",
+                    Some(&[&["doi:10.1/a"], &["doi:10.1/b"]]),
+                ),
+                line("related", "semanticscholar", Some(&[&["doi:10.1/c"]])),
+                line("related", "semanticscholar", None),
+            ],
+        );
+        let stats = stats(&root).unwrap();
+        assert_eq!(
+            stats.identified.citation_searching,
+            BTreeMap::from([("openalex".to_string(), 1)])
+        );
+        assert_eq!(
+            stats.identified.related_works,
+            BTreeMap::from([
+                ("openalex".to_string(), 2),
+                ("semanticscholar".to_string(), 1)
+            ])
+        );
+        assert!(stats.identified.databases.is_empty());
+        assert_eq!(stats.identified.total, 4);
+        // `a`, found by both refs and related, is one paper.
+        assert_eq!(stats.duplicates_removed, 1);
+        assert_eq!(stats.records_screened, 3);
+        assert_eq!(stats.skipped_log_lines, 1);
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -763,6 +809,7 @@ mod tests {
             identified: Identified {
                 databases: BTreeMap::from([("openalex".to_string(), 2)]),
                 citation_searching: BTreeMap::new(),
+                related_works: BTreeMap::new(),
                 total: 2,
             },
             duplicates_removed: 1,
@@ -778,7 +825,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&stats).unwrap(),
-            r#"{"identified":{"databases":{"openalex":2},"citation_searching":{},"total":2},"duplicates_removed":1,"records_screened":1,"excluded_screening":0,"awaiting_screening":0,"reports_sought":0,"not_retrieved":0,"reports_assessed":0,"excluded_full_text":{"total":1,"reasons":[{"reason":"r","count":1}]},"included":0,"skipped_log_lines":0,"decided_outside_log":0}"#
+            r#"{"identified":{"databases":{"openalex":2},"citation_searching":{},"related_works":{},"total":2},"duplicates_removed":1,"records_screened":1,"excluded_screening":0,"awaiting_screening":0,"reports_sought":0,"not_retrieved":0,"reports_assessed":0,"excluded_full_text":{"total":1,"reasons":[{"reason":"r","count":1}]},"included":0,"skipped_log_lines":0,"decided_outside_log":0}"#
         );
     }
 

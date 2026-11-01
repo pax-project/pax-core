@@ -579,6 +579,38 @@ Warning: 1 declared or excluded paper(s) match no search-log record: counted in 
 }
 
 #[test]
+fn stats_counts_related_works_in_their_own_box() {
+    let dir = library_with_history("stats-related");
+    let log = dir.join("research").join("search-log.jsonl");
+    let mut text = fs::read_to_string(&log).unwrap();
+    text.push_str(r#"{"v":1,"command":"related","seed":"lamport1978","provider":"semanticscholar","date":"2026-01-02T00:00:00Z","limit":50,"filters":[],"total":null,"retrieved":2,"keys":[["doi:10.1/a"],["doi:10.1/d"]],"merge":{"before":2,"after":2,"unmatched":0}}"#);
+    text.push('\n');
+    fs::write(&log, text).unwrap();
+    let output = pax(&dir, &["stats"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(
+        stdout.contains(
+            "\
+  Records identified from citation searching  2
+    openalex                                  2
+  Records identified from related works       2
+    semanticscholar                           2
+  Duplicate records removed                   3
+"
+        ),
+        "{stdout}"
+    );
+    let output = pax(&dir, &["stats", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        json["identified"]["related_works"],
+        serde_json::json!({ "semanticscholar": 2 })
+    );
+    assert_eq!(json["identified"]["total"], 7);
+}
+
+#[test]
 fn stats_json_is_one_object_for_scripts() {
     let dir = library_with_history("stats-json");
     let output = pax(&dir, &["stats", "--json"]);
@@ -591,6 +623,7 @@ fn stats_json_is_one_object_for_scripts() {
             "identified": {
                 "databases": { "arxiv": 1, "openalex": 2 },
                 "citation_searching": { "openalex": 2 },
+                "related_works": {},
                 "total": 5
             },
             "duplicates_removed": 2,

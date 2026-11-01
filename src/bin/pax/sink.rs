@@ -451,6 +451,15 @@ fn stats_lines(stats: &Stats) -> Vec<String> {
         stats.identified.citation_searching.values().sum(),
     ));
     by_provider(&mut rows, &stats.identified.citation_searching);
+    // Only once `related` has been run: most reviews never use it.
+    if !stats.identified.related_works.is_empty() {
+        rows.push(Row::Count(
+            1,
+            "Records identified from related works".into(),
+            stats.identified.related_works.values().sum(),
+        ));
+        by_provider(&mut rows, &stats.identified.related_works);
+    }
     rows.push(Row::Count(
         1,
         "Duplicate records removed".into(),
