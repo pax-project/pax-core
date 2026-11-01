@@ -13,6 +13,7 @@ use crate::error::PaxError;
 use crate::exclusions::{ExclusionStage, Exclusions};
 use crate::identity::{self, IdentityKey, parse_identity_key};
 use crate::library::Library;
+use crate::library_index::exclusion_id_keys;
 use crate::nix;
 use crate::search_log::{SEARCH_LOG_VERSION, SearchCommand, SearchLogEntry, search_log_path};
 
@@ -31,7 +32,12 @@ pub struct Stats {
     pub records_screened: usize,
     /// Papers excluded at title/abstract screening.
     pub excluded_screening: usize,
-    /// Papers left to read in full: `records_screened - excluded_screening`.
+    /// Distinct logged papers with no screening decision yet: neither
+    /// excluded nor declared.
+    pub awaiting_screening: usize,
+    /// Papers that passed screening: declared papers plus papers excluded at
+    /// full text (a declared paper can't be excluded, so a full-text
+    /// exclusion passed screening first).
     pub reports_sought: usize,
     /// Declared papers with no fetchable artifact: no `source_url` or no
     /// `hash` recorded.
@@ -46,6 +52,9 @@ pub struct Stats {
     /// Log lines where the provider failed, so retrieved no records; they
     /// count nowhere else.
     pub skipped_log_lines: usize,
+    /// Declared or excluded papers that match no logged record, e.g. added
+    /// from a DOI the reviewer already knew. Still counted in their box.
+    pub decided_outside_log: usize,
 }
 
 /// Records identified, per provider (by its log tag, e.g. `openalex`).
@@ -95,14 +104,24 @@ pub struct ReasonCount {
 ///   those `check_library` reports as not fetched. Decided from
 ///   `papers.nix` alone, with no network: a recorded artifact whose source
 ///   has since gone away isn't counted (that's `check_library`'s job).
-/// - **reports sought / assessed**: what's left after screening exclusions,
-///   then after the reports not retrieved (never below zero).
+/// - **reports sought**: the papers that passed screening — declared, or
+///   excluded at full text. **Assessed**: reports sought minus those not
+///   retrieved (never below zero).
+/// - **awaiting screening**: distinct logged papers no decision matches. A
+///   declared paper or an exclusion decides the logged paper it shares an
+///   identity key with, by [`identity::group`]'s rules (a declared paper by
+///   its DOI, arXiv id or title+year; an exclusion by its key's DOI or
+///   arXiv id). A decision matching no logged record — one keyed by an
+///   opaque `provider:id`, say — is counted in `decided_outside_log`
+///   instead, so `awaiting_screening` never goes wrong or negative.
 /// - **included**: the declared papers with a fetchable artifact, so a paper
 ///   is never both included and not retrieved.
 ///
 /// The boxes balance, as a PRISMA diagram's must, when every declared or
-/// excluded paper was found by a logged search; a paper added or excluded
-/// without one is still counted in its box.
+/// excluded paper was found by a logged search (`decided_outside_log` is
+/// 0): then `records_screened = excluded_screening + reports_sought +
+/// awaiting_screening`. A paper added or excluded without one is still
+/// counted in its box.
 ///
 /// A missing search log or `excluded.nix` counts as empty. A missing
 /// `papers.nix` means there's no library: the error is its I/O error. A log
@@ -141,6 +160,18 @@ pub fn stats(root: &Path) -> Result<Stats, PaxError> {
         }
     }
     stats.identified.total = records.len();
+    let decisions: Vec<Vec<IdentityKey>> = library
+        .papers()
+        .iter()
+        .map(identity::paper_keys)
+        .chain(
+            exclusions
+                .entries()
+                .iter()
+                .map(|entry| exclusion_id_keys(&entry.key)),
+        )
+        .collect();
+    (stats.awaiting_screening, stats.decided_outside_log) = match_decisions(&records, &decisions);
     stats.records_screened = distinct_papers(records);
     stats.duplicates_removed = stats.identified.total - stats.records_screened;
 
@@ -168,9 +199,7 @@ pub fn stats(root: &Path) -> Result<Stats, PaxError> {
         .partition(|paper| paper.artifact.source_url.is_some() && paper.artifact.hash.is_some());
     stats.included = retrieved.len();
     stats.not_retrieved = not_retrieved.len();
-    stats.reports_sought = stats
-        .records_screened
-        .saturating_sub(stats.excluded_screening);
+    stats.reports_sought = library.papers().len() + stats.excluded_full_text.total;
     stats.reports_assessed = stats.reports_sought.saturating_sub(stats.not_retrieved);
     Ok(stats)
 }
@@ -220,6 +249,46 @@ fn distinct_papers(records: Vec<Vec<IdentityKey>>) -> usize {
         .collect();
     let groups: HashSet<usize> = identity::group(&unique).into_iter().collect();
     keyless.len() + groups.len()
+}
+
+/// Matches screening decisions to the logged papers: how many distinct
+/// papers among `records` no decision matches, and how many `decisions`
+/// (each a declared paper's or an exclusion's keys) match no record. A
+/// decision matches a paper when [`identity::group`] puts it with one of
+/// the paper's records.
+fn match_decisions(records: &[Vec<IdentityKey>], decisions: &[Vec<IdentityKey>]) -> (usize, usize) {
+    // A keyless record can't be matched, so it awaits a decision for good.
+    // Of the rest, group each key set once, as `distinct_papers` does.
+    let keyless = records.iter().filter(|keys| keys.is_empty()).count();
+    let mut seen = HashSet::new();
+    let unique: Vec<Vec<IdentityKey>> = records
+        .iter()
+        .filter(|keys| !keys.is_empty() && seen.insert(*keys))
+        .cloned()
+        .collect();
+    let papers = identity::group(&unique);
+
+    let mut combined = unique;
+    combined.extend(decisions.iter().cloned());
+    let groups = identity::group(&combined);
+    let (logged, decided) = groups.split_at(papers.len());
+    let decided: HashSet<usize> = decided.iter().copied().collect();
+    // With decisions added, the title+year guard can leave one paper's
+    // records in two groups (a decision's DOI blocking a title match): the
+    // paper is decided if any of its records is.
+    let decided_papers: HashSet<usize> = papers
+        .iter()
+        .zip(logged)
+        .filter(|(_, group)| decided.contains(group))
+        .map(|(paper, _)| *paper)
+        .collect();
+    let distinct = papers.iter().collect::<HashSet<_>>().len();
+    let logged: HashSet<usize> = logged.iter().copied().collect();
+    let outside = groups[papers.len()..]
+        .iter()
+        .filter(|group| !logged.contains(group))
+        .count();
+    (keyless + distinct - decided_papers.len(), outside)
 }
 
 #[cfg(test)]
@@ -486,6 +555,134 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// A declared paper: citation key, DOI, title, year, source URL.
+    type Declared<'a> = (&'a str, Option<&'a str>, &'a str, i32, Option<&'a str>);
+
+    /// A `papers.nix` declaring `papers`.
+    fn write_papers(root: &Path, papers: &[Declared]) {
+        let quoted = |value: Option<&str>| value.map_or("null".to_string(), |v| format!("{v:?}"));
+        let mut text = String::from("{\n");
+        for (key, doi, title, year, source_url) in papers {
+            text.push_str(&format!(
+                "  {key} = {{\n    doi = {};\n    title = {title:?};\n    authors = [ ];\n    year = {year};\n    source_url = {};\n    hash = null;\n    tags = [ ];\n    notes = null;\n  }};\n",
+                quoted(*doi),
+                quoted(*source_url),
+            ));
+        }
+        text.push_str("}\n");
+        fs::write(nix::papers_path(root), text).unwrap();
+    }
+
+    /// An `excluded.nix` with one entry per `(key, stage)`.
+    fn write_exclusions(root: &Path, exclusions: &[(&str, &str)]) {
+        let mut text = String::from("{\n");
+        for (key, stage) in exclusions {
+            text.push_str(&format!(
+                "  {key:?} = {{ title = \"T\"; reason = \"r\"; stage = {stage:?}; }};\n"
+            ));
+        }
+        text.push_str("}\n");
+        fs::write(nix::excluded_path(root), text).unwrap();
+    }
+
+    /// Five distinct papers, `10.1/a` to `10.1/e`, `c` found twice and `d` by
+    /// its arXiv id.
+    fn five_logged_papers(root: &Path) {
+        write_log(
+            root,
+            &[
+                line(
+                    "search",
+                    "openalex",
+                    Some(&[&["doi:10.1/a"], &["doi:10.1/b"], &["doi:10.1/c"]]),
+                ),
+                line(
+                    "refs",
+                    "openalex",
+                    Some(&[
+                        &["doi:10.1/c"],
+                        &["arxiv:2001.00001", "title:d paper|2020"],
+                        &["doi:10.1/e", "title:e paper|2021"],
+                    ]),
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn papers_without_a_decision_are_awaiting_screening() {
+        let root = scratch_library("awaiting");
+        five_logged_papers(&root);
+        write_exclusions(&root, &[("10.1/a", "screening")]);
+        write_papers(&root, &[("b2000", Some("10.1/b"), "B", 2000, None)]);
+        let stats = stats(&root).unwrap();
+        assert_eq!(stats.records_screened, 5);
+        assert_eq!(stats.excluded_screening, 1);
+        assert_eq!(stats.reports_sought, 1);
+        assert_eq!(stats.awaiting_screening, 3);
+        assert_eq!(stats.decided_outside_log, 0);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn once_every_paper_is_decided_none_await_and_the_boxes_balance() {
+        let root = scratch_library("decided");
+        five_logged_papers(&root);
+        write_exclusions(&root, &[("10.1/a", "screening"), ("10.1/c", "full-text")]);
+        write_papers(
+            &root,
+            &[
+                ("b2000", Some("10.1/b"), "B", 2000, None),
+                // By the arXiv id of its source, and by title+year alone.
+                (
+                    "d2020",
+                    None,
+                    "D paper",
+                    2020,
+                    Some("https://arxiv.org/pdf/2001.00001v2"),
+                ),
+                ("e2021", None, "E: Paper", 2021, None),
+            ],
+        );
+        let stats = stats(&root).unwrap();
+        assert_eq!(stats.awaiting_screening, 0);
+        assert_eq!(stats.decided_outside_log, 0);
+        // What `records_screened - excluded_screening` gave before.
+        assert_eq!(stats.reports_sought, 4);
+        assert_eq!(stats.reports_assessed, 1);
+        assert_eq!(
+            stats.records_screened,
+            stats.excluded_screening + stats.reports_sought + stats.awaiting_screening
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn decisions_matching_no_logged_paper_are_counted_apart() {
+        let root = scratch_library("outside");
+        five_logged_papers(&root);
+        // An opaque key carries no DOI or arXiv id, so can't match.
+        write_exclusions(
+            &root,
+            &[("10.1/a", "screening"), ("openalex:W1", "screening")],
+        );
+        write_papers(
+            &root,
+            &[
+                ("b2000", Some("10.1/b"), "B", 2000, None),
+                ("known1999", Some("10.9/known"), "Known", 1999, None),
+                // Same title and year as `e`, a different DOI: not `e`.
+                ("e2021", Some("10.9/e"), "E paper", 2021, None),
+            ],
+        );
+        let stats = stats(&root).unwrap();
+        assert_eq!(stats.excluded_screening, 2);
+        assert_eq!(stats.reports_sought, 3);
+        assert_eq!(stats.awaiting_screening, 3);
+        assert_eq!(stats.decided_outside_log, 3);
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn serializes_to_the_documented_json_shape() {
         let stats = Stats {
@@ -507,7 +704,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&stats).unwrap(),
-            r#"{"identified":{"databases":{"openalex":2},"citation_searching":{},"total":2},"duplicates_removed":1,"records_screened":1,"excluded_screening":0,"reports_sought":0,"not_retrieved":0,"reports_assessed":0,"excluded_full_text":{"total":1,"reasons":[{"reason":"r","count":1}]},"included":0,"skipped_log_lines":0}"#
+            r#"{"identified":{"databases":{"openalex":2},"citation_searching":{},"total":2},"duplicates_removed":1,"records_screened":1,"excluded_screening":0,"awaiting_screening":0,"reports_sought":0,"not_retrieved":0,"reports_assessed":0,"excluded_full_text":{"total":1,"reasons":[{"reason":"r","count":1}]},"included":0,"skipped_log_lines":0,"decided_outside_log":0}"#
         );
     }
 
