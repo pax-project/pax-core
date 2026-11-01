@@ -147,7 +147,7 @@ With one seed, the output is exactly as above. In the library, `pax_core::refere
 
 ### Search log
 
-Inside a library, every `search` (a query or `--author`), `refs` and `cited-by` appends to `research/search-log.jsonl`: the record of every source a review searched, when, and with what search string, filters and limit — what PRISMA 2020 asks a review to report — plus every record retrieved, so duplicates can be counted across the whole review, not just one command. It's always on, created on the first search, and append-only: pax never rewrites a line, so commit it with the library. `search --doi` and `search --local` aren't logged: one resolves a known paper and the other reads your own library, neither searches a database. Outside a library a search still works, isn't logged, and says so on stderr. If the log can't be written, the results still print with a warning on stderr, and a search that otherwise succeeded exits 1.
+Inside a library, every `search` (a query or `--author`), `refs`, `cited-by` and `related` appends to `research/search-log.jsonl`: the record of every source a review searched, when, and with what search string, filters and limit — what PRISMA 2020 asks a review to report — plus every record retrieved, so duplicates can be counted across the whole review, not just one command. It's always on, created on the first search, and append-only: pax never rewrites a line, so commit it with the library. `search --doi` and `search --local` aren't logged: one resolves a known paper and the other reads your own library, neither searches a database. Outside a library a search still works, isn't logged, and says so on stderr. If the log can't be written, the results still print with a warning on stderr, and a search that otherwise succeeded exits 1.
 
 Each line is one JSON object for one provider's part in one command, so a command writes a line per provider it asked, including a provider that failed:
 
@@ -158,24 +158,24 @@ Each line is one JSON object for one provider's part in one command, so a comman
 | Field | Meaning |
 | --- | --- |
 | `v` | Schema version, `1`. It changes only when a field changes meaning or is removed; new fields can appear without it changing. |
-| `command` | `search`, `search-author` (`search --author`), `refs` or `cited-by`. |
+| `command` | `search`, `search-author` (`search --author`), `refs`, `cited-by` or `related`. |
 | `query` | The query, or the author name for `search-author`. Only on `search` / `search-author`. |
-| `seed` | The paper as given: a `provider:id` reference or a citation key. Only on `refs` / `cited-by`. |
+| `seed` | The paper as given: a `provider:id` reference or a citation key. Only on `refs` / `cited-by` / `related`. |
 | `provider` | `openalex`, `crossref`, `semanticscholar` or `arxiv`. |
 | `date` | When the command ran, ISO 8601 in UTC to the second. Every line of one command has the same date. |
-| `run` | An opaque id shared by every line one command wrote, and by no other command's. It ties together the lines of a `refs` / `cited-by` run over several seeds. Lines written before pax recorded it don't have it. |
+| `run` | An opaque id shared by every line one command wrote, and by no other command's. It ties together the lines of a `refs` / `cited-by` / `related` run over several seeds. Lines written before pax recorded it don't have it. |
 | `limit` | The `--limit` per provider, or `"all"` for `--all`. |
 | `filters` | One object per `--year` / `--type` / `--lang` given: `filter` (`year`, `type`, `language`), `value` as given, and `applied`: `server-side` (in the provider's query, so `total` reflects it), `post-retrieval` (by pax on the retrieved records), or `not-applied` (the provider has no such data). `applied` is absent when the provider failed. Empty without filters. |
-| `total` | How many records the provider reported matching; `null` when it doesn't say, or failed. |
+| `total` | How many records the provider reported matching; `null` when it doesn't say (never on `related`), or failed. |
 | `retrieved` | How many records it returned, after any post-retrieval filter. Absent when the provider failed. |
 | `keys` | One array per retrieved record, in order: the record's identity keys, strongest first — `doi:<doi>`, `arxiv:<id>` (no version), `title:<normalized title>\|<year>` — the same keys `search` merges by. An empty array is a record with none, which can't be matched. Absent when the provider failed. |
-| `error` | Why the provider returned nothing: a failed request, or not knowing the `refs` / `cited-by` seed. Only present when it failed. |
+| `error` | Why the provider returned nothing: a failed request, or not knowing the `refs` / `cited-by` / `related` seed. Only present when it failed. |
 | `reason` | What kind of failure `error` is: `withheld`, `failed` or `unresolved` (see [Citation graph](#citation-graph)). Only present when it failed. |
 | `merge` | The command's merge counts (with several seeds, that seed's) across every provider that answered: `before` (records), `after` (distinct papers) and `unmatched` (records with no key), as `search` prints them. |
 
 The merge counts sit on every line of a command rather than on a separate summary line, so every line has the same shape and a reader never has to tell two kinds apart; to read a command's counts, take them from any one of its lines. Keys are kept per record rather than pooled, because whether two records are the same paper depends on all of each one's keys (a title match never joins two different DOIs).
 
-A `refs` or `cited-by` with several seeds writes one line per seed per provider. Each line has `seed` set to its own seed and `merge` set to that seed's own counts, exactly as if each seed had been run alone, so `pax stats` gives the same numbers either way. A seed that's the same paper as an earlier one repeats that seed's lines under its own `seed`, as running it alone would. An invalid seed writes no lines. The cross-seed merge isn't logged, but the shared `run` id lets you recompute it from the lines.
+A `refs`, `cited-by` or `related` with several seeds writes one line per seed per provider. Each line has `seed` set to its own seed and `merge` set to that seed's own counts, exactly as if each seed had been run alone, so `pax stats` gives the same numbers either way. A seed that's the same paper as an earlier one repeats that seed's lines under its own `seed`, as running it alone would. An invalid seed writes no lines. The cross-seed merge isn't logged, but the shared `run` id lets you recompute it from the lines.
 
 The project is designed to be:
 - local-first
@@ -248,6 +248,7 @@ Included
 | --- | --- |
 | Records identified from databases | The [search log](#search-log)'s `search` and `search-author` lines: records retrieved, summed per provider. |
 | Records identified from citation searching | The log's `refs` and `cited-by` lines, per provider: PRISMA's "other methods". |
+| Records identified from related works | The log's `related` lines, per provider: also "other methods", but a source of its own (see below). Printed only once `related` has been run. |
 | Duplicate records removed | Every record identified, minus the distinct papers among them across the *whole* log, not per command: records are the same paper when they share a key, by the same rules `search` merges by (a title+year match never joins two different DOIs). A record with no key is a paper of its own. |
 | Records screened | Those distinct papers. |
 | Records excluded | `excluded.nix` entries with `stage = "screening"`. |
@@ -257,6 +258,8 @@ Included
 | Reports assessed for eligibility | Reports sought minus reports not retrieved. |
 | Reports excluded | `excluded.nix` entries with `stage = "full-text"`, then a count per `reason` (exact text, sorted). |
 | Studies included in review | The papers declared in `papers.nix` that have a fetchable artifact. A declared paper without one counts only as not retrieved, never as both. |
+
+Records from [`pax related`](#related-works) are counted in their own box, not with citation searching. PRISMA 2020 puts both under identification via other methods, and asks for each such source to be reported separately. A provider's recommendation isn't a citation edge, so counting it as citation searching would overstate what reference lists and forward citations found. In the diagram, report the box as its own "other methods" source (e.g. "related-works recommendations (OpenAlex, Semantic Scholar)"). Records found by both are still one paper when duplicates are removed, since that count runs across the whole log.
 
 The boxes balance, as a PRISMA diagram must, when every declared or excluded paper was found by a logged search: records screened = records excluded + reports sought + records awaiting screening. A paper added or excluded without one, say from a DOI you already knew, is still counted in its box, so the arithmetic between boxes can be off by those papers; `stats` warns on stderr how many there are (`decided_outside_log` in JSON). An exclusion keyed by an opaque `provider:id` (a paper with no DOI or arXiv id) is matched to its record by title and year, so it needs a year: `pax exclude` records the one the provider gives. Without one it can't be matched, so it counts among those, and the record it was made on stays awaiting screening. That happens to exclusions recorded before pax stored years: re-run `pax exclude <ref> --reason … --stage … --year YYYY`, which replaces the entry, to fix one.
 
@@ -269,6 +272,7 @@ A library without a search log or `excluded.nix` counts them as empty. A log lin
   "identified": {
     "databases": { "arxiv": 1, "openalex": 2 },
     "citation_searching": { "openalex": 2 },
+    "related_works": {},
     "total": 5
   },
   "duplicates_removed": 2,
