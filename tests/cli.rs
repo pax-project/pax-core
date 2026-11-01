@@ -104,6 +104,29 @@ fn excluding_a_declared_paper_is_refused_with_5() {
 }
 
 #[test]
+fn exclude_records_a_given_year_offline() {
+    let dir = library("exclude-year");
+    let output = pax_offline(
+        &dir,
+        &[
+            "exclude",
+            "10.1000/report",
+            "--reason",
+            "not empirical",
+            "--stage",
+            "screening",
+            "--title",
+            "A grey-literature report",
+            "--year",
+            "2019",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let excluded = std::fs::read_to_string(dir.join("research").join("excluded.nix")).unwrap();
+    assert!(excluded.contains("    year = 2019;\n"), "{excluded}");
+}
+
+#[test]
 fn initializing_an_existing_library_is_refused_with_5() {
     let dir = library("init-twice");
     assert_eq!(pax(&dir, &["init"]).status.code(), Some(5));

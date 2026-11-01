@@ -10,7 +10,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::error::PaxError;
-use crate::exclusions::{ExclusionStage, Exclusions};
+use crate::exclusions::{Exclusion, ExclusionStage, Exclusions};
 use crate::identity::{self, IdentityKey, parse_identity_key};
 use crate::library::Library;
 use crate::library_index::exclusion_id_keys;
@@ -111,9 +111,10 @@ pub struct ReasonCount {
 ///   declared paper or an exclusion decides the logged paper it shares an
 ///   identity key with, by [`identity::group`]'s rules (a declared paper by
 ///   its DOI, arXiv id or title+year; an exclusion by its key's DOI or
-///   arXiv id). A decision matching no logged record — one keyed by an
-///   opaque `provider:id`, say — is counted in `decided_outside_log`
-///   instead, so `awaiting_screening` never goes wrong or negative.
+///   arXiv id, or by title+year when it records a year). A decision
+///   matching no logged record — one keyed by an opaque `provider:id` with
+///   no year, say — is counted in `decided_outside_log` instead, so
+///   `awaiting_screening` never goes wrong or negative.
 /// - **included**: the declared papers with a fetchable artifact, so a paper
 ///   is never both included and not retrieved.
 ///
@@ -164,12 +165,7 @@ pub fn stats(root: &Path) -> Result<Stats, PaxError> {
         .papers()
         .iter()
         .map(identity::paper_keys)
-        .chain(
-            exclusions
-                .entries()
-                .iter()
-                .map(|entry| exclusion_id_keys(&entry.key)),
-        )
+        .chain(exclusions.entries().iter().map(exclusion_keys))
         .collect();
     (stats.awaiting_screening, stats.decided_outside_log) = match_decisions(&records, &decisions);
     stats.records_screened = distinct_papers(records);
@@ -234,6 +230,16 @@ fn read_log(path: &Path) -> Result<Vec<(usize, SearchLogEntry)>, PaxError> {
             Ok((line, entry))
         })
         .collect()
+}
+
+/// The keys an exclusion decides a paper by: its key's DOI or arXiv id, then
+/// its title+year when the year is recorded. An opaque `provider:id` key
+/// carries no id keys, so an exclusion keyed by one is matched by title+year
+/// alone.
+fn exclusion_keys(exclusion: &Exclusion) -> Vec<IdentityKey> {
+    let mut keys = exclusion_id_keys(&exclusion.key);
+    keys.extend(identity::title_year_key(&exclusion.title, exclusion.year));
+    keys
 }
 
 /// How many distinct papers `records` hold, by [`identity::group`].
@@ -680,6 +686,74 @@ mod tests {
         assert_eq!(stats.reports_sought, 3);
         assert_eq!(stats.awaiting_screening, 3);
         assert_eq!(stats.decided_outside_log, 3);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A log with one DOI-less record, found by title+year alone, and one
+    /// record with a DOI and the same title and year.
+    fn grey_literature_logged(root: &Path) {
+        write_log(
+            root,
+            &[line(
+                "search",
+                "openalex",
+                Some(&[
+                    &["title:a grey literature report|2019"],
+                    &["doi:10.1/x", "title:same title|2019"],
+                ]),
+            )],
+        );
+    }
+
+    #[test]
+    fn an_exclusion_by_provider_id_with_a_year_decides_its_logged_paper() {
+        let root = scratch_library("provider-id-year");
+        grey_literature_logged(&root);
+        fs::write(
+            nix::excluded_path(&root),
+            r#"{
+  "openalex:W9" = { title = "A Grey-Literature Report"; reason = "r"; stage = "screening"; };
+}
+"#,
+        )
+        .unwrap();
+        let before = stats(&root).unwrap();
+        assert_eq!(before.awaiting_screening, 2);
+        assert_eq!(before.decided_outside_log, 1);
+
+        fs::write(
+            nix::excluded_path(&root),
+            r#"{
+  "openalex:W9" = { title = "A Grey-Literature Report"; year = 2019; reason = "r"; stage = "screening"; };
+}
+"#,
+        )
+        .unwrap();
+        let after = stats(&root).unwrap();
+        assert_eq!(after.awaiting_screening, 1);
+        assert_eq!(after.decided_outside_log, 0);
+        assert_eq!(
+            after.records_screened,
+            after.excluded_screening + after.reports_sought + after.awaiting_screening
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_exclusion_with_the_same_title_and_year_but_another_doi_is_not_matched() {
+        let root = scratch_library("same-title-other-doi");
+        grey_literature_logged(&root);
+        fs::write(
+            nix::excluded_path(&root),
+            r#"{
+  "10.1/y" = { title = "Same title"; year = 2019; reason = "r"; stage = "screening"; };
+}
+"#,
+        )
+        .unwrap();
+        let stats = stats(&root).unwrap();
+        assert_eq!(stats.awaiting_screening, 2);
+        assert_eq!(stats.decided_outside_log, 1);
         let _ = fs::remove_dir_all(&root);
     }
 
