@@ -273,8 +273,9 @@ fn provider_failed<'a>(
     }
 }
 
-/// Prints each citation provider's count, then one list merged across them,
-/// the way `search` does.
+/// Prints each citation provider's count, marked with why its list is
+/// incomplete if it is, then one list merged across them, the way `search`
+/// does.
 fn show_citations(
     sink: &mut impl Sink,
     results: Result<pax_core::CitationResults, pax_core::PaxError>,
@@ -286,10 +287,13 @@ fn show_citations(
     let index = pax_core::LibraryIndex::load(Path::new("."));
     let listed = results.values().any(Result::is_ok);
     for provider in pax_core::CITATION_PROVIDERS {
-        match results.get(&provider) {
-            Some(Ok(page)) => sink.page_header(provider, page),
-            Some(Err(e)) => provider_failed(sink, provider, e, listed),
-            None => {}
+        let Some(result) = results.get(&provider) else {
+            continue;
+        };
+        let reason = pax_core::incomplete_reason(result);
+        sink.citation_header(provider, result.as_ref().ok(), reason);
+        if let Err(e) = result {
+            sink.provider_error(provider, &e.to_string());
         }
     }
     if listed {
@@ -301,7 +305,7 @@ fn show_citations(
         };
         sink.merged(&pax_core::merge_pages(&results), &index, &language_unknown);
     }
-    exit::provider_results(results.values())
+    exit::citations(&results)
 }
 
 /// [`show_citations`] for a logged lookup, then [`report_log`].

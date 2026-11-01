@@ -360,6 +360,11 @@ pub enum ProviderError {
     NotFound,
     #[error("fetching by id is not supported by this provider yet")]
     GetByIdUnsupported,
+    /// The provider has the record but holds the requested list back, e.g.
+    /// Semantic Scholar withholding a paper's references at the publisher's
+    /// request. `message` says which list and why.
+    #[error("{message}")]
+    Withheld { message: String },
 }
 
 /// A single external metadata source PAX can search and resolve candidates

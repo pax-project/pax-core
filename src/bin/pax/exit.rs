@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use pax_core::{CitationError, PaxError, ProviderError};
+use pax_core::{CitationError, CitationResults, PaxError, ProviderError};
 
 /// How a command ended. The numbers are part of the CLI's interface: scripts
 /// and agents branch on them, so they never change meaning.
@@ -114,7 +114,9 @@ pub fn code(failure: Failure<'_>) -> Code {
         },
         Failure::Provider(e) => match e {
             ProviderError::NotFound => Code::NotFound,
-            ProviderError::Request(_) | ProviderError::GetByIdUnsupported => Code::ProvidersFailed,
+            ProviderError::Request(_)
+            | ProviderError::GetByIdUnsupported
+            | ProviderError::Withheld { .. } => Code::ProvidersFailed,
             // A variant added later, until it is mapped here.
             _ => Code::Failure,
         },
@@ -180,6 +182,24 @@ where
             .into_iter()
             .map(|result| result.as_ref().map(|_| ()).map_err(Into::into)),
     )
+}
+
+/// The exit code of a `refs` / `cited-by` lookup: [`provider_results`],
+/// except that a provider not knowing the seed is no longer an answer when
+/// another provider returned a list — that provider's list is still missing,
+/// so the results are partial. A list cut short by `--limit` (truncated)
+/// isn't: the user asked for that limit.
+pub fn citations(results: &CitationResults) -> Code {
+    match provider_results(results.values()) {
+        Code::Success
+            if pax_core::incomplete_lists(results)
+                .iter()
+                .any(|incomplete| incomplete.reason.is_missing()) =>
+        {
+            Code::Partial
+        }
+        code => code,
+    }
 }
 
 /// The exit code of a search whose results are good but whose search log
@@ -427,6 +447,66 @@ mod tests {
         );
         assert_eq!(pax(PaxError::LibraryParse("bad".into())), Code::NoLibrary);
         assert_eq!(code(Failure::NoLibrary), Code::NoLibrary);
+    }
+
+    fn page(retrieved: usize, total: u64) -> pax_core::SearchPage {
+        let work = pax_core::CandidateWork {
+            id: "openalex:W1".parse().unwrap(),
+            title: "A Study".into(),
+            authors: Vec::new(),
+            publish_date: "2020".into(),
+            doi: None,
+            pdf_url: None,
+            venue: None,
+            abstract_text: None,
+        };
+        pax_core::SearchPage::new(vec![work; retrieved], Some(total), None)
+    }
+
+    fn citations_with(semantic_scholar: Result<pax_core::SearchPage, CitationError>) -> Code {
+        citations(&CitationResults::from([
+            (ProviderId::OpenAlex, Ok(page(1, 1))),
+            (ProviderId::SemanticScholar, semantic_scholar),
+        ]))
+    }
+
+    #[test]
+    fn a_withheld_failed_or_unresolved_list_is_partial() {
+        let withheld = CitationError::Provider(ProviderError::Withheld {
+            message: "withheld".into(),
+        });
+        let failed = CitationError::Provider(ProviderError::Request("429".into()));
+        let unresolved = CitationError::SeedNotFound {
+            provider: ProviderId::SemanticScholar,
+            key: "DOI:10.1/x".into(),
+        };
+        for error in [withheld, failed, unresolved] {
+            assert_eq!(citations_with(Err(error)), Code::Partial);
+        }
+    }
+
+    #[test]
+    fn a_truncated_list_alone_is_success() {
+        assert_eq!(citations_with(Ok(page(1, 40))), Code::Success);
+        assert_eq!(citations_with(Ok(page(1, 1))), Code::Success);
+    }
+
+    #[test]
+    fn a_seed_no_citation_provider_knows_is_still_not_found() {
+        let unresolved = |provider| {
+            Err(CitationError::Unresolvable {
+                provider,
+                lookup_error: None,
+            })
+        };
+        let results = CitationResults::from([
+            (ProviderId::OpenAlex, unresolved(ProviderId::OpenAlex)),
+            (
+                ProviderId::SemanticScholar,
+                unresolved(ProviderId::SemanticScholar),
+            ),
+        ]);
+        assert_eq!(citations(&results), Code::NotFound);
     }
 
     #[test]

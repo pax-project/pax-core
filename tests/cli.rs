@@ -360,8 +360,27 @@ fn refs_appends_a_line_per_provider_to_the_search_log() {
                 line.contains(r#""error":"can't look the seed up"#),
                 "{line}"
             );
+            assert!(line.contains(r#""reason":"unresolved""#), "{line}");
             assert!(!line.contains(r#""keys""#), "{line}");
         }
+    }
+}
+
+#[test]
+fn refs_prints_each_provider_s_reason_next_to_its_count() {
+    let dir = library_without_ids("refs-reasons");
+    let output = pax_offline(&dir, &["refs", "hoare1978"]);
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "openalex: no list [unresolved]\nsemanticscholar: no list [unresolved]\n"
+    );
+    for provider in ["openalex", "semanticscholar"] {
+        assert!(
+            stderr(&output).contains(&format!("Error: {provider}: can't look the seed up")),
+            "{}",
+            stderr(&output)
+        );
     }
 }
 

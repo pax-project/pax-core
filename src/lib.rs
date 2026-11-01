@@ -25,7 +25,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub use citations::{
-    CITATION_PROVIDERS, CitationError, CitationResults, SeedLookupError, cited_by, references,
+    CITATION_PROVIDERS, CitationError, CitationResults, Incomplete, IncompleteReason,
+    SeedLookupError, cited_by, incomplete_lists, incomplete_reason, references,
 };
 pub use error::PaxError;
 pub use exclusions::{

@@ -113,6 +113,23 @@ The paper can be any `provider:id` reference from `search`, or the citation key 
 
 Like `search`, each provider reports its `retrieved N of M` count, then the two lists are merged into one, with the same `merged: X → Y (Z duplicates, U unmatched)` line and one row per paper listing every provider's reference. Papers already in your library are marked `[in library]`, and excluded ones `[excluded]` (see [Excluding papers](#excluding-papers)). They take the same `--limit`, `--all`, `--year`, `--type` and `--lang` flags. OpenAlex applies the filters server-side; Semantic Scholar's citation lists take no filters, so year and type are applied there after retrieval, and language not at all. Semantic Scholar serves at most 9,999 entries of a list, and skips references it couldn't match to a paper.
 
+A list that isn't the paper's whole list says why, next to that provider's count, so a review never mistakes a partial list for a complete one (and knows to fall back to the paper's own bibliography):
+
+```text
+openalex: retrieved 50 of 212 [truncated]
+semanticscholar: no list [withheld]
+Error: semanticscholar: Semantic Scholar withholds this paper's references at the publisher's request
+```
+
+| Reason | When |
+| --- | --- |
+| `withheld` | The provider holds the list back, e.g. Semantic Scholar withholding a paper's references at the publisher's request. |
+| `failed` | The request failed: network, rate limit, an unreadable response. |
+| `unresolved` | The paper can't be looked up in this provider: no id, DOI or arXiv id is known for it there, or the provider has no record of it. |
+| `truncated` | `--limit` stopped retrieval before the provider's total. |
+
+Any `withheld`, `failed` or `unresolved` list makes the command exit 3 while another provider returned a list (4 when no provider knows the paper at all); `truncated` alone exits 0, since you asked for that limit. In the library, `pax_core::incomplete_lists` returns the same reasons per provider.
+
 ### Search log
 
 Inside a library, every `search` (a query or `--author`), `refs` and `cited-by` appends to `research/search-log.jsonl`: the record of every source a review searched, when, and with what search string, filters and limit — what PRISMA 2020 asks a review to report — plus every record retrieved, so duplicates can be counted across the whole review, not just one command. It's always on, created on the first search, and append-only: pax never rewrites a line, so commit it with the library. `search --doi` and `search --local` aren't logged: one resolves a known paper and the other reads your own library, neither searches a database. Outside a library a search still works, isn't logged, and says so on stderr. If the log can't be written, the results still print with a warning on stderr, and a search that otherwise succeeded exits 1.
@@ -137,6 +154,7 @@ Each line is one JSON object for one provider's part in one command, so a comman
 | `retrieved` | How many records it returned, after any post-retrieval filter. Absent when the provider failed. |
 | `keys` | One array per retrieved record, in order: the record's identity keys, strongest first — `doi:<doi>`, `arxiv:<id>` (no version), `title:<normalized title>\|<year>` — the same keys `search` merges by. An empty array is a record with none, which can't be matched. Absent when the provider failed. |
 | `error` | Why the provider returned nothing: a failed request, or not knowing the `refs` / `cited-by` seed. Only present when it failed. |
+| `reason` | What kind of failure `error` is: `withheld`, `failed` or `unresolved` (see [Citation graph](#citation-graph)). Only present when it failed. |
 | `merge` | The command's merge counts across every provider that answered: `before` (records), `after` (distinct papers) and `unmatched` (records with no key), as `search` prints them. |
 
 The merge counts sit on every line of a command rather than on a separate summary line, so every line has the same shape and a reader never has to tell two kinds apart; to read a command's counts, take them from any one of its lines. Keys are kept per record rather than pooled, because whether two records are the same paper depends on all of each one's keys (a title match never joins two different DOIs).
@@ -260,7 +278,7 @@ Every command exits with a code a script can branch on:
 | 0 | Success. |
 | 1 | Any other failure, e.g. `nix` failing to fetch or build; also `check` or `sync` finding problems in the library, or a `search`, `refs` or `cited-by` that succeeded but couldn't write the [search log](#search-log). |
 | 2 | Wrong arguments: an unknown command or flag, a malformed `provider:id` or citation key, or flags that can't be combined. |
-| 3 | Partial: in `search`, `refs` or `cited-by`, at least one provider failed (network, rate limit, provider error) while others answered, so the results are incomplete. A provider that has no record of the seed or DOI isn't a failure: it answered, so when the others returned results `pax` exits 0 and notes it on stderr. |
+| 3 | Partial: in `search`, `refs` or `cited-by`, at least one provider failed (network, rate limit, provider error) while others answered, so the results are incomplete. In `refs` and `cited-by` that includes a list withheld by the provider or a provider that can't look the seed up, since its list is still missing; a list cut short by `--limit` isn't (see [Citation graph](#citation-graph)). In `search --doi`, a provider that has no record of the DOI isn't a failure: it answered, so when the others returned results `pax` exits 0 and notes it on stderr. |
 | 4 | Not found: a reference, seed or citation key doesn't resolve, e.g. no provider has a record of the `refs` / `cited-by` seed or the `search --doi` DOI, or `unexclude` names a paper that isn't excluded. |
 | 5 | Refused: the library rejected the operation, e.g. adding or excluding a paper already declared, adding an excluded paper, renaming to a citation key in use, fetching a paper with no PDF source, or `init` where a library exists. |
 | 6 | Every provider failed (network, rate limit, provider error). |
