@@ -49,6 +49,15 @@ enum Command {
         #[command(flatten)]
         paging: PageArgs,
     },
+    ///List the papers OpenAlex and Semantic Scholar recommend as related to one or more papers
+    Related {
+        /// One or more seeds: a reference from `search` (e.g.
+        /// openalex:W2072794470) or a library citation key (e.g. turing1936)
+        #[arg(required = true, value_name = "SEED")]
+        seeds: Vec<String>,
+        #[command(flatten)]
+        paging: PageArgs,
+    },
     ///Inspect a search result before adding it
     Show {
         /// A fully-qualified reference from `search`, e.g. openalex:W2072794470
@@ -275,12 +284,26 @@ fn provider_failed<'a>(
     }
 }
 
+/// Which kind of per-seed lists [`show_citations`] prints.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lists {
+    /// `refs` / `cited-by`: citation lists, each with the provider's total.
+    Citations,
+    /// `related`: recommendations, which have no total.
+    Related,
+}
+
 /// Prints each seed's provider counts, marked with why a list is incomplete
 /// if it is, then one list merged across every seed and provider, the way
 /// `search` does. With one seed the output is that seed's alone; with
 /// several, each seed's counts sit under a `seed <seed>:` line and each
 /// merged row names the seeds that returned it.
-fn show_citations(sink: &mut impl Sink, results: &pax_core::SeedResults) -> Code {
+///
+/// For `related`, only a missing list is marked: a related list never has a
+/// total, so it's never complete, and `truncated` (the limit stopping short
+/// of a total) would say something untrue; its count line already says the
+/// total isn't reported.
+fn show_citations(sink: &mut impl Sink, results: &pax_core::SeedResults, kind: Lists) -> Code {
     let index = pax_core::LibraryIndex::load(Path::new("."));
     let several = results.seeds.len() > 1;
     let mut codes = Vec::new();
@@ -310,7 +333,8 @@ fn show_citations(sink: &mut impl Sink, results: &pax_core::SeedResults) -> Code
             let Some(result) = lists.get(&provider) else {
                 continue;
             };
-            let reason = pax_core::incomplete_reason(result);
+            let reason = pax_core::incomplete_reason(result)
+                .filter(|reason| kind == Lists::Citations || reason.is_missing());
             sink.citation_header(provider, result.as_ref().ok(), reason);
             if let Err(e) = result {
                 sink.provider_error(provider, &of_seed(e.to_string()));
@@ -368,17 +392,17 @@ async fn main() -> ExitCode {
 }
 
 /// Whether `command` reads or writes the library in the current directory.
-/// A `show` reference or `refs` / `cited-by` seed with a `:` is a provider
-/// reference, which needs no library; without one it's a citation key, so
-/// one such seed among several needs the library.
+/// A `show` reference or `refs` / `cited-by` / `related` seed with a `:` is
+/// a provider reference, which needs no library; without one it's a citation
+/// key, so one such seed among several needs the library.
 /// `search --local` is checked after its arguments are.
 fn needs_library(command: &Command) -> bool {
     match command {
         Command::Init | Command::Search { .. } => false,
         Command::Show { reference } => !reference.contains(':'),
-        Command::Refs { seeds, .. } | Command::CitedBy { seeds, .. } => {
-            seeds.iter().any(|seed| !seed.contains(':'))
-        }
+        Command::Refs { seeds, .. }
+        | Command::CitedBy { seeds, .. }
+        | Command::Related { seeds, .. } => seeds.iter().any(|seed| !seed.contains(':')),
         Command::Add { .. }
         | Command::List { .. }
         | Command::Remove { .. }
@@ -512,14 +536,21 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             let options = paging.options();
             let pax_core::Logged { results, log, .. } =
                 pax_core::references_many_logged(&seeds, &options, Path::new("."), config).await;
-            let code = show_citations(sink, &results);
+            let code = show_citations(sink, &results, Lists::Citations);
             report_log(sink, log, code)
         }
         Command::CitedBy { seeds, paging } => {
             let options = paging.options();
             let pax_core::Logged { results, log, .. } =
                 pax_core::cited_by_many_logged(&seeds, &options, Path::new("."), config).await;
-            let code = show_citations(sink, &results);
+            let code = show_citations(sink, &results, Lists::Citations);
+            report_log(sink, log, code)
+        }
+        Command::Related { seeds, paging } => {
+            let options = paging.options();
+            let pax_core::Logged { results, log, .. } =
+                pax_core::related_many_logged(&seeds, &options, Path::new("."), config).await;
+            let code = show_citations(sink, &results, Lists::Related);
             report_log(sink, log, code)
         }
         Command::Show { reference } => {

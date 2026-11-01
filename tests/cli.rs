@@ -336,10 +336,10 @@ fn library_without_ids(name: &str) -> PathBuf {
 }
 
 #[test]
-fn refs_appends_a_line_per_provider_to_the_search_log() {
+fn refs_cited_by_and_related_append_a_line_per_provider_to_the_search_log() {
     let dir = library_without_ids("search-log");
     let log = dir.join("research").join("search-log.jsonl");
-    for (run, command) in ["refs", "cited-by"].into_iter().enumerate() {
+    for (run, command) in ["refs", "cited-by", "related"].into_iter().enumerate() {
         let output = pax_offline(&dir, &[command, "hoare1978", "--year", "1990-"]);
         assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
         let lines: Vec<String> = fs::read_to_string(&log)
@@ -453,9 +453,40 @@ fn a_seed_missing_from_the_library_fails_only_itself() {
 }
 
 #[test]
-fn refs_needs_a_seed() {
+fn related_takes_several_seeds_like_refs() {
+    let dir = library_with_two_seeds("related-many");
+    let output = pax_offline(
+        &dir,
+        &["related", "hoare1978", "milner1980", "nosuchkey2000"],
+    );
+    // No seed resolves in any provider: not found.
+    assert_eq!(output.status.code(), Some(4), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "seed hoare1978:\nopenalex: no list [unresolved]\nsemanticscholar: no list [unresolved]\n\
+         seed milner1980:\nopenalex: no list [unresolved]\nsemanticscholar: no list [unresolved]\n\
+         seed nosuchkey2000:\n"
+    );
+    assert!(
+        stderr(&output).contains("(seed nosuchkey2000)"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn related_with_a_citation_key_outside_a_library_exits_7() {
+    let dir = scratch("related-no-library");
+    let output = pax_offline(&dir, &["related", "hoare1978"]);
+    assert_eq!(output.status.code(), Some(7), "{}", stderr(&output));
+}
+
+#[test]
+fn refs_cited_by_and_related_need_a_seed() {
     let dir = library_with_two_seeds("refs-no-seed");
-    assert_eq!(pax_offline(&dir, &["refs"]).status.code(), Some(2));
+    for command in ["refs", "cited-by", "related"] {
+        assert_eq!(pax_offline(&dir, &[command]).status.code(), Some(2));
+    }
 }
 
 #[test]
