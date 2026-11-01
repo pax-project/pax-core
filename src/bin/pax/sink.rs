@@ -8,7 +8,7 @@
 
 use pax_core::{
     CandidateWork, CheckReport, CheckStatus, FetchOutcome, FilterApplication, IncompleteReason,
-    LibraryIndex, MergeReport, Paper, ProviderId, SearchPage, Stats,
+    LibraryIndex, MergeReport, Paper, ProviderId, SearchPage, SeedMergeReport, Stats,
 };
 
 pub trait Sink {
@@ -42,6 +42,19 @@ pub trait Sink {
     fn merged(
         &mut self,
         report: &MergeReport,
+        index: &LibraryIndex,
+        language_unknown: &dyn Fn(&CandidateWork) -> bool,
+    );
+    /// The line a seed's counts sit under in a multi-seed `refs` /
+    /// `cited-by`; `same_as` is the earlier seed it's the same paper as.
+    fn seed_header(&mut self, seed: &str, same_as: Option<&str>);
+    /// Citation results merged across several seeds, as [`Sink::merged`],
+    /// each row also naming the seeds that returned it; `seeds` are their
+    /// names by index.
+    fn merged_seeds(
+        &mut self,
+        report: &SeedMergeReport,
+        seeds: &[&str],
         index: &LibraryIndex,
         language_unknown: &dyn Fn(&CandidateWork) -> bool,
     );
@@ -105,7 +118,7 @@ impl Sink for TextSink {
 
     fn candidates(&mut self, candidates: &[CandidateWork], index: &LibraryIndex) {
         for work in candidates {
-            print_work(work, &work.id.to_string(), &Marks::of([work], index));
+            print_work(work, &work.id.to_string(), &Marks::of([work], index), None);
         }
     }
 
@@ -128,7 +141,41 @@ impl Sink for TextSink {
                 language_unknown: merged.records().all(language_unknown),
                 ..Marks::of(merged.records(), index)
             };
-            print_work(&merged.work, &ids.join(" · "), &marks);
+            print_work(&merged.work, &ids.join(" · "), &marks, None);
+        }
+    }
+
+    fn seed_header(&mut self, seed: &str, same_as: Option<&str>) {
+        match same_as {
+            Some(other) => println!("seed {seed}: same paper as {other}"),
+            None => println!("seed {seed}:"),
+        }
+    }
+
+    fn merged_seeds(
+        &mut self,
+        report: &SeedMergeReport,
+        seeds: &[&str],
+        index: &LibraryIndex,
+        language_unknown: &dyn Fn(&CandidateWork) -> bool,
+    ) {
+        println!(
+            "merged: {} → {} ({} duplicates, {} unmatched)",
+            report.before,
+            report.after,
+            report.duplicates(),
+            report.unmatched
+        );
+        for row in &report.works {
+            let merged = &row.merged;
+            let ids: Vec<String> = merged.ids().iter().map(|id| id.to_string()).collect();
+            let marks = Marks {
+                language_unknown: merged.records().all(language_unknown),
+                ..Marks::of(merged.records(), index)
+            };
+            let names: Vec<&str> = row.seeds().into_iter().map(|i| seeds[i]).collect();
+            let line = format!("seeds: {}", names.join(", "));
+            print_work(&merged.work, &ids.join(" · "), &marks, Some(&line));
         }
     }
 
@@ -349,8 +396,9 @@ impl Marks {
 }
 
 /// One result row: the title with any marks, then its details. `ids` is the
-/// record's reference, or every merged record's reference for a merged row.
-fn print_work(work: &CandidateWork, ids: &str, marks: &Marks) {
+/// record's reference, or every merged record's reference for a merged row;
+/// `extra`, a line printed under them, e.g. the seeds that returned the row.
+fn print_work(work: &CandidateWork, ids: &str, marks: &Marks, extra: Option<&str>) {
     let flag = |set: bool, text: &'static str| if set { text } else { "" };
     println!(
         "\t{}{}{}{}",
@@ -360,6 +408,9 @@ fn print_work(work: &CandidateWork, ids: &str, marks: &Marks) {
         flag(marks.language_unknown, " [language unknown]"),
     );
     println!("\t\t{ids}");
+    if let Some(extra) = extra {
+        println!("\t\t{extra}");
+    }
     if !work.authors.is_empty() {
         println!("\t\t{}", work.authors.join(", "));
     }

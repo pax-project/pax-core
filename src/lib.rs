@@ -25,8 +25,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub use citations::{
-    CITATION_PROVIDERS, CitationError, CitationResults, Incomplete, IncompleteReason,
-    SeedLookupError, cited_by, incomplete_lists, incomplete_reason, references,
+    CITATION_PROVIDERS, CitationError, CitationResults, Incomplete, IncompleteReason, RecordSource,
+    SeedLookupError, SeedMergeReport, SeedMergedWork, SeedResult, SeedResults, cited_by,
+    cited_by_many, incomplete_lists, incomplete_reason, references, references_many,
 };
 pub use error::PaxError;
 pub use exclusions::{
@@ -48,8 +49,9 @@ pub use provider::{
     YearRangeParseError,
 };
 pub use search_log::{
-    LogOutcome, Logged, SearchCommand, SearchLog, SearchLogEntry, cited_by_logged, log_results,
-    references_logged, search_all_logged, search_by_author_logged,
+    LogOutcome, Logged, SearchCommand, SearchLog, SearchLogEntry, cited_by_logged,
+    cited_by_many_logged, log_results, references_logged, references_many_logged,
+    search_all_logged, search_by_author_logged,
 };
 pub use stats::{FullTextExclusions, Identified, ReasonCount, Stats, stats};
 

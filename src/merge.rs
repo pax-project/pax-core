@@ -86,6 +86,15 @@ impl MergeReport {
 /// Merges records that are the same paper. Input order matters only for
 /// output order and tie-breaks; grouping itself doesn't depend on it.
 pub fn merge_works(works: impl IntoIterator<Item = CandidateWork>) -> MergeReport {
+    merge_indexed(works).0
+}
+
+/// [`merge_works`], also returning, for each merged work, the input
+/// position of each of its records in [`MergedWork::records`] order — so a
+/// caller can say where each record came from.
+pub(crate) fn merge_indexed(
+    works: impl IntoIterator<Item = CandidateWork>,
+) -> (MergeReport, Vec<Vec<usize>>) {
     let works: Vec<CandidateWork> = works.into_iter().collect();
     let key_sets: Vec<Vec<IdentityKey>> = works.iter().map(identity::identity_keys).collect();
     let groups = identity::group(&key_sets);
@@ -93,18 +102,21 @@ pub fn merge_works(works: impl IntoIterator<Item = CandidateWork>) -> MergeRepor
     let before = works.len();
 
     let group_count = groups.iter().copied().max().map_or(0, |max| max + 1);
-    let mut members: Vec<Vec<(CandidateWork, Vec<IdentityKey>)>> = vec![Vec::new(); group_count];
-    for ((work, keys), group) in works.into_iter().zip(key_sets).zip(groups) {
-        members[group].push((work, keys));
+    let mut members: Vec<Vec<Record>> = vec![Vec::new(); group_count];
+    for (position, ((work, keys), group)) in works.into_iter().zip(key_sets).zip(groups).enumerate()
+    {
+        members[group].push((work, keys, position));
     }
 
-    let merged: Vec<MergedWork> = members.into_iter().map(merge_group).collect();
-    MergeReport {
+    let (merged, positions): (Vec<MergedWork>, Vec<Vec<usize>>) =
+        members.into_iter().map(merge_group).unzip();
+    let report = MergeReport {
         after: merged.len(),
         works: merged,
         before,
         unmatched,
-    }
+    };
+    (report, positions)
 }
 
 /// Merges the successful pages of a paged search (e.g.
@@ -121,11 +133,16 @@ pub fn merge_pages<E>(results: &HashMap<ProviderId, Result<SearchPage, E>>) -> M
     )
 }
 
-fn merge_group(mut records: Vec<(CandidateWork, Vec<IdentityKey>)>) -> MergedWork {
+/// A record being merged: the work, its identity keys, and its input position.
+type Record = (CandidateWork, Vec<IdentityKey>, usize);
+
+/// Merges one group, returning the merged work and its records' input
+/// positions, representative first.
+fn merge_group(mut records: Vec<Record>) -> (MergedWork, Vec<usize>) {
     // Strongest key across the group: a DOI beats an arXiv id beats title+year.
     let key = records
         .iter()
-        .flat_map(|(_, keys)| keys.iter())
+        .flat_map(|(_, keys, _)| keys.iter())
         .min_by_key(|key| key_strength(key))
         .cloned();
     // `max_by_key` keeps the last maximum; reversing makes ties go to the
@@ -134,15 +151,19 @@ fn merge_group(mut records: Vec<(CandidateWork, Vec<IdentityKey>)>) -> MergedWor
         .iter()
         .enumerate()
         .rev()
-        .max_by_key(|(_, (work, _))| (is_published(work), completeness(work)))
+        .max_by_key(|(_, (work, _, _))| (is_published(work), completeness(work)))
         .map(|(index, _)| index)
         .unwrap_or(0);
-    let (work, _) = records.remove(representative);
-    MergedWork {
+    let (work, _, first) = records.remove(representative);
+    let positions = std::iter::once(first)
+        .chain(records.iter().map(|(_, _, position)| *position))
+        .collect();
+    let merged = MergedWork {
         work,
-        duplicates: records.into_iter().map(|(work, _)| work).collect(),
+        duplicates: records.into_iter().map(|(work, _, _)| work).collect(),
         key,
-    }
+    };
+    (merged, positions)
 }
 
 fn key_strength(key: &IdentityKey) -> u8 {

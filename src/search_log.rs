@@ -17,6 +17,7 @@ use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -29,7 +30,7 @@ use crate::provider::{
     FilterApplication, FilterKind, Filters, Limit, ProviderError, ProviderId, SearchOptions,
     SearchPage,
 };
-use crate::{CitationError, CitationResults, Config, IncompleteReason, nix};
+use crate::{CitationError, CitationResults, Config, IncompleteReason, SeedResults, nix};
 
 /// The schema version every entry carries in its `v` field. Bumped when a
 /// field changes meaning or is removed; adding a field doesn't bump it.
@@ -81,6 +82,11 @@ pub struct SearchLogEntry {
     /// When the search ran: ISO 8601 in UTC, to the second. Every line of one
     /// command carries the same date.
     pub date: String,
+    /// An id shared by every line one command wrote, and by no other
+    /// command's: with several `refs` / `cited-by` seeds, it ties their lines
+    /// together. Opaque. Absent on lines written before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
     /// How many records were asked for per provider.
     pub limit: LoggedLimit,
     /// Every requested filter, with how this provider applied it.
@@ -108,7 +114,8 @@ pub struct SearchLogEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// The command's merge counts across every provider that answered; the
-    /// same on every line of one command.
+    /// same on every line of one command, or with several seeds, on every
+    /// line of one seed.
     pub merge: MergeCounts,
 }
 
@@ -218,6 +225,7 @@ pub fn log_entries<E: fmt::Display>(
                 seed: seed.clone(),
                 provider: provider.to_string(),
                 date: date.clone(),
+                run: None,
                 limit: options.limit.into(),
                 filters: Vec::new(),
                 total: None,
@@ -338,6 +346,9 @@ pub enum LogOutcome {
     NoLibrary,
     /// Writing the log failed; the search results are still good.
     Failed(io::Error),
+    /// There was nothing to log: every seed of a multi-seed lookup was
+    /// invalid, so no provider was asked.
+    Nothing,
 }
 
 /// A search's results, and whether it was logged.
@@ -365,15 +376,36 @@ pub fn log_results<E: fmt::Display>(
     })
 }
 
-/// Appends `entries()` to the log of the library at `root`, if there is one.
+/// Appends `entries()` to the log of the library at `root`, if there is one,
+/// giving every line one fresh [`SearchLogEntry::run`] id. With no entries
+/// it writes nothing, and says so.
 fn append_to_library(root: &Path, entries: impl FnOnce() -> Vec<SearchLogEntry>) -> LogOutcome {
+    let mut entries = entries();
+    if entries.is_empty() {
+        return LogOutcome::Nothing;
+    }
     let Some(log) = SearchLog::for_library(root) else {
         return LogOutcome::NoLibrary;
     };
-    match log.append(&entries()) {
+    let run = new_run_id();
+    for entry in &mut entries {
+        entry.run.get_or_insert_with(|| run.clone());
+    }
+    match log.append(&entries) {
         Ok(()) => LogOutcome::Written(log.path),
         Err(e) => LogOutcome::Failed(e),
     }
+}
+
+/// A run id no other command writes: the time in nanoseconds, the process
+/// id, and a count of the runs this process logged, in hex.
+fn new_run_id() -> String {
+    static RUNS: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let count = RUNS.fetch_add(1, Ordering::Relaxed);
+    format!("{nanos:x}-{:x}-{count:x}", std::process::id())
 }
 
 /// An error whose kind of failure a log line records as its `reason`.
@@ -479,6 +511,54 @@ pub async fn cited_by_logged(
     let results = crate::cited_by(seed, options, root, config).await?;
     let log = log_with_reasons(root, SearchCommand::CitedBy, seed, options, &results);
     Ok(Logged { results, log })
+}
+
+/// The log entries for a multi-seed lookup: each seed with lists logged as
+/// its own `command` would be on its own — one line per provider, with that
+/// seed's merge counts — so `pax stats` counts the same either way. An
+/// invalid seed logs nothing, as on its own.
+fn seed_log_entries(
+    command: SearchCommand,
+    options: &SearchOptions,
+    results: &SeedResults,
+    date: SystemTime,
+) -> Vec<SearchLogEntry> {
+    results
+        .seeds
+        .iter()
+        .filter_map(|seed| Some((seed.seed.as_str(), seed.results.as_ref().ok()?)))
+        .flat_map(|(seed, lists)| entries_with_reasons(command, seed, options, lists, date))
+        .collect()
+}
+
+/// [`crate::references_many`], logged in the library at `root` (if any):
+/// every seed's lines in one append, sharing one `run` id.
+pub async fn references_many_logged<S: AsRef<str>>(
+    seeds: &[S],
+    options: &SearchOptions,
+    root: &Path,
+    config: &Config,
+) -> Logged<SeedResults> {
+    let results = crate::references_many(seeds, options, root, config).await;
+    let log = append_to_library(root, || {
+        seed_log_entries(SearchCommand::Refs, options, &results, SystemTime::now())
+    });
+    Logged { results, log }
+}
+
+/// [`crate::cited_by_many`], logged in the library at `root` (if any); as
+/// [`references_many_logged`].
+pub async fn cited_by_many_logged<S: AsRef<str>>(
+    seeds: &[S],
+    options: &SearchOptions,
+    root: &Path,
+    config: &Config,
+) -> Logged<SeedResults> {
+    let results = crate::cited_by_many(seeds, options, root, config).await;
+    let log = append_to_library(root, || {
+        seed_log_entries(SearchCommand::CitedBy, options, &results, SystemTime::now())
+    });
+    Logged { results, log }
 }
 
 #[cfg(test)]
@@ -872,5 +952,110 @@ mod tests {
         );
         assert!(matches!(outcome, LogOutcome::Failed(_)));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn seed_lists(doi: &str) -> CitationResults {
+        HashMap::from([
+            (
+                ProviderId::OpenAlex,
+                Ok(SearchPage::new(
+                    vec![work(ProviderId::OpenAlex, "W1", Some(doi), "A")],
+                    Some(1),
+                    None,
+                )),
+            ),
+            (
+                ProviderId::SemanticScholar,
+                Err(CitationError::Provider(ProviderError::Withheld {
+                    message: "withheld".into(),
+                })),
+            ),
+        ])
+    }
+
+    fn seed(name: &str, results: Result<CitationResults, PaxError>) -> crate::SeedResult {
+        crate::SeedResult {
+            seed: name.to_string(),
+            same_as: None,
+            results,
+        }
+    }
+
+    #[test]
+    fn several_seeds_log_exactly_what_each_would_on_its_own() {
+        let options = SearchOptions::default();
+        let results = SeedResults {
+            seeds: vec![
+                seed("a2020", Ok(seed_lists("10.1/a"))),
+                seed("nosuchkey", Err(PaxError::NoSuchPaper("nosuchkey".into()))),
+                seed("openalex:W9", Ok(seed_lists("10.1/b"))),
+            ],
+        };
+        let together = seed_log_entries(SearchCommand::Refs, &options, &results, date());
+        let one_at_a_time: Vec<SearchLogEntry> = [("a2020", "10.1/a"), ("openalex:W9", "10.1/b")]
+            .into_iter()
+            .flat_map(|(name, doi)| {
+                entries_with_reasons(
+                    SearchCommand::Refs,
+                    name,
+                    &options,
+                    &seed_lists(doi),
+                    date(),
+                )
+            })
+            .collect();
+        // One line per seed per provider, each seed with its own merge
+        // counts; the invalid seed logs nothing.
+        assert_eq!(together.len(), 4);
+        assert_eq!(together, one_at_a_time);
+        assert_eq!(together[1].reason.as_deref(), Some("withheld"));
+    }
+
+    #[test]
+    fn one_command_s_lines_share_a_run_id_no_other_has() {
+        let root = scratch_library("run");
+        let options = SearchOptions::default();
+        let results = SeedResults {
+            seeds: vec![
+                seed("a2020", Ok(seed_lists("10.1/a"))),
+                seed("b2021", Ok(seed_lists("10.1/b"))),
+            ],
+        };
+        for _ in 0..2 {
+            let outcome = append_to_library(&root, || {
+                seed_log_entries(SearchCommand::CitedBy, &options, &results, date())
+            });
+            assert!(matches!(outcome, LogOutcome::Written(_)));
+        }
+        let runs: Vec<String> = std::fs::read_to_string(search_log_path(&root))
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let entry: SearchLogEntry = serde_json::from_str(line).unwrap();
+                entry.run.unwrap()
+            })
+            .collect();
+        assert_eq!(runs.len(), 8);
+        assert!(runs[..4].iter().all(|run| *run == runs[0]));
+        assert!(runs[4..].iter().all(|run| *run == runs[4]));
+        assert_ne!(runs[0], runs[4]);
+
+        // Every seed invalid: nothing to log, and the file is untouched.
+        let invalid = SeedResults {
+            seeds: vec![seed("nosuchkey", Err(PaxError::NoSuchPaper("x".into())))],
+        };
+        let outcome = append_to_library(&root, || {
+            seed_log_entries(SearchCommand::Refs, &options, &invalid, date())
+        });
+        assert!(matches!(outcome, LogOutcome::Nothing));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_line_without_a_run_id_still_reads() {
+        let line = r#"{"v":1,"command":"refs","seed":"a2020","provider":"openalex","date":"2026-01-01T00:00:00Z","limit":50,"filters":[],"total":0,"retrieved":0,"keys":[],"merge":{"before":0,"after":0,"unmatched":0}}"#;
+        let entry: SearchLogEntry = serde_json::from_str(line).unwrap();
+        assert_eq!(entry.run, None);
+        assert_eq!(serde_json::to_string(&entry).unwrap(), line);
     }
 }
