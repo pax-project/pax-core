@@ -77,6 +77,8 @@ pax export bibtex
 
 `pax add <result>` declares a search result in `research/papers.nix`, recording its open PDF link as `source_url` for `pax fetch`. If the resolved record has no PDF but has a DOI, `add` looks the DOI up in the other providers and takes a PDF link from them: an arXiv-hosted PDF if any provider has one, otherwise the first PDF link it finds (OpenAlex, then Crossref, then Semantic Scholar). If none has one, or the lookup fails, `source_url` stays unset and can be set later with `pax edit`. A paper already in the library, by DOI or by arXiv id in any version, isn't added again: `add` refuses it and names its citation key. Nor is a paper you've [excluded](#excluding-papers): `add` names the exclusion's key, stage and reason, and `pax unexclude` reverses it.
 
+`pax add <result> --label <source>` also records the add in the [search log](#search-log), for a paper you didn't find by a logged search: one you already knew, say from a list of seed papers (`pax add crossref:10.1145/359545.359563 --label seeds`). `pax stats` then counts it as identified from that source, under [other sources](#prisma-counts), rather than as decided outside the log. The label names the source and changes nothing about what is added. Without `--label`, `add` logs nothing; a refused or failed add logs nothing either. If the log can't be written, the paper is still added, with a warning on stderr, and `add` exits 1.
+
 ### Search filters
 
 `pax search` (a query or `--author`) can narrow results by publication year, document type, and language:
@@ -180,6 +182,8 @@ Inside a library, every `search` (a query or `--author`), `refs`, `cited-by` and
 
 `--label <text>` on `search`, `refs` or `cited-by` tags every line the command writes, e.g. `pax refs lamport1978 --label R2-backward`. It's free text for your own bookkeeping, typically a screening round, and never changes what's searched; `pax stats --by-label` counts records per label. Lines without one, including every line written before labels existed, are unlabelled.
 
+`pax add <result> --label <source>` appends one `manual` line for the paper added, with `--label` as its source: `reference` is the result given, `provider` the one it was resolved from, and `keys` the one record's identity keys (`limit` 1, `retrieved` 1, `total` null). A plain `pax add` writes nothing.
+
 Each line is one JSON object for one provider's part in one command, so a command writes a line per provider it asked, including a provider that failed:
 
 ```JSON
@@ -189,9 +193,10 @@ Each line is one JSON object for one provider's part in one command, so a comman
 | Field | Meaning |
 | --- | --- |
 | `v` | Schema version, `1`. It changes only when a field changes meaning or is removed; new fields can appear without it changing. |
-| `command` | `search`, `search-author` (`search --author`), `refs`, `cited-by` or `related`. |
+| `command` | `search`, `search-author` (`search --author`), `refs`, `cited-by`, `related` or `manual` (`add --label`). |
 | `query` | The query, or the author name for `search-author`. Only on `search` / `search-author`. |
 | `seed` | The paper as given: a `provider:id` reference, a citation key or an alias. Only on `refs` / `cited-by` / `related`. |
+| `reference` | The `provider:id` reference added. Only on `manual`. |
 | `provider` | `openalex`, `crossref`, `semanticscholar` or `arxiv`. |
 | `date` | When the command ran, ISO 8601 in UTC to the second. Every line of one command has the same date. |
 | `run` | An opaque id shared by every line one command wrote, and by no other command's. It ties together the lines of a `refs` / `cited-by` / `related` run over several seeds. Lines written before pax recorded it don't have it. |
@@ -303,6 +308,7 @@ Included
 | Records identified from databases | The [search log](#search-log)'s `search` and `search-author` lines: records retrieved, summed per provider. |
 | Records identified from citation searching | The log's `refs` and `cited-by` lines, per provider: PRISMA's "other methods". |
 | Records identified from related works | The log's `related` lines, per provider: also "other methods", but a source of its own (see below). Printed only once `related` has been run. |
+| Records identified from other sources | The log's `manual` lines (papers added with `pax add --label`), per label rather than per provider: each label is its own "other methods" source, e.g. `seeds`. Printed only once such a paper has been added. |
 | Duplicate records removed | Every record identified, minus the distinct papers among them across the *whole* log, not per command: records are the same paper when they share a key, by the same rules `search` merges by (a title+year match never joins two different DOIs). A record with no key is a paper of its own. |
 | Records screened | Those distinct papers. |
 | Records excluded | `excluded.nix` entries with `stage = "screening"`. |
@@ -316,7 +322,7 @@ Included
 
 Records from [`pax related`](#related-works) are counted in their own box, not with citation searching. PRISMA 2020 puts both under identification via other methods, and asks for each such source to be reported separately. A provider's recommendation isn't a citation edge, so counting it as citation searching would overstate what reference lists and forward citations found. In the diagram, report the box as its own "other methods" source (e.g. "related-works recommendations (OpenAlex, Semantic Scholar)"). Records found by both are still one paper when duplicates are removed, since that count runs across the whole log.
 
-The boxes balance, as a PRISMA diagram must, when every declared or excluded paper was found by a logged search: records screened = records excluded + reports sought + records awaiting screening. A paper added or excluded without one, say from a DOI you already knew, is still counted in its box, so the arithmetic between boxes can be off by those papers; `stats` warns on stderr how many there are (`decided_outside_log` in JSON). An exclusion keyed by an opaque `provider:id` (a paper with no DOI or arXiv id) is matched to its record by title and year, so it needs a year: `pax exclude` records the one the provider gives. Without one it can't be matched, so it counts among those, and the record it was made on stays awaiting screening. That happens to exclusions recorded before pax stored years: re-run `pax exclude <ref> --reason … --stage … --year YYYY`, which replaces the entry, to fix one.
+The boxes balance, as a PRISMA diagram must, when every declared or excluded paper was found by a logged search: records screened = records excluded + reports sought + records awaiting screening. A paper added or excluded without one, say from a DOI you already knew, is still counted in its box, so the arithmetic between boxes can be off by those papers; `stats` warns on stderr how many there are (`decided_outside_log` in JSON). Add such a paper with `pax add <result> --label <source>` and it counts as identified from that source instead, so the boxes balance, even for a review whose only source is a list of seed papers. An exclusion keyed by an opaque `provider:id` (a paper with no DOI or arXiv id) is matched to its record by title and year, so it needs a year: `pax exclude` records the one the provider gives. Without one it can't be matched, so it counts among those, and the record it was made on stays awaiting screening. That happens to exclusions recorded before pax stored years: re-run `pax exclude <ref> --reason … --stage … --year YYYY`, which replaces the entry, to fix one.
 
 A library without a search log or `excluded.nix` counts them as empty. A log line whose provider failed retrieved nothing: it's skipped, with a warning on stderr saying how many. A log line pax can't read stops `stats` with an error naming its line number, exit 7.
 
@@ -345,6 +351,7 @@ By label
     "databases": { "arxiv": 1, "openalex": 2 },
     "citation_searching": { "openalex": 2 },
     "related_works": {},
+    "other_sources": {},
     "total": 5
   },
   "duplicates_removed": 2,

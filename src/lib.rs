@@ -52,9 +52,9 @@ pub use provider::{
     YearRangeParseError,
 };
 pub use search_log::{
-    LogOutcome, Logged, SearchCommand, SearchLog, SearchLogEntry, cited_by_logged,
-    cited_by_many_logged, log_results, references_logged, references_many_logged, related_logged,
-    related_many_logged, search_all_logged, search_by_author_logged,
+    LogOutcome, Logged, SearchCommand, SearchLog, SearchLogEntry, add_candidate_logged,
+    cited_by_logged, cited_by_many_logged, log_results, references_logged, references_many_logged,
+    related_logged, related_many_logged, search_all_logged, search_by_author_logged,
 };
 pub use stats::{
     CriterionCount, CriterionExclusions, FullTextExclusions, Identified, LabelCounts, ReasonCount,
@@ -310,11 +310,25 @@ pub async fn resolve_candidate(
 /// The generated citation key is disambiguated against every name already
 /// taken: other citation keys, and the aliases in `papers.nix` and
 /// `excluded.nix`, which share one namespace with them.
+///
+/// To also record the add in the search log, so `stats` counts the paper as
+/// identified from another source, see [`add_candidate_logged`].
 pub async fn add_candidate(
     id: &CandidateId,
     root: &Path,
     config: &Config,
 ) -> Result<PaperRef, PaxError> {
+    declare_candidate(id, root, config)
+        .await
+        .map(|(paper_ref, _)| paper_ref)
+}
+
+/// [`add_candidate`], returning the resolved record too.
+pub(crate) async fn declare_candidate(
+    id: &CandidateId,
+    root: &Path,
+    config: &Config,
+) -> Result<(PaperRef, CandidateWork), PaxError> {
     let path = nix::papers_path(root);
     let mut library = Library::load(&path)?;
     let exclusions = Exclusions::load(&nix::excluded_path(root))?;
@@ -376,7 +390,7 @@ pub async fn add_candidate(
     });
     library.save(&path)?;
 
-    Ok(PaperRef(citation_key))
+    Ok((PaperRef(citation_key), work))
 }
 
 /// Refuses adding `id` when a declared paper shares a DOI or arXiv key with

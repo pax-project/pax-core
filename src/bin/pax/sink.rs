@@ -643,6 +643,22 @@ fn stats_lines(stats: &Stats) -> Vec<String> {
         ));
         by_provider(&mut rows, &stats.identified.related_works);
     }
+    // Only once a paper has been added with `add --label`; one row per label.
+    if !stats.identified.other_sources.is_empty() {
+        rows.push(Row::Count(
+            1,
+            "Records identified from other sources".into(),
+            stats.identified.other_sources.values().sum(),
+        ));
+        for (label, count) in &stats.identified.other_sources {
+            let label = if label.is_empty() {
+                "(unlabelled)".to_string()
+            } else {
+                label.clone()
+            };
+            rows.push(Row::Count(2, label, *count));
+        }
+    }
     rows.push(Row::Count(
         1,
         "Duplicate records removed".into(),
