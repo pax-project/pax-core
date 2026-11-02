@@ -136,7 +136,7 @@ pub(crate) fn reference_id_keys(id: &CandidateId) -> Vec<IdentityKey> {
     match id.provider {
         ProviderId::Crossref => id_keys(Some(&id.native_id), None, None),
         ProviderId::ArXiv => id_keys(None, Some(&id.native_id), None),
-        ProviderId::OpenAlex | ProviderId::SemanticScholar => Vec::new(),
+        ProviderId::OpenAlex | ProviderId::SemanticScholar | ProviderId::Dblp => Vec::new(),
     }
 }
 

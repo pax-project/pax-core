@@ -46,10 +46,10 @@ pub use nix::init_library;
 use paper::year_from_publish_date;
 pub use paper::{Artifact, Identity, Local, Paper, PaperRef};
 pub use provider::{
-    AppliedFilter, ArxivProvider, CandidateId, CandidateWork, CrossrefProvider, DocType,
-    FilterApplication, FilterKind, Filters, Limit, OpenAlexProvider, Provider, ProviderError,
-    ProviderId, SearchOptions, SearchPage, SemanticScholarProvider, UnknownDocType, YearRange,
-    YearRangeParseError,
+    AppliedFilter, ArxivProvider, CandidateId, CandidateWork, CrossrefProvider, DblpProvider,
+    DocType, FilterApplication, FilterKind, Filters, Limit, OpenAlexProvider, Provider,
+    ProviderError, ProviderId, SearchOptions, SearchPage, SemanticScholarProvider, UnknownDocType,
+    YearRange, YearRangeParseError,
 };
 pub use search_log::{
     LogOutcome, Logged, SearchCommand, SearchLog, SearchLogEntry, add_candidate_logged,
@@ -279,6 +279,7 @@ pub async fn resolve_candidate(
                 .get(&id.native_id)
                 .await
         }
+        ProviderId::Dblp => DblpProvider::new()?.get(&id.native_id).await,
     }
 }
 
@@ -287,7 +288,7 @@ pub async fn resolve_candidate(
 /// resolved record's open PDF link; when it has none but has a DOI, the
 /// other providers are asked for that DOI ([`search_by_doi`]) and one of
 /// their PDF links is used instead: an arXiv-hosted PDF if any provider has
-/// one, otherwise the first PDF link in [`merge::PROVIDER_ORDER`] (see
+/// one, otherwise the first PDF link in [`merge::MERGE_ORDER`] (see
 /// [`first_pdf_url`]). Errors in that fallback don't fail the
 /// add — they just leave `source_url` unset. `hash` stays unset: fetching
 /// bytes and computing a Nix hash is `fetch`'s job, not `add`'s (lazy
@@ -551,14 +552,14 @@ mod refuse_declared_tests {
 /// other than `skip` (the one `add` already resolved against). An
 /// arXiv-hosted PDF ([`is_arxiv_pdf`]) is preferred, since other providers'
 /// links are sometimes landing pages rather than PDFs; otherwise the first
-/// PDF link wins. Both passes take providers in [`merge::PROVIDER_ORDER`].
+/// PDF link wins. Both passes take providers in [`merge::MERGE_ORDER`].
 /// Failed providers are skipped.
 fn first_pdf_url(
     results: &HashMap<ProviderId, Result<Vec<CandidateWork>, ProviderError>>,
     skip: ProviderId,
 ) -> Option<String> {
     let pdf_urls = || {
-        merge::PROVIDER_ORDER
+        merge::MERGE_ORDER
             .iter()
             .filter(|provider| **provider != skip)
             .filter_map(|provider| results.get(provider)?.as_ref().ok())

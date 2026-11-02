@@ -1,0 +1,223 @@
+{
+  "result": {
+    "query": "phishing*|malicious*|suspicious* url*|site*|page*|web*",
+    "status": {
+      "@code": "200",
+      "text": "OK"
+    },
+    "time": {
+      "@unit": "msecs",
+      "text": "14.55"
+    },
+    "completions": {
+      "@total": "42",
+      "@computed": "42",
+      "@sent": "10",
+      "c": [
+        {
+          "@sc": "287",
+          "@dc": "271",
+          "@oc": "287",
+          "@id": "58641634",
+          "text": "web"
+        },
+        {
+          "@sc": "231",
+          "@dc": "224",
+          "@oc": "231",
+          "@id": "58582159",
+          "text": "url"
+        }
+      ]
+    },
+    "hits": {
+      "@total": "1089",
+      "@computed": "1089",
+      "@sent": "89",
+      "@first": "1000",
+      "hit": [
+        {
+          "@score": "2",
+          "@id": "4927896",
+          "info": {
+            "authors": {
+              "author": [
+                {
+                  "@pid": "53/9778",
+                  "text": "Daiki Chiba 0001"
+                },
+                {
+                  "@pid": "119/1193",
+                  "text": "Kazuhiro Tobe"
+                },
+                {
+                  "@pid": "62/6630",
+                  "text": "Tatsuya Mori"
+                },
+                {
+                  "@pid": "56/6605",
+                  "text": "Shigeki Goto"
+                }
+              ]
+            },
+            "title": "Detecting Malicious Websites by Learning IP Address Features.",
+            "venue": "SAINT",
+            "pages": "29-39",
+            "year": "2012",
+            "type": "Conference and Workshop Papers",
+            "access": "closed",
+            "key": "conf/saint/ChibaTMG12",
+            "doi": "10.1109/SAINT.2012.14",
+            "ee": "https://doi.org/10.1109/SAINT.2012.14",
+            "url": "https://dblp.org/rec/conf/saint/ChibaTMG12"
+          },
+          "url": "URL#4927896"
+        },
+        {
+          "@score": "2",
+          "@id": "5159707",
+          "info": {
+            "authors": {
+              "author": {
+                "@pid": "63/10872",
+                "text": "Shaun Egan"
+              }
+            },
+            "title": "An Evaluation of Lightweight Classification Methods for Identifying Malicious URLs.",
+            "venue": "ISSA",
+            "year": "2011",
+            "type": "Conference and Workshop Papers",
+            "access": "open",
+            "key": "conf/issa/Egan11",
+            "ee": "http://icsa.cs.up.ac.za/issa/2011/Proceedings/Full/49_Paper.pdf",
+            "url": "https://dblp.org/rec/conf/issa/Egan11"
+          },
+          "url": "URL#5159707"
+        },
+        {
+          "@score": "2",
+          "@id": "4971238",
+          "info": {
+            "authors": {
+              "author": [
+                {
+                  "@pid": "18/1333",
+                  "text": "Jan Göbel"
+                },
+                {
+                  "@pid": "30/7968",
+                  "text": "Andreas Dewald"
+                }
+              ]
+            },
+            "title": "Client-Honeypots - Exploring Malicious Websites.",
+            "pages": "I-XIX, 1-214",
+            "publisher": "Oldenbourg",
+            "year": "2011",
+            "type": "Books and Theses",
+            "access": "closed",
+            "key": "books/daglib/0027496",
+            "ee": "http://www.oldenbourg-verlag.de/wissenschaftsverlag/client-honeypots/9783486705263",
+            "url": "https://dblp.org/rec/books/daglib/0027496"
+          },
+          "url": "URL#4971238"
+        },
+        {
+          "@score": "2",
+          "@id": "5218184",
+          "info": {
+            "authors": {
+              "author": [
+                {
+                  "@pid": "151/4943",
+                  "text": "Martin Aruldoss"
+                },
+                {
+                  "@pid": "02/10262",
+                  "text": "Na. Ba. Anutthamaa"
+                },
+                {
+                  "@pid": "17/10263",
+                  "text": "M. Sathyavathy"
+                },
+                {
+                  "@pid": "91/10260",
+                  "text": "Marie Manjari Saint Francois"
+                },
+                {
+                  "@pid": "34/1584",
+                  "text": "V. Prasanna Venkatesan"
+                }
+              ]
+            },
+            "title": "A Framework for Predicting Phishing Websites using Neural Networks",
+            "venue": "CoRR",
+            "volume": "abs/1109.1074",
+            "year": "2011",
+            "type": "Informal and Other Publications",
+            "access": "open",
+            "key": "journals/corr/abs-1109-1074",
+            "ee": "http://arxiv.org/abs/1109.1074",
+            "url": "https://dblp.org/rec/journals/corr/abs-1109-1074"
+          },
+          "url": "URL#5218184"
+        },
+        {
+          "@score": "2",
+          "@id": "5000084",
+          "info": {
+            "authors": {
+              "author": [
+                {
+                  "@pid": "42/4661",
+                  "text": "Mingxing He"
+                },
+                {
+                  "@pid": "22/5429",
+                  "text": "Shi-Jinn Horng"
+                },
+                {
+                  "@pid": "f/PingzhiFan",
+                  "text": "Pingzhi Fan"
+                },
+                {
+                  "@pid": "69/821",
+                  "text": "Muhammad Khurram Khan"
+                },
+                {
+                  "@pid": "53/7652",
+                  "text": "Ray-Shine Run"
+                },
+                {
+                  "@pid": "80/6153",
+                  "text": "Jui-Lin Lai"
+                },
+                {
+                  "@pid": "94/2717",
+                  "text": "Rong-Jian Chen"
+                },
+                {
+                  "@pid": "87/9717",
+                  "text": "Adi Sutanto"
+                }
+              ]
+            },
+            "title": "An efficient phishing webpage detector.",
+            "venue": "Expert Syst. Appl.",
+            "volume": "38",
+            "number": "10",
+            "pages": "12018-12027",
+            "year": "2011",
+            "type": "Journal Articles",
+            "access": "closed",
+            "key": "journals/eswa/HeHFKRLCS11",
+            "doi": "10.1016/J.ESWA.2011.01.046",
+            "ee": "https://doi.org/10.1016/j.eswa.2011.01.046",
+            "url": "https://dblp.org/rec/journals/eswa/HeHFKRLCS11"
+          },
+          "url": "URL#5000084"
+        }
+      ]
+    }
+  }
+}

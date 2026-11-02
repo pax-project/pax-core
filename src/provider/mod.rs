@@ -1,11 +1,13 @@
 mod arxiv;
 mod crossref;
+mod dblp;
 mod filter;
 mod openalex;
 mod semantic_scholar;
 
 pub use arxiv::ArxivProvider;
 pub use crossref::CrossrefProvider;
+pub use dblp::DblpProvider;
 pub use filter::{
     AppliedFilter, DocType, FilterApplication, FilterKind, Filters, UnknownDocType, YearRange,
     YearRangeParseError,
@@ -274,6 +276,9 @@ pub enum ProviderId {
     Crossref,
     SemanticScholar,
     ArXiv,
+    /// dblp, the computer science bibliography: search and lookup by dblp key
+    /// (e.g. `dblp:conf/icse/Smith20`). It has no citation graph.
+    Dblp,
 }
 
 impl ProviderId {
@@ -283,6 +288,7 @@ impl ProviderId {
             ProviderId::Crossref => "crossref",
             ProviderId::SemanticScholar => "semanticscholar",
             ProviderId::ArXiv => "arxiv",
+            ProviderId::Dblp => "dblp",
         }
     }
 }
@@ -306,6 +312,7 @@ impl FromStr for ProviderId {
             "crossref" => Ok(ProviderId::Crossref),
             "semanticscholar" => Ok(ProviderId::SemanticScholar),
             "arxiv" => Ok(ProviderId::ArXiv),
+            "dblp" => Ok(ProviderId::Dblp),
             other => Err(UnknownProviderTag(other.to_string())),
         }
     }
@@ -638,6 +645,23 @@ mod tests {
         };
         assert_eq!(id.to_string(), "openalex:W123");
         assert_eq!("openalex:W123".parse::<CandidateId>().unwrap(), id);
+    }
+
+    #[test]
+    fn a_dblp_key_is_a_candidate_id_slashes_and_all() {
+        let id: CandidateId = "dblp:conf/icse/Smith20".parse().unwrap();
+        assert_eq!(id.provider, ProviderId::Dblp);
+        assert_eq!(id.native_id, "conf/icse/Smith20");
+        assert_eq!(id.to_string(), "dblp:conf/icse/Smith20");
+    }
+
+    #[test]
+    fn every_provider_has_a_place_in_the_merge_order() {
+        for tag in ["openalex", "crossref", "semanticscholar", "arxiv", "dblp"] {
+            let provider: ProviderId = tag.parse().unwrap();
+            assert_eq!(provider.to_string(), tag);
+            assert!(crate::merge::MERGE_ORDER.contains(&provider), "{tag}");
+        }
     }
 
     #[test]

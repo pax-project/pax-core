@@ -27,7 +27,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::error::PaxError;
 use crate::identity::identity_keys;
-use crate::merge::{PROVIDER_ORDER, merge_works};
+use crate::merge::{MERGE_ORDER, merge_works};
 use crate::paper::PaperRef;
 use crate::provider::{
     CandidateId, CandidateWork, FilterApplication, FilterKind, Filters, Limit, ProviderError,
@@ -210,7 +210,7 @@ pub struct MergeCounts {
 }
 
 /// The log entries for one command: one per provider in `results`, in
-/// [`PROVIDER_ORDER`]. `input` is the query, author name or seed, as
+/// [`MERGE_ORDER`]. `input` is the query, author name or seed, as
 /// `command` takes it; `date` is when the command ran.
 pub fn log_entries<E: fmt::Display>(
     command: SearchCommand,
@@ -221,7 +221,7 @@ pub fn log_entries<E: fmt::Display>(
 ) -> Vec<SearchLogEntry> {
     let date = DateTime::<Utc>::from(date).to_rfc3339_opts(SecondsFormat::Secs, true);
     let pages = || {
-        PROVIDER_ORDER
+        MERGE_ORDER
             .iter()
             .filter_map(|provider| results.get(provider)?.as_ref().ok())
     };
@@ -237,7 +237,7 @@ pub fn log_entries<E: fmt::Display>(
         (Some(input.to_string()), None)
     };
 
-    PROVIDER_ORDER
+    MERGE_ORDER
         .iter()
         .filter_map(|provider| Some((*provider, results.get(provider)?)))
         .map(|(provider, result)| {

@@ -288,7 +288,7 @@ pub struct SeedResults {
 
 impl SeedResults {
     /// One list merged across every seed and provider: seeds in order, and
-    /// within a seed providers in [`crate::merge::PROVIDER_ORDER`], as
+    /// within a seed providers in [`crate::merge::MERGE_ORDER`], as
     /// [`crate::merge_pages`] takes them. Each merged work records which seed
     /// and provider each of its records came from. A seed that's the
     /// [`same_as`](SeedResult::same_as) an earlier one contributes its copy,
@@ -301,7 +301,7 @@ impl SeedResults {
             let Ok(results) = &result.results else {
                 continue;
             };
-            for provider in crate::merge::PROVIDER_ORDER {
+            for &provider in crate::merge::MERGE_ORDER {
                 if let Some(Ok(page)) = results.get(&provider) {
                     sources.extend(page.works.iter().map(|_| RecordSource { seed, provider }));
                     works.extend(page.works.iter().cloned());
@@ -365,10 +365,11 @@ impl SeedMergedWork {
     }
 
     /// The providers that returned this paper, for any seed, without
-    /// repeats, in [`crate::merge::PROVIDER_ORDER`].
+    /// repeats, in [`crate::merge::MERGE_ORDER`].
     pub fn providers(&self) -> Vec<ProviderId> {
-        crate::merge::PROVIDER_ORDER
-            .into_iter()
+        crate::merge::MERGE_ORDER
+            .iter()
+            .copied()
             .filter(|provider| self.sources.iter().any(|s| s.provider == *provider))
             .collect()
     }
@@ -583,6 +584,8 @@ impl SeedIds {
                 arxiv: Some(strip_arxiv_version(&id.native_id).to_string()),
                 ..SeedIds::default()
             },
+            // dblp has no citation graph: the seed is fetched below for its DOI.
+            ProviderId::Dblp => SeedIds::default(),
         };
         match resolve_candidate(&id, config).await {
             Ok(work) => ids.doi = work.doi.map(|doi| normalize_doi(&doi).to_string()),
