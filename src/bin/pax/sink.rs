@@ -82,11 +82,26 @@ pub trait Sink {
     fn stats_json(&mut self, stats: &Stats);
 }
 
+/// `println!` that ends the process quietly with exit 0 when stdout's reader
+/// has stopped reading (`pax list | head`), as other Unix tools do, instead
+/// of panicking on the broken pipe.
+macro_rules! out {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        if let Err(e) = writeln!(std::io::stdout(), $($arg)*) {
+            if e.kind() == std::io::ErrorKind::BrokenPipe {
+                std::process::exit(0);
+            }
+            panic!("failed printing to stdout: {e}");
+        }
+    }};
+}
+
 pub struct TextSink;
 
 impl Sink for TextSink {
     fn message(&mut self, message: &str) {
-        println!("{message}");
+        out!("{message}");
     }
 
     fn error(&mut self, message: &str) {
@@ -106,7 +121,7 @@ impl Sink for TextSink {
     }
 
     fn provider_header(&mut self, provider: ProviderId) {
-        println!("{provider}:");
+        out!("{provider}:");
     }
 
     fn page_header(&mut self, provider: ProviderId, page: &SearchPage) {
@@ -124,7 +139,7 @@ impl Sink for TextSink {
             .unwrap_or_default();
         match page {
             Some(page) => self.counts(provider, page, &mark),
-            None => println!("{provider}: no list{mark}"),
+            None => out!("{provider}: no list{mark}"),
         }
     }
 
@@ -141,7 +156,7 @@ impl Sink for TextSink {
         language_unknown: &dyn Fn(&CandidateWork) -> bool,
         abstracts: bool,
     ) {
-        println!(
+        out!(
             "merged: {} → {} ({} duplicates, {} unmatched)",
             report.before,
             report.after,
@@ -163,8 +178,8 @@ impl Sink for TextSink {
 
     fn seed_header(&mut self, seed: &str, same_as: Option<&str>) {
         match same_as {
-            Some(other) => println!("seed {seed}: same paper as {other}"),
-            None => println!("seed {seed}:"),
+            Some(other) => out!("seed {seed}: same paper as {other}"),
+            None => out!("seed {seed}:"),
         }
     }
 
@@ -176,7 +191,7 @@ impl Sink for TextSink {
         language_unknown: &dyn Fn(&CandidateWork) -> bool,
         abstracts: bool,
     ) {
-        println!(
+        out!(
             "merged: {} → {} ({} duplicates, {} unmatched)",
             report.before,
             report.after,
@@ -200,62 +215,62 @@ impl Sink for TextSink {
     }
 
     fn candidate(&mut self, candidate: &CandidateWork) {
-        println!("Title:      {}", candidate.title);
-        println!("Authors:    {}", candidate.authors.join(", "));
-        println!("Published:  {}", candidate.publish_date);
-        println!(
+        out!("Title:      {}", candidate.title);
+        out!("Authors:    {}", candidate.authors.join(", "));
+        out!("Published:  {}", candidate.publish_date);
+        out!(
             "DOI:        {}",
             candidate.doi.as_deref().unwrap_or("(no doi)")
         );
-        println!(
+        out!(
             "Venue:      {}",
             candidate.venue.as_deref().unwrap_or("(no venue)")
         );
-        println!(
+        out!(
             "PDF source: {}",
             candidate.pdf_url.as_deref().unwrap_or("(none found)")
         );
         if let Some(abstract_text) = &candidate.abstract_text {
-            println!("Abstract:   {abstract_text}");
+            out!("Abstract:   {abstract_text}");
         }
-        println!("Reference:  {}", candidate.id);
+        out!("Reference:  {}", candidate.id);
     }
 
     fn papers(&mut self, papers: &[Paper]) {
         for paper in papers {
             match &paper.local.alias {
-                Some(alias) => println!("{alias}  {}", paper.local.citation_key),
-                None => println!("{}", paper.local.citation_key),
+                Some(alias) => out!("{alias}  {}", paper.local.citation_key),
+                None => out!("{}", paper.local.citation_key),
             }
-            println!("\t{}", paper.identity.title);
+            out!("\t{}", paper.identity.title);
             if !paper.identity.authors.is_empty() {
-                println!("\t{}", paper.identity.authors.join(", "));
+                out!("\t{}", paper.identity.authors.join(", "));
             }
             if let Some(year) = paper.identity.year {
-                println!("\t{}", year);
+                out!("\t{}", year);
             }
         }
     }
 
     fn paper(&mut self, paper: &Paper) {
-        println!("Title:        {}", paper.identity.title);
-        println!("Authors:      {}", paper.identity.authors.join(", "));
+        out!("Title:        {}", paper.identity.title);
+        out!("Authors:      {}", paper.identity.authors.join(", "));
         if let Some(year) = paper.identity.year {
-            println!("Year:         {}", year);
+            out!("Year:         {}", year);
         }
-        println!(
+        out!(
             "DOI:          {}",
             paper.identity.doi.as_deref().unwrap_or("(no doi)")
         );
-        println!(
+        out!(
             "Venue:        {}",
             paper.identity.venue.as_deref().unwrap_or("(no venue)")
         );
-        println!("Citation key: {}", paper.local.citation_key);
+        out!("Citation key: {}", paper.local.citation_key);
         if let Some(alias) = &paper.local.alias {
-            println!("Alias:        {alias}");
+            out!("Alias:        {alias}");
         }
-        println!(
+        out!(
             "PDF source:   {}",
             paper
                 .artifact
@@ -263,7 +278,7 @@ impl Sink for TextSink {
                 .as_deref()
                 .unwrap_or("(not resolved)")
         );
-        println!(
+        out!(
             "Artifact:     {}",
             if paper.artifact.hash.is_some() {
                 "Fetched"
@@ -272,45 +287,45 @@ impl Sink for TextSink {
             }
         );
         if !paper.local.tags.is_empty() {
-            println!("Tags:         {}", paper.local.tags.join(", "));
+            out!("Tags:         {}", paper.local.tags.join(", "));
         }
         if let Some(notes) = &paper.local.notes {
-            println!("Notes:        {}", notes);
+            out!("Notes:        {}", notes);
         }
     }
 
     fn exclusion(&mut self, exclusion: &Exclusion) {
-        println!("Excluded:     {}", exclusion.key);
-        println!("Title:        {}", exclusion.title);
+        out!("Excluded:     {}", exclusion.key);
+        out!("Title:        {}", exclusion.title);
         if let Some(year) = exclusion.year {
-            println!("Year:         {year}");
+            out!("Year:         {year}");
         }
-        println!("Stage:        {}", exclusion.stage);
-        println!("Reason:       {}", exclusion.reason);
+        out!("Stage:        {}", exclusion.stage);
+        out!("Reason:       {}", exclusion.reason);
         if let Some(criterion) = &exclusion.criterion {
-            println!("Criterion:    {criterion}");
+            out!("Criterion:    {criterion}");
         }
         if let Some(round) = &exclusion.round {
-            println!("Round:        {round}");
+            out!("Round:        {round}");
         }
         if let Some(alias) = &exclusion.alias {
-            println!("Alias:        {alias}");
+            out!("Alias:        {alias}");
         }
     }
 
     fn export(&mut self, bibtex: &str) {
         if !bibtex.is_empty() {
-            println!("{bibtex}");
+            out!("{bibtex}");
         }
     }
 
     fn fetched(&mut self, citation_key: &str, outcome: &FetchOutcome) {
         match outcome {
             FetchOutcome::AlreadyFetched { hash } => {
-                println!("Already fetched {citation_key} ({hash})");
+                out!("Already fetched {citation_key} ({hash})");
             }
             FetchOutcome::Fetched { hash } => {
-                println!("Fetched {citation_key} ({hash})");
+                out!("Fetched {citation_key} ({hash})");
             }
         }
     }
@@ -321,26 +336,26 @@ impl Sink for TextSink {
             match &report.status {
                 CheckStatus::NotFetched => {
                     not_fetched += 1;
-                    println!("{}: not fetched", report.citation_key);
+                    out!("{}: not fetched", report.citation_key);
                 }
                 CheckStatus::Reproducible => {
                     reproducible += 1;
-                    println!("{}: reproducible", report.citation_key);
+                    out!("{}: reproducible", report.citation_key);
                 }
                 CheckStatus::Mismatch { expected, actual } => {
                     mismatched += 1;
-                    println!(
+                    out!(
                         "{}: MISMATCH (expected {expected}, got {actual})",
                         report.citation_key
                     );
                 }
                 CheckStatus::Error(message) => {
                     errored += 1;
-                    println!("{}: ERROR — {message}", report.citation_key);
+                    out!("{}: ERROR — {message}", report.citation_key);
                 }
             }
         }
-        println!(
+        out!(
             "{} checked: {reproducible} reproducible, {not_fetched} not fetched, {mismatched} mismatched, {errored} errored",
             reports.len()
         );
@@ -348,7 +363,7 @@ impl Sink for TextSink {
 
     fn stats(&mut self, stats: &Stats) {
         for line in stats_lines(stats) {
-            println!("{line}");
+            out!("{line}");
         }
         if stats.skipped_log_lines > 0 {
             self.warning(&format!(
@@ -368,15 +383,15 @@ impl Sink for TextSink {
         if stats.by_label.is_empty() {
             return;
         }
-        println!();
-        println!("By label");
+        out!();
+        out!("By label");
         for line in label_lines(&stats.by_label) {
-            println!("{line}");
+            out!("{line}");
         }
     }
 
     fn stats_json(&mut self, stats: &Stats) {
-        println!(
+        out!(
             "{}",
             serde_json::to_string_pretty(stats).expect("Stats serializes")
         );
@@ -389,12 +404,12 @@ impl TextSink {
     fn counts(&mut self, provider: ProviderId, page: &SearchPage, mark: &str) {
         let retrieved = page.retrieved();
         let Some(total) = page.total else {
-            println!("{provider}: retrieved {retrieved} (total not reported){mark}");
+            out!("{provider}: retrieved {retrieved} (total not reported){mark}");
             return;
         };
         let scanned = page.scanned;
         let skipped = scanned.saturating_sub(retrieved as u64);
-        println!("{provider}: retrieved {retrieved} of {total}{mark}");
+        out!("{provider}: retrieved {retrieved} of {total}{mark}");
         if page.is_complete() {
             if skipped > 0 && !page.has_post_retrieval_filter() {
                 // e.g. references Semantic Scholar couldn't match to a paper.
@@ -456,24 +471,24 @@ impl Marks {
 /// `extra`, a line printed under them, e.g. the seeds that returned the row.
 fn print_work(work: &CandidateWork, ids: &str, marks: &Marks, extra: Option<&str>) {
     let flag = |set: bool, text: &'static str| if set { text } else { "" };
-    println!(
+    out!(
         "\t{}{}{}{}",
         work.title,
         flag(marks.in_library, " [in library]"),
         flag(marks.excluded, " [excluded]"),
         flag(marks.language_unknown, " [language unknown]"),
     );
-    println!("\t\t{ids}");
+    out!("\t\t{ids}");
     if let Some(extra) = extra {
-        println!("\t\t{extra}");
+        out!("\t\t{extra}");
     }
     if !work.authors.is_empty() {
-        println!("\t\t{}", work.authors.join(", "));
+        out!("\t\t{}", work.authors.join(", "));
     }
-    println!("\t\t{}", work.publish_date);
-    println!("\t\t{}", work.doi.as_deref().unwrap_or("(no doi)"));
-    println!("\t\t{}", work.venue.as_deref().unwrap_or("(no venue)"));
-    println!(
+    out!("\t\t{}", work.publish_date);
+    out!("\t\t{}", work.doi.as_deref().unwrap_or("(no doi)"));
+    out!("\t\t{}", work.venue.as_deref().unwrap_or("(no venue)"));
+    out!(
         "\t\tPDF: {}",
         if work.pdf_url.is_some() { "✓" } else { "✗" }
     );
@@ -541,7 +556,7 @@ const ABSTRACT_WIDTH: usize = 80;
 fn print_abstract(abstract_text: Option<&str>) {
     let text = abstract_text.unwrap_or("(no abstract)");
     for line in abstract_lines(&format!("Abstract: {text}"), ABSTRACT_WIDTH) {
-        println!("\t\t{line}");
+        out!("\t\t{line}");
     }
 }
 
