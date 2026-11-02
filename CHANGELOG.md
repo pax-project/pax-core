@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0](https://github.com/pax-project/pax-core/compare/v2.4.0...v3.0.0) - 2026-11-02
+
+### Features
+
+- *(aliases)* [**breaking**] address declared and excluded papers by a user-chosen alias ([#71](https://github.com/pax-project/pax-core/pull/71))
+
 ## [2.4.0](https://github.com/pax-project/pax-core/compare/v2.3.0...v2.4.0) - 2026-11-02
 
 ### Features
