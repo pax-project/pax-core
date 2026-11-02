@@ -1513,7 +1513,9 @@ pub async fn exclude_paper(
 /// screening `round` (e.g. `R1`). Criterion and round are free text pax
 /// doesn't validate; blank ones count as unset. The `alias` (e.g. `P18`) must
 /// be a valid alias ([`paper::is_valid_alias`]) no other paper holds as an
-/// alias or citation key; a blank one counts as unset.
+/// alias or citation key. Unlike the other fields, an alias left `None`
+/// keeps the one an earlier exclusion of the paper recorded, and a blank one
+/// clears it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ExclusionOptions {
@@ -1573,8 +1575,9 @@ impl ExclusionOptions {
 /// [`exclude_paper`], recording everything in `options`: a given `year`
 /// replaces the resolved one, and the criterion, round and alias are
 /// recorded. Re-excluding a paper replaces its whole entry, so a year neither
-/// given nor resolved again, or a criterion, round or alias not given again,
-/// is cleared.
+/// given nor resolved again, or a criterion or round not given again, is
+/// cleared. The alias is the exception: one not given again is kept, so a
+/// corrected reason never loses the paper's ID; a blank one clears it.
 pub async fn exclude_paper_with(
     reference: &str,
     options: &ExclusionOptions,
@@ -1658,7 +1661,14 @@ pub async fn exclude_paper_with(
 
     let path = nix::excluded_path(root);
     let mut exclusions = Exclusions::load(&path)?;
-    if let Some(alias) = &alias {
+    // Not given: a re-exclusion keeps the alias the entry already has.
+    let alias = match options.alias {
+        None => exclusions.get(&resolved.key).and_then(|e| e.alias.clone()),
+        Some(_) => alias,
+    };
+    if options.alias.is_some()
+        && let Some(alias) = &alias
+    {
         let owner = NameHolder::Excluded(resolved.key.clone());
         names::check_alias(alias, &library, &exclusions, Some(&owner))?;
     }
@@ -2467,6 +2477,28 @@ mod alias_resolution_tests {
         exclude_as(&root, "10.1/abc", "P18").unwrap();
         exclude_as(&root, "10.1/abc", "P21").unwrap();
         assert_eq!(exclusion_alias(&root, "10.1/abc").as_deref(), Some("P21"));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn re_excluding_without_an_alias_keeps_it_and_a_blank_one_clears_it() {
+        let root = library("exclude-keep-alias");
+        exclude_as(&root, "10.1/new", "P20").unwrap();
+        let options = ExclusionOptions::new("not empirical", ExclusionStage::Screening)
+            .with_title(Some("A title".to_string()));
+        let exclusion = block_on(exclude_paper_with(
+            "10.1/new",
+            &options,
+            &root,
+            &Config::default(),
+        ))
+        .unwrap();
+        assert_eq!(exclusion.reason, "not empirical");
+        assert_eq!(exclusion.alias.as_deref(), Some("P20"));
+        assert_eq!(exclusion_alias(&root, "10.1/new").as_deref(), Some("P20"));
+
+        exclude_as(&root, "10.1/new", "").unwrap();
+        assert_eq!(exclusion_alias(&root, "10.1/new"), None);
         fs::remove_dir_all(&root).ok();
     }
 

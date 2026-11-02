@@ -117,7 +117,7 @@ enum Command {
         round: Option<String>,
         /// A short name of your own for the paper, e.g. P18: accepted wherever
         /// a citation key is, unique across the library and its exclusions.
-        /// Re-excluding without it clears it
+        /// Re-excluding without it keeps it; --alias "" clears it
         #[arg(long)]
         alias: Option<String>,
     },
