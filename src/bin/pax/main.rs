@@ -17,7 +17,8 @@ enum Command {
     Init,
     ///Search for papers
     Search {
-        /// Free-text query, searched across all providers
+        /// Free-text query, searched across every provider (or those given by
+        /// --provider)
         query: Option<String>,
         /// Search by author name instead of free text
         #[arg(long)]
@@ -28,6 +29,11 @@ enum Command {
         /// Search only the local library, without querying any provider
         #[arg(long)]
         local: Option<String>,
+        /// Ask only this provider: openalex, crossref, semanticscholar, arxiv
+        /// or dblp. Repeat for several. Without it, every provider but dblp
+        /// (computer science only) is asked
+        #[arg(long = "provider", value_name = "PROVIDER")]
+        providers: Vec<ProviderId>,
         #[command(flatten)]
         paging: PageArgs,
     },
@@ -519,6 +525,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             author,
             doi,
             local,
+            providers,
             paging,
         } => {
             let modes = [
@@ -531,6 +538,12 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 return fail(
                     sink,
                     Failure::Usage("specify exactly one of QUERY, --author, --doi, or --local"),
+                );
+            }
+            if !providers.is_empty() && (doi.is_some() || local.is_some()) {
+                return fail(
+                    sink,
+                    Failure::Usage("--provider only applies to QUERY and --author searches"),
                 );
             }
             if paging.is_set() && (doi.is_some() || local.is_some()) {
@@ -551,13 +564,6 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             }
 
             let index = pax_core::LibraryIndex::load(Path::new("."));
-            const ALL_PROVIDERS: [ProviderId; 4] = [
-                ProviderId::OpenAlex,
-                ProviderId::Crossref,
-                ProviderId::SemanticScholar,
-                ProviderId::ArXiv,
-            ];
-
             if let Some(doi) = &doi {
                 let results = pax_core::search_by_doi(doi, config).await;
                 let listed = results.values().any(Result::is_ok);
@@ -579,7 +585,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 return exit::provider_results(results.values());
             }
 
-            let options = paging.options();
+            let options = paging.options().with_providers(providers);
             let root = Path::new(".");
             let pax_core::Logged { results, log, .. } = if let Some(author) = &author {
                 pax_core::search_by_author_logged(author, &options, root, config).await
@@ -587,7 +593,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 let query = query.as_deref().unwrap_or_default();
                 pax_core::search_all_logged(query, &options, root, config).await
             };
-            for provider in ALL_PROVIDERS {
+            for &provider in pax_core::merge::MERGE_ORDER {
                 match results.get(&provider) {
                     Some(Ok(page)) => sink.page_header(provider, page),
                     Some(Err(e)) => sink.provider_error(provider, &e.to_string()),

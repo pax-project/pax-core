@@ -1093,3 +1093,50 @@ fn edit_clears_an_alias_with_an_empty_value() {
     let papers = std::fs::read_to_string(dir.join("research").join("papers.nix")).unwrap();
     assert!(!papers.contains("alias"), "{papers}");
 }
+
+#[test]
+fn provider_names_the_providers_a_search_asks_and_logs() {
+    let dir = library("search-provider");
+    let output = pax_offline(
+        &dir,
+        &[
+            "search",
+            "actor model",
+            "--provider",
+            "dblp",
+            "--limit",
+            "1",
+        ],
+    );
+    assert!(
+        stderr(&output).contains("Error: dblp: "),
+        "{}",
+        stderr(&output)
+    );
+    let log = fs::read_to_string(dir.join("research").join("search-log.jsonl")).unwrap();
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 1, "{log}");
+    assert!(
+        lines[0]
+            .starts_with(r#"{"v":1,"command":"search","query":"actor model","provider":"dblp","#),
+        "{}",
+        lines[0]
+    );
+}
+
+#[test]
+fn provider_is_a_usage_error_outside_query_and_author_searches() {
+    let dir = scratch("search-provider-usage");
+    for mode in ["--local", "--doi"] {
+        let output = pax(&dir, &["search", mode, "x", "--provider", "dblp"]);
+        assert_eq!(output.status.code(), Some(2), "{mode}");
+        assert!(stderr(&output).contains("--provider only applies to"));
+    }
+    let output = pax(&dir, &["search", "x", "--provider", "nope"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("unknown provider"),
+        "{}",
+        stderr(&output)
+    );
+}
