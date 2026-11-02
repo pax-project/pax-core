@@ -320,6 +320,35 @@ fn adding_a_paper_twice_is_refused_with_5() {
     }
 }
 
+/// `add --label` declares the paper and logs it as another source, so
+/// `stats` doesn't count it as decided outside the log.
+#[test]
+#[ignore = "needs the network"]
+fn adding_with_a_label_logs_the_paper_as_another_source() {
+    let dir = scratch("add-label");
+    assert_eq!(pax(&dir, &["init"]).status.code(), Some(0));
+    let output = pax(
+        &dir,
+        &["add", "crossref:10.1109/CVPR.2016.90", "--label", "seeds"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout(&output).starts_with("Added "));
+    let log = fs::read_to_string(dir.join("research").join("search-log.jsonl")).unwrap();
+    assert_eq!(log.lines().count(), 1);
+    let line: serde_json::Value = serde_json::from_str(log.trim_end()).unwrap();
+    assert_eq!(line["command"], "manual");
+    assert_eq!(line["label"], "seeds");
+    assert_eq!(line["reference"], "crossref:10.1109/CVPR.2016.90");
+    let output = pax(&dir, &["stats", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        json["identified"]["other_sources"],
+        serde_json::json!({ "seeds": 1 })
+    );
+    assert_eq!(json["decided_outside_log"], 0);
+    assert_eq!(json["reports_sought"], 1);
+}
+
 const NO_LIBRARY: &str =
     "Error: no pax library here (research/papers.nix not found); run pax init first";
 
@@ -682,6 +711,101 @@ fn stats_counts_related_works_in_their_own_box() {
     assert_eq!(json["identified"]["total"], 7);
 }
 
+/// The line `pax add crossref:10.1145/359545.359563 --label <label>` logs
+/// for `lamport1978`.
+fn lamport_added_by_hand(label: &str) -> String {
+    format!(
+        r#"{{"v":1,"command":"manual","reference":"crossref:10.1145/359545.359563","provider":"crossref","date":"2026-01-03T00:00:00Z","run":"r1","label":"{label}","limit":1,"filters":[],"total":null,"retrieved":1,"keys":[["doi:10.1145/359545.359563","title:time clocks and the ordering of events in a distributed system|1978"]],"merge":{{"before":1,"after":1,"unmatched":0}}}}"#
+    ) + "\n"
+}
+
+#[test]
+fn stats_counts_a_paper_added_with_a_label_as_another_source() {
+    let dir = library_with_history("stats-manual");
+    let log = dir.join("research").join("search-log.jsonl");
+    let mut text = fs::read_to_string(&log).unwrap();
+    text.push_str(&lamport_added_by_hand("seeds"));
+    fs::write(&log, text).unwrap();
+    let output = pax(&dir, &["stats"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(
+        stdout.contains(
+            "\
+  Records identified from citation searching  2
+    openalex                                  2
+  Records identified from other sources       1
+    seeds                                     1
+  Duplicate records removed                   2
+Screening
+  Records screened                            4
+  Records excluded                            1
+  Records awaiting screening                  1
+  Reports sought for retrieval                2
+"
+        ),
+        "{stdout}"
+    );
+    // lamport1978 now matches a logged record.
+    assert!(
+        !stderr(&output).contains("match no search-log record"),
+        "{}",
+        stderr(&output)
+    );
+    let output = pax(&dir, &["stats", "--json", "--by-label"]);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        json["identified"]["other_sources"],
+        serde_json::json!({ "seeds": 1 })
+    );
+    assert_eq!(json["identified"]["total"], 6);
+    assert_eq!(json["decided_outside_log"], 0);
+    assert_eq!(
+        json["by_label"][1],
+        serde_json::json!({ "label": "seeds", "identified": 1, "distinct": 1, "new_distinct": 1, "duplicates": 0 })
+    );
+}
+
+#[test]
+fn a_seeds_only_review_gives_prisma_counts_that_add_up() {
+    let dir = library("stats-seeds-only");
+    fs::write(
+        dir.join("research").join("search-log.jsonl"),
+        lamport_added_by_hand("seeds"),
+    )
+    .unwrap();
+    let output = pax(&dir, &["stats", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["identified"]["databases"], serde_json::json!({}));
+    assert_eq!(json["identified"]["total"], 1);
+    assert_eq!(json["decided_outside_log"], 0);
+    let count = |field: &str| json[field].as_u64().unwrap();
+    assert_eq!(count("records_screened"), 1);
+    assert_eq!(
+        count("records_screened"),
+        count("excluded_screening") + count("reports_sought") + count("awaiting_screening")
+    );
+}
+
+#[test]
+fn a_refused_or_failed_add_with_a_label_logs_nothing() {
+    let dir = library_with_exclusion("add-label-refused");
+    let log = dir.join("research").join("search-log.jsonl");
+    // Already declared, already excluded, and (offline) unresolvable.
+    for (reference, code) in [
+        ("crossref:10.1145/359545.359563", 5),
+        ("crossref:10.1/ABC", 5),
+        ("crossref:10.1/unknown", 6),
+    ] {
+        let output = pax_offline(&dir, &["add", reference, "--label", "seeds"]);
+        assert_eq!(output.status.code(), Some(code), "pax add {reference}");
+        assert!(stdout(&output).is_empty());
+        assert!(!log.exists(), "pax add {reference} logged");
+    }
+}
+
 #[test]
 fn stats_json_is_one_object_for_scripts() {
     let dir = library_with_history("stats-json");
@@ -696,6 +820,7 @@ fn stats_json_is_one_object_for_scripts() {
                 "databases": { "arxiv": 1, "openalex": 2 },
                 "citation_searching": { "openalex": 2 },
                 "related_works": {},
+                "other_sources": {},
                 "total": 5
             },
             "duplicates_removed": 2,

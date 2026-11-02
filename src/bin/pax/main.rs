@@ -72,6 +72,11 @@ enum Command {
     Add {
         /// A fully-qualified reference from `search`, e.g. openalex:W2072794470
         reference: String,
+        /// Record the add in the search log under this source, e.g. seeds,
+        /// so `stats` counts the paper as identified from other sources;
+        /// doesn't change what is added
+        #[arg(long)]
+        label: Option<String>,
     },
     ///List papers already declared in the library
     List {
@@ -633,16 +638,25 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             }
             Code::Success
         }
-        Command::Add { reference } => {
+        Command::Add { reference, label } => {
             let id: CandidateId = match reference.parse() {
                 Ok(id) => id,
                 Err(e) => return fail(sink, &pax_core::PaxError::InvalidReference(e)),
             };
-            match pax_core::add_candidate(&id, Path::new("."), config).await {
-                Ok(paper_ref) => sink.message(&format!("Added {}", paper_ref.0)),
-                Err(e) => return fail(sink, &e),
+            let Some(label) = label else {
+                match pax_core::add_candidate(&id, Path::new("."), config).await {
+                    Ok(paper_ref) => sink.message(&format!("Added {}", paper_ref.0)),
+                    Err(e) => return fail(sink, &e),
+                }
+                return Code::Success;
+            };
+            match pax_core::add_candidate_logged(&id, &label, Path::new("."), config).await {
+                Ok(logged) => {
+                    sink.message(&format!("Added {}", logged.results.0));
+                    report_log(sink, logged.log, Code::Success)
+                }
+                Err(e) => fail(sink, &e),
             }
-            Code::Success
         }
         Command::List { author, year, tag } => {
             let library = match pax_core::Library::load(&pax_core::nix::papers_path(Path::new(".")))
