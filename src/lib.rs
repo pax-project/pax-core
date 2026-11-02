@@ -2599,6 +2599,10 @@ pub enum FetchOutcome {
 ///
 /// `name` is the paper's citation key or alias; an excluded paper's alias is
 /// refused with [`PaxError::ExcludedNotDeclared`].
+///
+/// A local artifact ([`Artifact::is_local`], added by [`fetch_file`]) has no
+/// source to fetch from: it's already fetched if it's in this machine's Nix
+/// store, and [`PaxError::LocalArtifactMissing`] if it isn't.
 pub fn fetch_paper(name: &str, root: &Path) -> Result<FetchOutcome, PaxError> {
     let path = nix::papers_path(root);
     let mut library = Library::load(&path)?;
@@ -2609,6 +2613,9 @@ pub fn fetch_paper(name: &str, root: &Path) -> Result<FetchOutcome, PaxError> {
         .expect("declared_key names a declared paper");
 
     if let Some(hash) = &paper.artifact.hash {
+        if paper.artifact.is_local() && nix::local_artifact_path(hash, citation_key)?.is_none() {
+            return Err(PaxError::LocalArtifactMissing(citation_key.to_string()));
+        }
         return Ok(FetchOutcome::AlreadyFetched { hash: hash.clone() });
     }
     let source_url = paper
@@ -2620,6 +2627,58 @@ pub fn fetch_paper(name: &str, root: &Path) -> Result<FetchOutcome, PaxError> {
     let hash = nix::prefetch_file(&source_url, citation_key)?;
     paper.artifact.hash = Some(hash.clone());
     library.save(&path)?;
+    Ok(FetchOutcome::Fetched { hash })
+}
+
+/// Materializes a declared paper's artifact from `file`, a copy the user
+/// already has (e.g. a paywalled PDF downloaded through a university login,
+/// which no URL fetch can reach): adds it to the Nix store and records its
+/// hash, as [`fetch_paper`] records a downloaded one. `source_url` is left
+/// as it is, so a paper without one becomes a local artifact
+/// ([`Artifact::is_local`]), and one with one keeps it as its source.
+///
+/// A file whose hash differs from one already recorded is refused with
+/// [`PaxError::HashMismatch`] before anything is written, unless `force`, in
+/// which case its hash replaces the recorded one. Giving the same file again
+/// is how a local artifact missing from this machine's store
+/// ([`PaxError::LocalArtifactMissing`]) comes back. Always
+/// [`FetchOutcome::Fetched`], since the file is added either way.
+///
+/// `name` is the paper's citation key or alias, as for [`fetch_paper`]; a
+/// path that isn't a file is [`PaxError::NotAFile`].
+pub fn fetch_file(
+    name: &str,
+    file: &Path,
+    force: bool,
+    root: &Path,
+) -> Result<FetchOutcome, PaxError> {
+    let path = nix::papers_path(root);
+    let mut library = Library::load(&path)?;
+    let citation_key = names::declared_key(name, &library, root)?;
+    let citation_key = citation_key.as_str();
+    if !file.is_file() {
+        return Err(PaxError::NotAFile(file.to_path_buf()));
+    }
+    let hash = nix::hash_file(file)?;
+    let paper = library
+        .find_mut(citation_key)
+        .expect("declared_key names a declared paper");
+    if let Some(recorded) = &paper.artifact.hash
+        && *recorded != hash
+        && !force
+    {
+        return Err(PaxError::HashMismatch {
+            citation_key: citation_key.to_string(),
+            recorded: recorded.clone(),
+            actual: hash,
+        });
+    }
+
+    nix::add_file(file, citation_key)?;
+    if paper.artifact.hash.as_ref() != Some(&hash) {
+        paper.artifact.hash = Some(hash.clone());
+        library.save(&path)?;
+    }
     Ok(FetchOutcome::Fetched { hash })
 }
 
@@ -2773,14 +2832,78 @@ pub struct CheckReport {
     pub status: CheckStatus,
 }
 
-fn classify(expected: &str, fetched: Result<String, PaxError>) -> CheckStatus {
+/// One declared paper's [`check_artifacts`] result: its [`CheckStatus`], and
+/// the error behind a [`CheckStatus::Error`], typed, so a caller can tell a
+/// local artifact to provide again ([`PaxError::LocalArtifactMissing`]) from
+/// a failed download.
+#[non_exhaustive]
+pub struct ArtifactCheck {
+    pub citation_key: String,
+    pub status: CheckStatus,
+    /// `Some` exactly when `status` is [`CheckStatus::Error`], whose message
+    /// is this error's.
+    pub error: Option<PaxError>,
+}
+
+impl ArtifactCheck {
+    fn new(citation_key: &str, status: CheckStatus) -> Self {
+        ArtifactCheck {
+            citation_key: citation_key.to_string(),
+            status,
+            error: None,
+        }
+    }
+
+    fn error(citation_key: &str, error: PaxError) -> Self {
+        ArtifactCheck {
+            citation_key: citation_key.to_string(),
+            status: CheckStatus::Error(error.to_string()),
+            error: Some(error),
+        }
+    }
+}
+
+fn classify(
+    citation_key: &str,
+    expected: &str,
+    fetched: Result<String, PaxError>,
+) -> ArtifactCheck {
     match fetched {
-        Ok(actual) if actual == expected => CheckStatus::Reproducible,
-        Ok(actual) => CheckStatus::Mismatch {
-            expected: expected.to_string(),
-            actual,
+        Ok(actual) if actual == expected => {
+            ArtifactCheck::new(citation_key, CheckStatus::Reproducible)
+        }
+        Ok(actual) => ArtifactCheck::new(
+            citation_key,
+            CheckStatus::Mismatch {
+                expected: expected.to_string(),
+                actual,
+            },
+        ),
+        Err(e) => ArtifactCheck::error(citation_key, e),
+    }
+}
+
+/// Checks one paper's artifact: downloads it again from its `source_url`, or,
+/// for a local artifact, looks for it in this machine's Nix store (nothing
+/// could download it, and a store path is immutable, so being there is
+/// reproducing it).
+fn check_paper(paper: &Paper) -> ArtifactCheck {
+    let citation_key = paper.local.citation_key.as_str();
+    match (&paper.artifact.hash, &paper.artifact.source_url) {
+        (Some(expected), Some(url)) => classify(
+            citation_key,
+            expected,
+            nix::prefetch_file(url, citation_key),
+        ),
+        (Some(hash), None) => match nix::local_artifact_path(hash, citation_key) {
+            Ok(Some(_)) => ArtifactCheck::new(citation_key, CheckStatus::Reproducible),
+            Ok(None) => ArtifactCheck::error(
+                citation_key,
+                PaxError::LocalArtifactMissing(citation_key.to_string()),
+            ),
+            Err(e) => ArtifactCheck::error(citation_key, e),
         },
-        Err(e) => CheckStatus::Error(e.to_string()),
+        (None, _) => ArtifactCheck::new(citation_key, CheckStatus::NotFetched),
     }
 }
 
@@ -2789,25 +2912,25 @@ fn classify(expected: &str, fetched: Result<String, PaxError>) -> CheckStatus {
 /// `fetch`'s job. A paper with no hash yet is reported `NotFetched` rather
 /// than as an error; one paper's network failure doesn't stop the rest of
 /// the scan (mirrors `search_all`'s per-provider error isolation).
+///
+/// A local artifact ([`Artifact::is_local`]) is `Reproducible` when it's in
+/// this machine's Nix store, and an `Error` saying to provide the file again
+/// when it isn't. [`check_artifacts`] gives that error typed.
 pub fn check_library(root: &Path) -> Result<Vec<CheckReport>, PaxError> {
-    let path = nix::papers_path(root);
-    let library = Library::load(&path)?;
-    Ok(library
-        .papers()
-        .iter()
-        .map(|paper| {
-            let status = match (&paper.artifact.hash, &paper.artifact.source_url) {
-                (Some(expected), Some(url)) => {
-                    classify(expected, nix::prefetch_file(url, &paper.local.citation_key))
-                }
-                _ => CheckStatus::NotFetched,
-            };
-            CheckReport {
-                citation_key: paper.local.citation_key.clone(),
-                status,
-            }
+    Ok(check_artifacts(root)?
+        .into_iter()
+        .map(|check| CheckReport {
+            citation_key: check.citation_key,
+            status: check.status,
         })
         .collect())
+}
+
+/// [`check_library`], with each error typed ([`ArtifactCheck::error`]).
+pub fn check_artifacts(root: &Path) -> Result<Vec<ArtifactCheck>, PaxError> {
+    let path = nix::papers_path(root);
+    let library = Library::load(&path)?;
+    Ok(library.papers().iter().map(check_paper).collect())
 }
 
 #[cfg(test)]
@@ -2816,14 +2939,15 @@ mod check_tests {
 
     #[test]
     fn classify_matching_hash_is_reproducible() {
-        let status = classify("sha256-abc", Ok("sha256-abc".to_string()));
-        assert!(matches!(status, CheckStatus::Reproducible));
+        let check = classify("k", "sha256-abc", Ok("sha256-abc".to_string()));
+        assert!(matches!(check.status, CheckStatus::Reproducible));
+        assert!(check.error.is_none());
     }
 
     #[test]
     fn classify_differing_hash_is_a_mismatch() {
-        let status = classify("sha256-abc", Ok("sha256-xyz".to_string()));
-        match status {
+        let check = classify("k", "sha256-abc", Ok("sha256-xyz".to_string()));
+        match check.status {
             CheckStatus::Mismatch { expected, actual } => {
                 assert_eq!(expected, "sha256-abc");
                 assert_eq!(actual, "sha256-xyz");
@@ -2834,14 +2958,28 @@ mod check_tests {
 
     #[test]
     fn classify_fetch_failure_is_an_error() {
-        let status = classify(
+        let check = classify(
+            "k",
             "sha256-abc",
             Err(PaxError::Fetch("connection refused".to_string())),
         );
-        match status {
+        match check.status {
             CheckStatus::Error(message) => assert_eq!(message, "fetch failed: connection refused"),
             _ => panic!("expected Error"),
         }
+        assert!(matches!(check.error, Some(PaxError::Fetch(_))));
+    }
+
+    #[test]
+    fn a_paper_with_no_hash_is_not_fetched_without_touching_nix() {
+        let paper = Paper {
+            local: Local::new("k"),
+            ..Paper::default()
+        };
+        let check = check_paper(&paper);
+        assert_eq!(check.citation_key, "k");
+        assert!(matches!(check.status, CheckStatus::NotFetched));
+        assert!(check.error.is_none());
     }
 }
 
@@ -2863,6 +3001,11 @@ pub enum ResolvedArtifact {
 ///
 /// `name` is the paper's citation key or alias; an excluded paper's alias is
 /// refused with [`PaxError::ExcludedNotDeclared`].
+///
+/// A local artifact ([`Artifact::is_local`]) is looked up in the Nix store
+/// directly rather than built through `research/flake.nix`, so it opens
+/// even from a flake written before local artifacts existed; one missing
+/// from this machine's store is [`PaxError::LocalArtifactMissing`].
 pub fn resolve_artifact_path(name: &str, root: &Path) -> Result<ResolvedArtifact, PaxError> {
     let path = nix::papers_path(root);
     let library = Library::load(&path)?;
@@ -2872,12 +3015,18 @@ pub fn resolve_artifact_path(name: &str, root: &Path) -> Result<ResolvedArtifact
         .find(citation_key)
         .expect("declared_key names a declared paper");
 
-    if paper.artifact.hash.is_none() {
+    let Some(hash) = &paper.artifact.hash else {
         return Ok(if paper.artifact.source_url.is_some() {
             ResolvedArtifact::NotFetched
         } else {
             ResolvedArtifact::NoSourceUrl
         });
+    };
+    if paper.artifact.is_local() {
+        return match nix::local_artifact_path(hash, citation_key)? {
+            Some(store_path) => Ok(ResolvedArtifact::Path(store_path)),
+            None => Err(PaxError::LocalArtifactMissing(citation_key.to_string())),
+        };
     }
     Ok(ResolvedArtifact::Path(nix::build_package(
         root,
