@@ -8,7 +8,7 @@
 
 use pax_core::{
     CandidateWork, CheckReport, CheckStatus, FetchOutcome, FilterApplication, IncompleteReason,
-    LibraryIndex, MergeReport, Paper, ProviderId, SearchPage, SeedMergeReport, Stats,
+    LabelCounts, LibraryIndex, MergeReport, Paper, ProviderId, SearchPage, SeedMergeReport, Stats,
 };
 
 pub trait Sink {
@@ -67,6 +67,8 @@ pub trait Sink {
     fn checked(&mut self, reports: &[CheckReport]);
     /// The PRISMA flow-diagram counts, aligned under the box names.
     fn stats(&mut self, stats: &Stats);
+    /// The per-label counts, as a table after the flow-diagram counts.
+    fn stats_by_label(&mut self, stats: &Stats);
     /// The PRISMA flow-diagram counts as one JSON object.
     fn stats_json(&mut self, stats: &Stats);
 }
@@ -320,6 +322,17 @@ impl Sink for TextSink {
         }
     }
 
+    fn stats_by_label(&mut self, stats: &Stats) {
+        if stats.by_label.is_empty() {
+            return;
+        }
+        println!();
+        println!("By label");
+        for line in label_lines(&stats.by_label) {
+            println!("{line}");
+        }
+    }
+
     fn stats_json(&mut self, stats: &Stats) {
         println!(
             "{}",
@@ -422,6 +435,60 @@ fn print_work(work: &CandidateWork, ids: &str, marks: &Marks, extra: Option<&str
         "\t\tPDF: {}",
         if work.pdf_url.is_some() { "✓" } else { "✗" }
     );
+}
+
+/// The per-label table, indented under its heading: one row per label in
+/// log order, the labels left-aligned and each count right-aligned under
+/// its column's name. Lines without a label are `(unlabelled)`.
+fn label_lines(labels: &[LabelCounts]) -> Vec<String> {
+    const COLUMNS: [&str; 4] = ["Identified", "Distinct", "New", "Duplicates"];
+    let names: Vec<&str> = labels
+        .iter()
+        .map(|counts| counts.label.as_deref().unwrap_or("(unlabelled)"))
+        .collect();
+    let rows: Vec<[String; 4]> = labels
+        .iter()
+        .map(|counts| {
+            [
+                counts.identified,
+                counts.distinct,
+                counts.new_distinct,
+                counts.duplicates,
+            ]
+            .map(|count| count.to_string())
+        })
+        .collect();
+    let label_width = names
+        .iter()
+        .map(|name| name.chars().count())
+        .chain(["Label".len()])
+        .max()
+        .unwrap_or(0);
+    let widths: Vec<usize> = (0..COLUMNS.len())
+        .map(|column| {
+            rows.iter()
+                .map(|row| row[column].len())
+                .chain([COLUMNS[column].len()])
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let line = |label: &str, cells: [&str; 4]| {
+        let pad = label_width - label.chars().count();
+        let mut line = format!("  {label}{}", " ".repeat(pad));
+        for (cell, width) in cells.iter().zip(&widths) {
+            line.push_str(&format!("  {cell:>width$}"));
+        }
+        line
+    };
+    std::iter::once(line("Label", COLUMNS))
+        .chain(
+            names
+                .iter()
+                .zip(&rows)
+                .map(|(name, row)| line(name, [&row[0], &row[1], &row[2], &row[3]])),
+        )
+        .collect()
 }
 
 /// The PRISMA 2020 flow-diagram boxes, one per line: a phase heading, then

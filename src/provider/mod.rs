@@ -45,6 +45,10 @@ pub enum Limit {
 pub struct SearchOptions {
     pub limit: Limit,
     pub filters: Filters,
+    /// A free-text label for the search, e.g. `R2-backward`, recorded on
+    /// every search-log line the `*_logged` functions write. Metadata for
+    /// the log only: it never changes what is searched.
+    pub label: Option<String>,
 }
 
 impl Default for SearchOptions {
@@ -54,6 +58,7 @@ impl Default for SearchOptions {
         SearchOptions {
             limit: Limit::Count(SEARCH_RESULT_LIMIT),
             filters: Filters::default(),
+            label: None,
         }
     }
 }
@@ -66,6 +71,12 @@ impl SearchOptions {
 
     pub fn with_filters(mut self, filters: Filters) -> Self {
         self.filters = filters;
+        self
+    }
+
+    /// Labels the search in the log; see [`SearchOptions::label`].
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
         self
     }
 }

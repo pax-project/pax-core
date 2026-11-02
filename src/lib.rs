@@ -55,7 +55,8 @@ pub use search_log::{
     related_many_logged, search_all_logged, search_by_author_logged,
 };
 pub use stats::{
-    CriterionCount, CriterionExclusions, FullTextExclusions, Identified, ReasonCount, Stats, stats,
+    CriterionCount, CriterionExclusions, FullTextExclusions, Identified, LabelCounts, ReasonCount,
+    Stats, stats,
 };
 
 /// Per-installation settings a caller (e.g. the CLI, reading `.env`) supplies
