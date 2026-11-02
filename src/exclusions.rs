@@ -12,7 +12,9 @@
 //! An entry may also record the protocol's exclusion `criterion` (e.g. `X3`)
 //! and the screening `round` (e.g. `R1`). Both are optional free text pax
 //! doesn't validate, and are only written when set, so a file without them
-//! is read and written back unchanged.
+//! is read and written back unchanged. So is the paper's `alias` (e.g.
+//! `P18`), a user-chosen name in one namespace with `papers.nix`'s citation
+//! keys and aliases.
 //!
 //! ```nix
 //! {
@@ -24,6 +26,7 @@
 //!     stage = "screening";
 //!     criterion = "X3";
 //!     round = "R1";
+//!     alias = "P18";
 //!   };
 //! }
 //! ```
@@ -42,6 +45,7 @@ use crate::error::PaxError;
 use crate::nix_attrs::{
     self, Value, take_int_opt, take_string, take_string_opt, write_field_string,
 };
+use crate::paper::is_valid_alias;
 use crate::provider::{CandidateId, CandidateWork, ProviderId};
 
 /// When in the screening process a paper was excluded. PRISMA 2020 reports
@@ -116,6 +120,10 @@ pub struct Exclusion {
     /// take the same values as the search log's round labels, so both can be
     /// grouped by round.
     pub round: Option<String>,
+    /// A short, user-chosen name for the paper, e.g. `P18`: see
+    /// [`crate::paper::Local::alias`]. One namespace with the library's
+    /// citation keys and aliases.
+    pub alias: Option<String>,
 }
 
 impl Exclusion {
@@ -130,6 +138,7 @@ impl Exclusion {
             year: None,
             criterion: None,
             round: None,
+            alias: None,
         }
     }
 
@@ -148,6 +157,13 @@ impl Exclusion {
     /// Records the screening round (`None` clears it).
     pub fn with_round(mut self, round: Option<String>) -> Self {
         self.round = round;
+        self
+    }
+
+    /// Records the paper's alias (`None` clears it). Not validated here:
+    /// [`crate::exclude_paper_with`] checks it and its uniqueness.
+    pub fn with_alias(mut self, alias: Option<String>) -> Self {
+        self.alias = alias;
         self
     }
 }
@@ -210,7 +226,11 @@ impl Exclusions {
             }
             write_field_string(&mut out, "reason", &entry.reason);
             write_field_string(&mut out, "stage", entry.stage.as_str());
-            for (field, value) in [("criterion", &entry.criterion), ("round", &entry.round)] {
+            for (field, value) in [
+                ("criterion", &entry.criterion),
+                ("round", &entry.round),
+                ("alias", &entry.alias),
+            ] {
                 if let Some(value) = value {
                     write_field_string(&mut out, field, value);
                 }
@@ -237,6 +257,14 @@ fn exclusion_from_fields(
             })?;
     let criterion = take_string_opt(&mut fields, "criterion")?;
     let round = take_string_opt(&mut fields, "round")?;
+    let alias = take_string_opt(&mut fields, "alias")?;
+    if let Some(alias) = alias.as_deref()
+        && !is_valid_alias(alias)
+    {
+        return Err(PaxError::LibraryParse(format!(
+            "invalid alias {alias:?} in excluded entry {key:?}"
+        )));
+    }
 
     if let Some(unknown) = fields.keys().next() {
         return Err(PaxError::LibraryParse(format!(
@@ -252,6 +280,7 @@ fn exclusion_from_fields(
         year,
         criterion,
         round,
+        alias,
     })
 }
 
@@ -395,6 +424,46 @@ mod tests {
         expected.sort_by(|a, b| a.key.cmp(&b.key));
         assert_eq!(loaded.entries(), expected);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn an_alias_round_trips_and_is_omitted_when_unset() {
+        let path = scratch_path("alias");
+        let mut original = sample();
+        original.upsert(
+            Exclusion::new(
+                "10.1/x".to_string(),
+                "T".to_string(),
+                "off topic".to_string(),
+                ExclusionStage::Screening,
+            )
+            .with_round(Some("R1".to_string()))
+            .with_alias(Some("P18".to_string())),
+        );
+        original.save(&path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("alias").count(), 1, "{text}");
+        assert!(text.contains("    round = \"R1\";\n    alias = \"P18\";\n"));
+
+        let loaded = Exclusions::load(&path).unwrap();
+        assert_eq!(loaded.get("10.1/x").unwrap().alias.as_deref(), Some("P18"));
+        assert_eq!(loaded.get("10.1145/123456").unwrap().alias, None);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn an_invalid_alias_is_a_parse_error() {
+        let path = scratch_path("bad-alias");
+        std::fs::write(
+            &path,
+            r#"{ "10.1/x" = { title = "T"; reason = "R"; stage = "screening"; alias = "P 18"; }; }"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            Exclusions::load(&path),
+            Err(PaxError::LibraryParse(_))
+        ));
     }
 
     #[test]

@@ -21,7 +21,7 @@ use crate::nix_attrs::{
     self, Value, take_int_opt, take_string, take_string_list, take_string_opt, write_field_int_opt,
     write_field_string, write_field_string_list, write_field_string_opt,
 };
-use crate::paper::{Artifact, Identity, Local, Paper};
+use crate::paper::{Artifact, Identity, Local, Paper, is_valid_alias};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Library {
@@ -105,6 +105,9 @@ fn write_entry(out: &mut String, paper: &Paper) {
     write_field_string_opt(out, "hash", paper.artifact.hash.as_deref());
     write_field_string_list(out, "tags", &paper.local.tags);
     write_field_string_opt(out, "notes", paper.local.notes.as_deref());
+    if let Some(alias) = &paper.local.alias {
+        write_field_string(out, "alias", alias);
+    }
     out.push_str("  };\n");
 }
 
@@ -128,6 +131,14 @@ fn paper_from_fields(
     let hash = take_string_opt(&mut fields, "hash")?;
     let tags = take_string_list(&mut fields, "tags")?;
     let notes = take_string_opt(&mut fields, "notes")?;
+    let alias = take_string_opt(&mut fields, "alias")?;
+    if let Some(alias) = alias.as_deref()
+        && !is_valid_alias(alias)
+    {
+        return Err(PaxError::LibraryParse(format!(
+            "invalid alias {alias:?} in entry {citation_key:?}"
+        )));
+    }
 
     if let Some(unknown) = fields.keys().next() {
         return Err(PaxError::LibraryParse(format!(
@@ -148,6 +159,7 @@ fn paper_from_fields(
             citation_key,
             tags,
             notes,
+            alias,
         },
     })
 }
@@ -174,6 +186,7 @@ mod tests {
                     citation_key: "turing1936".to_string(),
                     tags: vec!["computability".to_string(), "logic".to_string()],
                     notes: Some("foundational".to_string()),
+                    alias: Some("P17".to_string()),
                 },
             },
             Paper {
@@ -192,6 +205,7 @@ mod tests {
                     citation_key: "anon2020".to_string(),
                     tags: vec![],
                     notes: None,
+                    alias: None,
                 },
             },
         ]
@@ -327,6 +341,51 @@ mod tests {
     fn a_quoted_valid_citation_key_loads() {
         let library = load_text("quoted-key", r#"{ "turing1936" = { title = "T"; }; }"#).unwrap();
         assert!(library.find("turing1936").is_some());
+    }
+
+    #[test]
+    fn an_alias_is_written_only_when_set() {
+        let dir =
+            std::env::temp_dir().join(format!("pax-library-test-alias-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("papers.nix");
+
+        Library::new(sample_papers()).save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("alias").count(), 1, "{text}");
+        assert!(text.contains("    alias = \"P17\";\n"));
+        let library = Library::load(&path).unwrap();
+        assert_eq!(
+            library.find("turing1936").unwrap().local.alias.as_deref(),
+            Some("P17")
+        );
+        assert_eq!(library.find("anon2020").unwrap().local.alias, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_file_without_aliases_is_written_back_unchanged() {
+        let dir =
+            std::env::temp_dir().join(format!("pax-library-test-no-alias-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("papers.nix");
+        let text = "{\n  turing1936 = {\n    doi = null;\n    title = \"T\";\n    authors = [  ];\n    year = 1936;\n    venue = null;\n    source_url = null;\n    hash = null;\n    tags = [  ];\n    notes = null;\n  };\n}\n";
+        std::fs::write(&path, text).unwrap();
+        Library::load(&path).unwrap().save(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_invalid_alias_is_a_parse_error() {
+        assert!(matches!(
+            load_text(
+                "bad-alias",
+                r#"{ turing1936 = { title = "T"; alias = "openalex:W1"; }; }"#
+            ),
+            Err(PaxError::LibraryParse(_))
+        ));
     }
 
     #[test]

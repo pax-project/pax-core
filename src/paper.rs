@@ -25,6 +25,10 @@ pub struct Local {
     pub citation_key: String,
     pub tags: Vec<String>,
     pub notes: Option<String>,
+    /// A short, user-chosen name for the paper (e.g. `P17`, a review's study
+    /// ID), accepted wherever the citation key is. Unlike the key, only the
+    /// user changes it: it survives a rename. See [`is_valid_alias`].
+    pub alias: Option<String>,
 }
 
 /// A paper declared in the local library, per the three-part shape from
@@ -35,6 +39,17 @@ pub struct Paper {
     pub identity: Identity,
     pub artifact: Artifact,
     pub local: Local,
+}
+
+/// Whether `alias` is a valid paper alias: one or more ASCII letters, digits,
+/// `_`, `.` or `-`. No `:`, since a colon is what tells a provider reference
+/// (`openalex:W…`) from a library name, and no whitespace, so an alias is
+/// safe unquoted in a shell.
+pub fn is_valid_alias(alias: &str) -> bool {
+    !alias.is_empty()
+        && alias
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }
 
 /// Extracts a year from a provider's `publish_date`, whose format varies
@@ -150,6 +165,20 @@ mod tests {
         let mut artifact = original.clone();
         apply_artifact_edits(&mut artifact, None);
         assert_eq!(artifact, original);
+    }
+
+    #[test]
+    fn valid_aliases_are_letters_digits_underscores_dots_and_hyphens() {
+        for alias in ["P17", "p_17", "R1.P3", "study-9", "17"] {
+            assert!(is_valid_alias(alias), "{alias}");
+        }
+    }
+
+    #[test]
+    fn aliases_with_colons_whitespace_or_nothing_are_invalid() {
+        for alias in ["", "openalex:W1", "P 17", "P17\n", "é1", "\"P17\""] {
+            assert!(!is_valid_alias(alias), "{alias:?}");
+        }
     }
 
     #[test]

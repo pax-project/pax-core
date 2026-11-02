@@ -357,6 +357,7 @@ pub async fn add_candidate(
             citation_key: citation_key.clone(),
             tags: Vec::new(),
             notes: None,
+            alias: None,
         },
     });
     library.save(&path)?;

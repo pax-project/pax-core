@@ -766,6 +766,7 @@ mod tests {
                 citation_key: "vaswani2017".to_string(),
                 tags: Vec::new(),
                 notes: None,
+                alias: None,
             },
         };
         let ids = SeedIds::from_paper(&paper);
