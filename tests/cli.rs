@@ -879,3 +879,75 @@ fn label_is_accepted_by_logged_searches_only() {
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("--label"), "{}", stderr(&output));
 }
+
+#[test]
+fn an_alias_names_a_paper_in_every_command_offline() {
+    let dir = library("aliases");
+    let ok = |args: &[&str]| {
+        let output = pax_offline(&dir, args);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+        stdout(&output)
+    };
+    ok(&["edit", "lamport1978", "--alias", "P17"]);
+    assert!(ok(&["list"]).contains("P17  lamport1978\n"));
+    assert!(ok(&["show", "P17"]).contains("Alias:        P17\n"));
+    assert!(!ok(&["export", "bibtex"]).contains("P17"));
+    ok(&["edit", "P17", "--notes", "via alias"]);
+
+    let excluded = ok(&[
+        "exclude",
+        "10.1000/report",
+        "--reason",
+        "not empirical",
+        "--stage",
+        "full-text",
+        "--title",
+        "A grey-literature report",
+        "--alias",
+        "P18",
+    ]);
+    assert!(excluded.contains("alias P18"), "{excluded}");
+    let shown = ok(&["show", "P18"]);
+    assert!(shown.contains("Excluded:     10.1000/report\n"), "{shown}");
+    assert!(shown.contains("Stage:        full-text\n"), "{shown}");
+
+    // A command that needs a declared paper refuses an excluded alias.
+    let output = pax_offline(&dir, &["fetch", "P18"]);
+    assert_eq!(output.status.code(), Some(5));
+    assert!(stderr(&output).contains("P18 is excluded, not in the library"));
+    // A taken alias is refused with 5, a malformed one with 2.
+    let output = pax_offline(&dir, &["edit", "P17", "--alias", "P18"]);
+    assert_eq!(output.status.code(), Some(5));
+    assert!(stderr(&output).contains("10.1000/report"));
+    let output = pax_offline(&dir, &["edit", "P17", "--alias", "P 18"]);
+    assert_eq!(output.status.code(), Some(2));
+
+    let unexcluded = ok(&["unexclude", "P18"]);
+    assert!(unexcluded.contains("Freed alias P18"), "{unexcluded}");
+    let removed = ok(&["remove", "P17"]);
+    assert!(removed.contains("Removed lamport1978\n"), "{removed}");
+    assert!(removed.contains("Freed alias P17"), "{removed}");
+}
+
+#[test]
+fn edit_clears_an_alias_with_an_empty_value() {
+    let dir = library("alias-clear");
+    assert_eq!(
+        pax(&dir, &["edit", "lamport1978", "--alias", "P17"])
+            .status
+            .code(),
+        Some(0)
+    );
+    assert_eq!(
+        pax(&dir, &["edit", "P17", "--alias", ""]).status.code(),
+        Some(0)
+    );
+    assert_eq!(pax(&dir, &["show", "P17"]).status.code(), Some(4));
+    let papers = std::fs::read_to_string(dir.join("research").join("papers.nix")).unwrap();
+    assert!(!papers.contains("alias"), "{papers}");
+}

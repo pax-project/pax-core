@@ -34,7 +34,8 @@ enum Command {
     ///List the papers one or more papers cite, from OpenAlex and Semantic Scholar
     Refs {
         /// One or more seeds: a reference from `search` (e.g.
-        /// openalex:W2072794470) or a library citation key (e.g. turing1936)
+        /// openalex:W2072794470), or a library citation key or alias (e.g.
+        /// turing1936 or P17)
         #[arg(required = true, value_name = "SEED")]
         seeds: Vec<String>,
         #[command(flatten)]
@@ -43,7 +44,8 @@ enum Command {
     ///List the papers citing one or more papers, from OpenAlex and Semantic Scholar
     CitedBy {
         /// One or more seeds: a reference from `search` (e.g.
-        /// openalex:W2072794470) or a library citation key (e.g. turing1936)
+        /// openalex:W2072794470), or a library citation key or alias (e.g.
+        /// turing1936 or P17)
         #[arg(required = true, value_name = "SEED")]
         seeds: Vec<String>,
         #[command(flatten)]
@@ -52,15 +54,18 @@ enum Command {
     ///List the papers OpenAlex and Semantic Scholar recommend as related to one or more papers
     Related {
         /// One or more seeds: a reference from `search` (e.g.
-        /// openalex:W2072794470) or a library citation key (e.g. turing1936)
+        /// openalex:W2072794470), or a library citation key or alias (e.g.
+        /// turing1936 or P17)
         #[arg(required = true, value_name = "SEED")]
         seeds: Vec<String>,
         #[command(flatten)]
         paging: PageArgs,
     },
-    ///Inspect a search result before adding it
+    ///Inspect a search result, or a declared or excluded paper
     Show {
-        /// A fully-qualified reference from `search`, e.g. openalex:W2072794470
+        /// A fully-qualified reference from `search` (e.g. openalex:W2072794470),
+        /// or a library citation key or alias (e.g. turing1936 or P17); an
+        /// excluded paper's alias shows its exclusion record
         reference: String,
     },
     ///Declare a search result in the local library
@@ -82,7 +87,7 @@ enum Command {
     },
     ///Remove a declared paper from the library
     Remove {
-        /// The paper's citation key, e.g. turing1936
+        /// The paper's citation key or alias, e.g. turing1936 or P17
         citation_key: String,
     },
     ///Exclude a paper: record it in research/excluded.nix with a reason and stage
@@ -110,16 +115,21 @@ enum Command {
         /// The screening round, e.g. R1 (free text)
         #[arg(long)]
         round: Option<String>,
+        /// A short name of your own for the paper, e.g. P18: accepted wherever
+        /// a citation key is, unique across the library and its exclusions.
+        /// Re-excluding without it clears it
+        #[arg(long)]
+        alias: Option<String>,
     },
     ///Reverse an exclusion: remove a paper's entry from research/excluded.nix
     Unexclude {
-        /// The exclusion key (as `add` names it), a DOI, or a reference from
-        /// `search`, e.g. openalex:W2072794470
+        /// The exclusion key (as `add` names it), its alias, a DOI, or a
+        /// reference from `search`, e.g. openalex:W2072794470
         reference: String,
     },
-    ///Modify a declared paper's tags, notes, citation key, or metadata
+    ///Modify a declared paper's tags, notes, citation key, alias, or metadata
     Edit {
-        /// The paper's citation key, e.g. turing1936
+        /// The paper's citation key or alias, e.g. turing1936 or P17
         citation_key: String,
         /// Add a tag (repeatable)
         #[arg(long = "add-tag")]
@@ -130,9 +140,15 @@ enum Command {
         /// Set the paper's notes
         #[arg(long)]
         notes: Option<String>,
-        /// Rename the paper's citation key
+        /// Rename the paper's citation key (its alias is kept)
         #[arg(long)]
         rename: Option<String>,
+        /// Set the paper's alias, a short name of your own such as P17,
+        /// accepted wherever its citation key is; "" clears it. Letters,
+        /// digits, `_`, `.` and `-`, unique across the library and its
+        /// exclusions
+        #[arg(long)]
+        alias: Option<String>,
         /// Correct the paper's title
         #[arg(long)]
         title: Option<String>,
@@ -157,14 +173,14 @@ enum Command {
     },
     ///Materialize a declared paper's artifact through Nix
     Fetch {
-        /// The paper's citation key, e.g. turing1936
+        /// The paper's citation key or alias, e.g. turing1936 or P17
         citation_key: String,
     },
     ///Verify declared artifacts still reproduce, without materializing them
     Check,
     ///Open a declared paper in the configured PDF viewer, fetching it first if needed
     Open {
-        /// The paper's citation key, e.g. turing1936
+        /// The paper's citation key or alias, e.g. turing1936 or P17
         citation_key: String,
     },
     ///Materialize every declared paper that isn't fetched yet
@@ -276,6 +292,13 @@ fn fail<'a>(sink: &mut impl Sink, failure: impl Into<Failure<'a>>) -> Code {
     let failure = failure.into();
     sink.error(&failure.to_string());
     exit::code(failure)
+}
+
+/// The hint `remove` and `unexclude` print when the paper had an alias.
+fn freed(alias: &str) -> String {
+    format!(
+        "Freed alias {alias}; `edit --alias {alias}` or `exclude --alias {alias}` takes it again"
+    )
 }
 
 fn open_in_viewer(sink: &mut impl Sink, path: &Path) -> Code {
@@ -437,7 +460,7 @@ async fn main() -> ExitCode {
 /// Whether `command` reads or writes the library in the current directory.
 /// A `show` reference or `refs` / `cited-by` / `related` seed with a `:` is
 /// a provider reference, which needs no library; without one it's a citation
-/// key, so one such seed among several needs the library.
+/// key or alias, so one such seed among several needs the library.
 /// `search --local` is checked after its arguments are.
 fn needs_library(command: &Command) -> bool {
     match command {
@@ -641,8 +664,13 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             Code::Success
         }
         Command::Remove { citation_key } => {
-            match pax_core::remove_paper(&citation_key, Path::new(".")) {
-                Ok(()) => sink.message(&format!("Removed {citation_key}")),
+            match pax_core::remove_paper_entry(&citation_key, Path::new(".")) {
+                Ok(paper) => {
+                    sink.message(&format!("Removed {}", paper.local.citation_key));
+                    if let Some(alias) = &paper.local.alias {
+                        sink.message(&freed(alias));
+                    }
+                }
                 Err(e) => return fail(sink, &e),
             }
             Code::Success
@@ -655,13 +683,15 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             year,
             criterion,
             round,
+            alias,
         } => {
             let stage: ExclusionStage = stage.parse().expect("clap restricts --stage");
             let options = pax_core::ExclusionOptions::new(reason, stage)
                 .with_title(title)
                 .with_year(year)
                 .with_criterion(criterion)
-                .with_round(round);
+                .with_round(round)
+                .with_alias(alias);
             match pax_core::exclude_paper_with(&reference, &options, Path::new("."), config).await {
                 Ok(exclusion) => {
                     let mut decision = exclusion.stage.to_string();
@@ -670,6 +700,9 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                     }
                     if let Some(round) = &exclusion.round {
                         decision.push_str(&format!(", round {round}"));
+                    }
+                    if let Some(alias) = &exclusion.alias {
+                        decision.push_str(&format!(", alias {alias}"));
                     }
                     sink.message(&format!(
                         "Excluded {} ({decision}): {}",
@@ -691,6 +724,9 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                         "Unexcluded {} ({}, {:?}): {}",
                         exclusion.key, exclusion.stage, exclusion.reason, exclusion.title
                     ));
+                    if let Some(alias) = &exclusion.alias {
+                        sink.message(&freed(alias));
+                    }
                     Code::Success
                 }
                 Err(e) => fail(sink, &e),
@@ -702,6 +738,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             remove_tag,
             notes,
             rename,
+            alias,
             title,
             author,
             year,
@@ -722,7 +759,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 year,
                 doi,
                 source_url,
-                alias: None,
+                alias,
             };
             match pax_core::edit_paper(&citation_key, Path::new("."), &edits) {
                 Ok(()) => sink.message(&format!("Updated {citation_key}")),

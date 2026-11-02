@@ -223,7 +223,10 @@ impl Sink for TextSink {
 
     fn papers(&mut self, papers: &[Paper]) {
         for paper in papers {
-            println!("{}", paper.local.citation_key);
+            match &paper.local.alias {
+                Some(alias) => println!("{alias}  {}", paper.local.citation_key),
+                None => println!("{}", paper.local.citation_key),
+            }
             println!("\t{}", paper.identity.title);
             if !paper.identity.authors.is_empty() {
                 println!("\t{}", paper.identity.authors.join(", "));
@@ -249,6 +252,9 @@ impl Sink for TextSink {
             paper.identity.venue.as_deref().unwrap_or("(no venue)")
         );
         println!("Citation key: {}", paper.local.citation_key);
+        if let Some(alias) = &paper.local.alias {
+            println!("Alias:        {alias}");
+        }
         println!(
             "PDF source:   {}",
             paper
