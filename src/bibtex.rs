@@ -70,6 +70,7 @@ mod tests {
                 citation_key: "agha1986".to_string(),
                 tags: vec!["concurrency".to_string(), "distributed".to_string()],
                 notes: Some("foundational paper".to_string()),
+                alias: Some("P1".to_string()),
             },
         }
     }
@@ -88,12 +89,14 @@ mod tests {
                 citation_key: "anon2020".to_string(),
                 tags: vec![],
                 notes: None,
+                alias: None,
             },
         }
     }
 
     #[test]
     fn renders_full_paper_with_all_fields() {
+        // `full_paper` has an alias, which the export leaves out.
         let bibtex = render(&[full_paper()]);
         assert_eq!(
             bibtex,
