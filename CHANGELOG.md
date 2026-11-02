@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0](https://github.com/pax-project/pax-core/compare/v2.2.0...v2.3.0) - 2026-11-02
+
+### Features
+
+- *(search-log)* label searches and count records per label in pax stats ([#60](https://github.com/pax-project/pax-core/pull/60))
+- *(exclusions)* structured criterion and round, grouped by criterion in stats ([#59](https://github.com/pax-project/pax-core/pull/59))
+
 ## [2.2.0](https://github.com/pax-project/pax-core/compare/v2.1.0...v2.2.0) - 2026-11-01
 
 ### Features
