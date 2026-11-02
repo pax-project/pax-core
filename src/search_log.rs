@@ -4,7 +4,9 @@
 //! recording what PRISMA 2020 asks a review to report (each source, the date
 //! it was searched, the full search string with its filters and limits) plus
 //! the identity key of every record retrieved, so duplicates can be counted
-//! across the whole review, not just within one command.
+//! across the whole review, not just within one command. A paper added by
+//! hand with a label (`add --label`, [`add_candidate_logged`]) appends one
+//! `manual` line too, so it counts as identified from that source.
 //!
 //! Written by the library, not a client, so every client logs the same way:
 //! the `*_logged` functions run a search and log it, and [`log_results`]
@@ -26,9 +28,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::error::PaxError;
 use crate::identity::identity_keys;
 use crate::merge::{PROVIDER_ORDER, merge_works};
+use crate::paper::PaperRef;
 use crate::provider::{
-    FilterApplication, FilterKind, Filters, Limit, ProviderError, ProviderId, SearchOptions,
-    SearchPage,
+    CandidateId, CandidateWork, FilterApplication, FilterKind, Filters, Limit, ProviderError,
+    ProviderId, SearchOptions, SearchPage,
 };
 use crate::{CitationError, CitationResults, Config, IncompleteReason, SeedResults, nix};
 
@@ -57,6 +60,11 @@ pub enum SearchCommand {
     /// The works the providers recommend as related to a seed
     /// ([`crate::related`]). Logged as `related`.
     Related,
+    /// A paper the reviewer added by hand rather than found by a search,
+    /// e.g. one from a list of seed papers they already knew
+    /// ([`add_candidate_logged`]). Its line's `label` names the source.
+    /// Logged as `manual`.
+    Manual,
 }
 
 impl SearchCommand {
@@ -83,7 +91,11 @@ pub struct SearchLogEntry {
     /// `refs` / `cited-by` / `related`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<String>,
-    /// The provider's tag, e.g. `openalex`.
+    /// The `provider:id` reference added, for `manual`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    /// The provider's tag, e.g. `openalex`; for `manual`, the provider the
+    /// added reference was resolved from.
     pub provider: String,
     /// When the search ran: ISO 8601 in UTC, to the second. Every line of one
     /// command carries the same date.
@@ -234,6 +246,7 @@ pub fn log_entries<E: fmt::Display>(
                 command,
                 query: query.clone(),
                 seed: seed.clone(),
+                reference: None,
                 provider: provider.to_string(),
                 date: date.clone(),
                 run: None,
@@ -600,6 +613,65 @@ pub async fn related_many_logged<S: AsRef<str>>(
         seed_log_entries(SearchCommand::Related, options, &results, SystemTime::now())
     });
     Logged { results, log }
+}
+
+/// The log line for adding `id` by hand under `label`: a
+/// [`SearchCommand::Manual`] line for `id`'s provider that retrieved one
+/// record, `work` (what `id` resolved to), with its identity keys.
+pub fn manual_log_entry(
+    id: &CandidateId,
+    work: &CandidateWork,
+    label: &str,
+    date: SystemTime,
+) -> SearchLogEntry {
+    let keys: Vec<String> = identity_keys(work)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    SearchLogEntry {
+        v: SEARCH_LOG_VERSION,
+        command: SearchCommand::Manual,
+        query: None,
+        seed: None,
+        reference: Some(id.to_string()),
+        provider: id.provider.to_string(),
+        date: DateTime::<Utc>::from(date).to_rfc3339_opts(SecondsFormat::Secs, true),
+        run: None,
+        label: Some(label.to_string()),
+        limit: LoggedLimit::Count(1),
+        filters: Vec::new(),
+        total: None,
+        retrieved: Some(1),
+        merge: MergeCounts {
+            before: 1,
+            after: 1,
+            unmatched: usize::from(keys.is_empty()),
+        },
+        keys: Some(vec![keys]),
+        error: None,
+        reason: None,
+    }
+}
+
+/// [`crate::add_candidate`], with the add logged in the library at `root`
+/// as a [`SearchCommand::Manual`] line labelled `label` (e.g. `seeds`), so
+/// [`crate::stats`] counts the paper as identified from that source
+/// ([`crate::Identified::other_sources`]) rather than as decided outside the
+/// log. The label only names the source: what is added is the same as
+/// without it. A refused or failed add is an error, as there, and nothing is
+/// logged; a failed log write leaves the paper added and says so in
+/// [`Logged::log`].
+pub async fn add_candidate_logged(
+    id: &CandidateId,
+    label: &str,
+    root: &Path,
+    config: &Config,
+) -> Result<Logged<PaperRef>, PaxError> {
+    let (results, work) = crate::declare_candidate(id, root, config).await?;
+    let log = append_to_library(root, || {
+        vec![manual_log_entry(id, &work, label, SystemTime::now())]
+    });
+    Ok(Logged { results, log })
 }
 
 #[cfg(test)]
@@ -979,6 +1051,68 @@ mod tests {
         let line = r#"{"v":1,"command":"search","query":"q","provider":"openalex","date":"2026-01-01T00:00:00Z","limit":50,"filters":[],"total":null,"retrieved":0,"keys":[],"merge":{"before":0,"after":0,"unmatched":0}}"#;
         let entry: SearchLogEntry = serde_json::from_str(line).unwrap();
         assert_eq!(entry.label, None);
+        assert_eq!(entry.reference, None);
+    }
+
+    #[test]
+    fn a_manual_add_logs_one_record_under_its_label() {
+        let id: CandidateId = "crossref:10.1/A".parse().unwrap();
+        let added = work(ProviderId::Crossref, "10.1/A", Some("10.1/A"), "Attention");
+        let entry = manual_log_entry(&id, &added, "seeds", date());
+        assert_eq!(entry.command, SearchCommand::Manual);
+        assert_eq!(entry.reference.as_deref(), Some("crossref:10.1/A"));
+        assert_eq!((entry.query.as_ref(), entry.seed.as_ref()), (None, None));
+        assert_eq!(entry.provider, "crossref");
+        assert_eq!(entry.label.as_deref(), Some("seeds"));
+        assert_eq!(entry.date, "2017-06-12T00:00:00Z");
+        assert_eq!(entry.retrieved, Some(1));
+        assert_eq!(
+            entry.keys,
+            Some(vec![vec![
+                "doi:10.1/a".to_string(),
+                "title:attention|2017".to_string()
+            ]])
+        );
+        assert_eq!(
+            entry.merge,
+            MergeCounts {
+                before: 1,
+                after: 1,
+                unmatched: 0
+            }
+        );
+        let line = serde_json::to_string(&entry).unwrap();
+        assert!(line.contains(r#""command":"manual""#), "{line}");
+        assert!(line.contains(r#""reference":"crossref:10.1/A""#), "{line}");
+        assert_eq!(
+            serde_json::from_str::<SearchLogEntry>(&line).unwrap(),
+            entry
+        );
+
+        let keyless = work(ProviderId::OpenAlex, "W1", None, "");
+        let id: CandidateId = "openalex:W1".parse().unwrap();
+        let entry = manual_log_entry(&id, &keyless, "seeds", date());
+        assert_eq!(entry.keys, Some(vec![vec![]]));
+        assert_eq!(entry.merge.unmatched, 1);
+    }
+
+    #[test]
+    fn a_manual_add_appends_one_line_with_a_run_id() {
+        let root = scratch_library("manual");
+        let id: CandidateId = "crossref:10.1/A".parse().unwrap();
+        let added = work(ProviderId::Crossref, "10.1/A", Some("10.1/A"), "Attention");
+        let outcome = append_to_library(&root, || {
+            vec![manual_log_entry(&id, &added, "seeds", date())]
+        });
+        assert!(matches!(outcome, LogOutcome::Written(_)));
+        let text = std::fs::read_to_string(search_log_path(&root)).unwrap();
+        let lines: Vec<SearchLogEntry> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].run.is_some());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn scratch_library(name: &str) -> PathBuf {
