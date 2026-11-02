@@ -1146,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "pax-core-papers"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "arxiv-tools",
  "chrono",
