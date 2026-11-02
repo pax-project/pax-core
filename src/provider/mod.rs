@@ -2,6 +2,7 @@ mod arxiv;
 mod crossref;
 mod filter;
 mod openalex;
+mod pacing;
 mod semantic_scholar;
 
 pub use arxiv::ArxivProvider;
