@@ -97,6 +97,7 @@ pub fn code(failure: Failure<'_>) -> Code {
             PaxError::InvalidReference(_)
             | PaxError::InvalidExclusionReference(_)
             | PaxError::InvalidCitationKey(_)
+            | PaxError::InvalidAlias(_)
             | PaxError::NoChangesSpecified
             | PaxError::MissingExclusionReason => Code::Usage,
             PaxError::NotFound(_)
@@ -106,6 +107,7 @@ pub fn code(failure: Failure<'_>) -> Code {
             PaxError::CitationKeyExists(_)
             | PaxError::ExcludingDeclaredPaper(..)
             | PaxError::ExcludedNotDeclared { .. }
+            | PaxError::NameTaken { .. }
             | PaxError::AlreadyDeclared { .. }
             | PaxError::AlreadyExcluded { .. }
             | PaxError::NoSourceUrl(_) => Code::Refused,
@@ -265,6 +267,7 @@ mod tests {
         let bad_ref = "nope".parse::<pax_core::CandidateId>().unwrap_err();
         assert_eq!(pax(PaxError::InvalidReference(bad_ref)), Code::Usage);
         assert_eq!(pax(PaxError::NoChangesSpecified), Code::Usage);
+        assert_eq!(pax(PaxError::InvalidAlias("P 1".into())), Code::Usage);
         assert_eq!(code(Failure::Usage("specify one")), Code::Usage);
     }
 
@@ -428,6 +431,13 @@ mod tests {
             pax(PaxError::ExcludedNotDeclared {
                 name: "P18".into(),
                 key: "10.1/x".into(),
+            }),
+            Code::Refused
+        );
+        assert_eq!(
+            pax(PaxError::NameTaken {
+                name: "P17".into(),
+                holder: pax_core::NameHolder::Declared("a2020".into()),
             }),
             Code::Refused
         );

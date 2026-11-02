@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 use crate::exclusions::ExclusionStage;
+use crate::names::NameHolder;
 use crate::provider::{CandidateIdParseError, ProviderError};
 
 #[derive(Debug, Error)]
@@ -27,7 +28,7 @@ pub enum PaxError {
     #[error("{name} is excluded, not in the library (excluded as {key})")]
     ExcludedNotDeclared { name: String, key: String },
     #[error(
-        "nothing to edit: specify --add-tag, --remove-tag, --notes, --rename, --title, \
+        "nothing to edit: specify --add-tag, --remove-tag, --notes, --rename, --alias, --title, \
          --author, --year, and/or --doi"
     )]
     NoChangesSpecified,
@@ -46,6 +47,15 @@ pub enum PaxError {
          contain only letters, digits, underscores, and hyphens)"
     )]
     InvalidCitationKey(String),
+    #[error(
+        "{0:?} is not a valid alias (use only letters, digits, underscores, dots, and hyphens)"
+    )]
+    InvalidAlias(String),
+    /// `name` can't be given to a paper as an alias or citation key: another
+    /// paper, `holder`, already has it as one. Citation keys and aliases in
+    /// `papers.nix` and `excluded.nix` are one namespace.
+    #[error("{name:?} is already taken by {holder}")]
+    NameTaken { name: String, holder: NameHolder },
     #[error("an exclusion needs a non-empty reason")]
     MissingExclusionReason,
     #[error("{0:?} is neither a DOI nor a provider:id reference")]

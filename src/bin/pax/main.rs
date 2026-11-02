@@ -722,6 +722,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 year,
                 doi,
                 source_url,
+                alias: None,
             };
             match pax_core::edit_paper(&citation_key, Path::new("."), &edits) {
                 Ok(()) => sink.message(&format!("Updated {citation_key}")),
