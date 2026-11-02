@@ -94,6 +94,7 @@ impl SemanticScholarProvider {
 
         let filters = &options.filters;
         let post_filtered = filters.years.is_some() || filters.doc_type.is_some();
+        let fields = list_fields(options);
         let page = collect_pages(
             options,
             MAX_CITATION_PAGE_SIZE,
@@ -101,11 +102,12 @@ impl SemanticScholarProvider {
             post_filtered,
             |offset, limit| {
                 let path = format!("/paper/{}/{}", seed.paper_id, list.endpoint());
+                let fields = &fields;
                 async move {
                     let query = [
                         ("offset", offset.to_string()),
                         ("limit", limit.to_string()),
-                        ("fields", PAPER_FIELDS.to_string()),
+                        ("fields", fields.clone()),
                     ];
                     let response: ListResponse = self.get_json(GRAPH_API, &path, &query).await?;
                     let entries = response.data.ok_or_else(|| withheld(list))?;
@@ -160,7 +162,7 @@ impl SemanticScholarProvider {
         let query = [
             ("from", RECOMMENDATION_POOL.to_string()),
             ("limit", limit.to_string()),
-            ("fields", PAPER_FIELDS.to_string()),
+            ("fields", list_fields(options)),
         ];
         let response: RecommendationsResponse =
             self.get_json(RECOMMENDATIONS_API, &path, &query).await?;
@@ -326,9 +328,10 @@ const MAX_CITATION_PAGE_SIZE: usize = 1000;
 /// The reference and citation endpoints require `offset + limit < 10000`.
 const MAX_CITATIONS_RETRIEVABLE: u64 = 9_999;
 
-/// Every field `CandidateWork` reads (but the abstract, which only `get`
-/// asks for), plus what post-retrieval filters need. Without it the client
-/// asks for its own defaults, which leave out the DOI, date, venue and PDF.
+/// Every field `CandidateWork` reads (but the abstract, which `get` always
+/// asks for and the lists only with [`SearchOptions::abstracts`]), plus what
+/// post-retrieval filters need. Without it the client asks for its own
+/// defaults, which leave out the DOI, date, venue and PDF.
 const PAPER_FIELDS: &str =
     "paperId,title,authors,year,publicationDate,externalIds,venue,openAccessPdf,publicationTypes";
 
@@ -340,6 +343,18 @@ fn withheld(list: CitationList) -> ProviderError {
             "Semantic Scholar withholds this paper's {} at the publisher's request",
             list.endpoint()
         ),
+    }
+}
+
+const ABSTRACT_FIELD: &str = "abstract";
+
+/// The `fields` a search, citation-list or recommendations request asks for:
+/// [`PAPER_FIELDS`], plus the abstract when `options` asks for abstracts.
+fn list_fields(options: &SearchOptions) -> String {
+    if options.abstracts {
+        format!("{PAPER_FIELDS},{ABSTRACT_FIELD}")
+    } else {
+        PAPER_FIELDS.to_string()
     }
 }
 
@@ -410,6 +425,7 @@ impl Provider for SemanticScholarProvider {
     ) -> Result<SearchPage, ProviderError> {
         let years = options.filters.years.map(|years| years.to_string());
         let publication_type = options.filters.doc_type.and_then(publication_type);
+        let fields = list_fields(options);
         let page = collect_pages(
             options,
             MAX_PAGE_SIZE,
@@ -421,7 +437,7 @@ impl Provider for SemanticScholarProvider {
                     .search_papers(query)
                     .offset(offset as u32)
                     .limit(limit as u32)
-                    .fields(PAPER_FIELDS);
+                    .fields(&fields);
                 if let Some(years) = &years {
                     request = request.year(years);
                 }
@@ -446,7 +462,7 @@ impl Provider for SemanticScholarProvider {
         let paper = self
             .client
             .get_paper(native_id)
-            .fields(&format!("{PAPER_FIELDS},abstract"))
+            .fields(&format!("{PAPER_FIELDS},{ABSTRACT_FIELD}"))
             .send()
             .await
             .map_err(paper_error)?;
@@ -736,6 +752,24 @@ mod tests {
         // Search, lookup and the citation lists all request PAPER_FIELDS;
         // without externalIds there's no DOI and no arXiv PDF.
         assert!(PAPER_FIELDS.split(',').any(|field| field == "externalIds"));
+    }
+
+    #[test]
+    fn lists_ask_for_the_abstract_only_when_asked_to() {
+        assert_eq!(list_fields(&SearchOptions::default()), PAPER_FIELDS);
+        let with = list_fields(&SearchOptions::default().with_abstracts(true));
+        assert_eq!(with, format!("{PAPER_FIELDS},abstract"));
+    }
+
+    #[test]
+    fn a_list_entry_keeps_its_abstract() {
+        let body = r#"{"data": [{"citingPaper": {
+            "paperId": "abc", "title": "Citing", "abstract": "We cite it."
+        }}]}"#;
+        let response: ListResponse = serde_json::from_str(body).unwrap();
+        let paper = response.data.unwrap().into_iter().next().unwrap();
+        let work = CandidateWork::from(paper.into_paper().unwrap());
+        assert_eq!(work.abstract_text.as_deref(), Some("We cite it."));
     }
 
     #[test]

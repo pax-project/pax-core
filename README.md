@@ -111,7 +111,7 @@ pax cited-by vaswani2017 --year 2023- --type journal-article
 
 The paper can be any `provider:id` reference from `search`, or the citation key of a paper in your library. pax looks it up in each provider by that provider's own id when it has one, otherwise by DOI, otherwise by arXiv id (for a library paper without a DOI, read from an arxiv.org source URL); a provider it can't be found in says so, and the other still answers.
 
-Like `search`, each provider reports its `retrieved N of M` count, then the two lists are merged into one, with the same `merged: X → Y (Z duplicates, U unmatched)` line and one row per paper listing every provider's reference. Papers already in your library are marked `[in library]`, and excluded ones `[excluded]` (see [Excluding papers](#excluding-papers)). They take the same `--limit`, `--all`, `--year`, `--type`, `--lang` and `--label` flags. OpenAlex applies the filters server-side; Semantic Scholar's citation lists take no filters, so year and type are applied there after retrieval, and language not at all. Semantic Scholar serves at most 9,999 entries of a list, and skips references it couldn't match to a paper.
+Like `search`, each provider reports its `retrieved N of M` count, then the two lists are merged into one, with the same `merged: X → Y (Z duplicates, U unmatched)` line and one row per paper listing every provider's reference. Papers already in your library are marked `[in library]`, and excluded ones `[excluded]` (see [Excluding papers](#excluding-papers)). They take the same `--limit`, `--all`, `--year`, `--type`, `--lang`, `--label` and `--with-abstracts` flags. OpenAlex applies the filters server-side; Semantic Scholar's citation lists take no filters, so year and type are applied there after retrieval, and language not at all. Semantic Scholar serves at most 9,999 entries of a list, and skips references it couldn't match to a paper.
 
 A list that isn't the paper's whole list says why, next to that provider's count, so a review never mistakes a partial list for a complete one (and knows to fall back to the paper's own bibliography):
 
@@ -162,6 +162,17 @@ Both come from the providers' current state, so the same paper gives the same li
 `related` takes seeds, flags, and multi-seed behaviour like `refs` and `cited-by` (see [Several seeds](#several-seeds)). Seeds are resolved the same way, results are merged and flagged `[in library]` / `[excluded]`, and each run is [logged](#search-log) with command `related`. Each seed's recommendations are fetched separately, so every row can name the seeds it came from. Semantic Scholar's multi-paper endpoint returns one list for the whole set, which can't be split by seed, so pax doesn't use it.
 
 Neither provider says how many related papers there are, so each count reads `retrieved N (total not reported)`. A related list is never shown as complete, and isn't marked `truncated`, since no total was cut short. A provider that returned no list is marked `failed` or `unresolved` as in `refs`, and exit codes follow the same rules. In `pax stats`, related-works records get their own box (see [PRISMA counts](#prisma-counts)). In the library, `pax_core::related` / `related_many` (and `related_logged` / `related_many_logged`) return the same `CitationResults` / `SeedResults` as `references`.
+
+### Abstracts
+
+Title-and-abstract screening reads the abstract, so `search` (a query or `--author`), `refs`, `cited-by` and `related` can print it under each result instead of a `pax show` per candidate:
+
+```Bash
+pax search "actor model" --with-abstracts
+pax cited-by vaswani2017 --year 2023- --with-abstracts
+```
+
+Each row's abstract is wrapped, labelled `Abstract:`, and is the first one any of its records has, taking providers in the order OpenAlex, Crossref, Semantic Scholar, arXiv; a row none of them has one for says `(no abstract)`. OpenAlex, Crossref and arXiv return abstracts anyway; Semantic Scholar only sends them when asked, so `--with-abstracts` adds them to its requests, which makes its responses several times larger (mind its unauthenticated rate limit). Crossref's abstracts come as JATS XML; pax strips the markup to plain text, in `pax show` too. Without the flag, requests and output are as before.
 
 ### Search log
 

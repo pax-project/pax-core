@@ -49,16 +49,22 @@ pub struct SearchOptions {
     /// every search-log line the `*_logged` functions write. Metadata for
     /// the log only: it never changes what is searched.
     pub label: Option<String>,
+    /// Ask for each result's abstract where a provider leaves it out by
+    /// default: Semantic Scholar, whose search, citation and related-works lists
+    /// then request it. OpenAlex, Crossref and arXiv return abstracts either way.
+    /// Off by default, since abstracts make responses several times larger.
+    pub abstracts: bool,
 }
 
 impl Default for SearchOptions {
-    /// The same [`SEARCH_RESULT_LIMIT`] the unpaged `search` always used, and
-    /// no filters.
+    /// The same [`SEARCH_RESULT_LIMIT`] the unpaged `search` always used, no
+    /// filters, and no abstracts asked for.
     fn default() -> Self {
         SearchOptions {
             limit: Limit::Count(SEARCH_RESULT_LIMIT),
             filters: Filters::default(),
             label: None,
+            abstracts: false,
         }
     }
 }
@@ -77,6 +83,12 @@ impl SearchOptions {
     /// Labels the search in the log; see [`SearchOptions::label`].
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// See [`SearchOptions::abstracts`].
+    pub fn with_abstracts(mut self, abstracts: bool) -> Self {
+        self.abstracts = abstracts;
         self
     }
 }

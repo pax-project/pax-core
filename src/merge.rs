@@ -59,6 +59,25 @@ impl MergedWork {
         }
         providers
     }
+
+    /// The group's abstract: the first non-empty one among its records,
+    /// taking providers in [`PROVIDER_ORDER`] (and records of one provider
+    /// representative first) — not necessarily the representative's own,
+    /// which may have none.
+    pub fn abstract_text(&self) -> Option<&str> {
+        let rank = |work: &CandidateWork| {
+            PROVIDER_ORDER
+                .iter()
+                .position(|provider| *provider == work.id.provider)
+                .unwrap_or(PROVIDER_ORDER.len())
+        };
+        let mut records: Vec<&CandidateWork> = self.records().collect();
+        records.sort_by_key(|work| rank(work));
+        records
+            .into_iter()
+            .filter_map(|work| work.abstract_text.as_deref())
+            .find(|text| !text.trim().is_empty())
+    }
 }
 
 /// The outcome of a merge: one [`MergedWork`] per distinct paper, plus counts.
@@ -346,6 +365,38 @@ mod tests {
             report.works[0].providers(),
             [ProviderId::OpenAlex, ProviderId::ArXiv]
         );
+    }
+
+    #[test]
+    fn the_abstract_is_the_first_non_empty_one_in_provider_order() {
+        let mut published = work(ProviderId::SemanticScholar, "s1", "A Study", Some("10.1/a"));
+        published.venue = Some("Journal".into());
+        published.abstract_text = Some("From Semantic Scholar.".into());
+        let mut preprint = work(ProviderId::ArXiv, "2001.00001", "A Study", Some("10.1/a"));
+        preprint.abstract_text = Some("From arXiv.".into());
+        let mut blank = work(ProviderId::Crossref, "10.1/a", "A Study", Some("10.1/a"));
+        blank.abstract_text = Some("  ".into());
+        let none = work(ProviderId::OpenAlex, "W1", "A Study", Some("10.1/a"));
+
+        let report = merge_works([preprint.clone(), published.clone(), blank, none]);
+        assert_eq!(report.after, 1);
+        assert_eq!(
+            report.works[0].abstract_text(),
+            Some("From Semantic Scholar.")
+        );
+
+        // Even when a later provider's record represents the group.
+        let mut openalex = work(ProviderId::OpenAlex, "W1", "A Study", Some("10.1/a"));
+        openalex.abstract_text = Some("From OpenAlex.".into());
+        let report = merge_works([published, openalex, preprint]);
+        assert_eq!(
+            report.works[0].work.id.provider,
+            ProviderId::SemanticScholar
+        );
+        assert_eq!(report.works[0].abstract_text(), Some("From OpenAlex."));
+
+        let bare = merge_works([work(ProviderId::OpenAlex, "W2", "Other", None)]);
+        assert_eq!(bare.works[0].abstract_text(), None);
     }
 
     #[test]

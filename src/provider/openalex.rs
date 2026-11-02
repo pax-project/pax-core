@@ -101,7 +101,9 @@ impl OpenAlexProvider {
 
     /// Pages through `list_works` for `params` (a search or filter with no
     /// paging set yet), adding `options.filters` to its `filter` expression.
-    /// OpenAlex filters on every supported criterion server-side.
+    /// OpenAlex filters on every supported criterion server-side. No `select`
+    /// is set, so every work comes with its abstract whatever
+    /// [`SearchOptions::abstracts`] says.
     async fn list_works_page(
         &self,
         mut params: ListParams,
@@ -396,6 +398,25 @@ mod tests {
             CandidateWork::from(work).pdf_url.as_deref(),
             Some("https://arxiv.org/pdf/1703.06870")
         );
+    }
+
+    #[test]
+    fn a_listed_work_keeps_its_abstract() {
+        // List requests set no `select`, so `abstract_inverted_index` comes
+        // back in search and citation pages, not just `get`.
+        let work: papers_openalex::Work = serde_json::from_str(
+            r#"{
+                "id": "https://openalex.org/W4",
+                "abstract_inverted_index": {"Actors": [0], "send": [1], "messages.": [2]}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            CandidateWork::from(work).abstract_text.as_deref(),
+            Some("Actors send messages.")
+        );
+        let params = ListParams::builder().search("actors".to_string()).build();
+        assert!(params.select.is_none());
     }
 
     #[test]
