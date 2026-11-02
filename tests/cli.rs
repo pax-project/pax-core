@@ -63,6 +63,23 @@ fn success_exits_0_with_results_on_stdout() {
 }
 
 #[test]
+fn a_closed_stdout_exits_0_quietly() {
+    let dir = library("closed-stdout");
+    // The read end is closed before pax starts, so its first write fails
+    // with EPIPE, as when `pax list | head` stops reading.
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let output = Command::new(env!("CARGO_BIN_EXE_pax"))
+        .arg("list")
+        .current_dir(&dir)
+        .stdout(writer)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(stderr(&output).is_empty());
+}
+
+#[test]
 fn wrong_arguments_exit_2() {
     let dir = scratch("usage");
     assert_eq!(pax(&dir, &["no-such-command"]).status.code(), Some(2));
