@@ -39,8 +39,7 @@ pub struct Stats {
     /// full text (a declared paper can't be excluded, so a full-text
     /// exclusion passed screening first).
     pub reports_sought: usize,
-    /// Declared papers with no fetchable artifact: no `source_url` or no
-    /// `hash` recorded.
+    /// Declared papers with no artifact: no `hash` recorded.
     pub not_retrieved: usize,
     /// Papers read in full: `reports_sought - not_retrieved`.
     pub reports_assessed: usize,
@@ -48,8 +47,9 @@ pub struct Stats {
     pub excluded_full_text: FullTextExclusions,
     /// Papers excluded at each stage, by the protocol's criterion.
     pub excluded_by_criterion: CriterionExclusions,
-    /// Declared papers with a fetchable artifact. A declared paper without
-    /// one is only counted in `not_retrieved`.
+    /// Declared papers with an artifact: a `hash`, fetched from a URL or
+    /// added from a local file. A declared paper without one is only
+    /// counted in `not_retrieved`.
     pub included: usize,
     /// Log lines where the provider failed, so retrieved no records; they
     /// count nowhere else.
@@ -161,10 +161,12 @@ pub struct ReasonCount {
 /// - **excluded at screening / full text**: `excluded.nix` entries by
 ///   `stage`, the full-text ones grouped by `reason`, and both grouped by
 ///   `criterion` (`excluded_by_criterion`).
-/// - **not retrieved**: declared papers with no `source_url` or no `hash` —
-///   those `check_library` reports as not fetched. Decided from
-///   `papers.nix` alone, with no network: a recorded artifact whose source
-///   has since gone away isn't counted (that's `check_library`'s job).
+/// - **not retrieved**: declared papers with no `hash` — those
+///   `check_library` reports as not fetched. A paper with a hash and no
+///   `source_url` was added from a local file ([`crate::fetch_file`]) and is
+///   retrieved. Decided from `papers.nix` alone, with no network: a recorded
+///   artifact whose source has since gone away isn't counted (that's
+///   `check_library`'s job).
 /// - **reports sought**: the papers that passed screening — declared, or
 ///   excluded at full text. **Assessed**: reports sought minus those not
 ///   retrieved (never below zero).
@@ -180,8 +182,9 @@ pub struct ReasonCount {
 ///   in the order labels first appear, the records identified, the distinct
 ///   papers among them, and how many of those no earlier label identified;
 ///   that last count sums to `records_screened` over every label.
-/// - **included**: the declared papers with a fetchable artifact, so a paper
-///   is never both included and not retrieved.
+/// - **included**: the declared papers with a recorded artifact (a `hash`,
+///   whether fetched from a URL or added from a local file), so a paper is
+///   never both included and not retrieved.
 ///
 /// The boxes balance, as a PRISMA diagram's must, when every declared or
 /// excluded paper was found by a logged search (`decided_outside_log` is
@@ -301,7 +304,7 @@ pub fn stats(root: &Path) -> Result<Stats, PaxError> {
     let (retrieved, not_retrieved): (Vec<_>, Vec<_>) = library
         .papers()
         .iter()
-        .partition(|paper| paper.artifact.source_url.is_some() && paper.artifact.hash.is_some());
+        .partition(|paper| paper.artifact.hash.is_some());
     stats.included = retrieved.len();
     stats.not_retrieved = not_retrieved.len();
     stats.reports_sought = library.papers().len() + stats.excluded_full_text.total;
@@ -831,6 +834,16 @@ mod tests {
     tags = [ ];
     notes = null;
   };
+  localfile2003 = {
+    doi = null;
+    title = "Added from a local file";
+    authors = [ ];
+    year = 2003;
+    source_url = null;
+    hash = "sha256-BBBB";
+    tags = [ ];
+    notes = null;
+  };
 }
 "#,
         )
@@ -865,7 +878,8 @@ mod tests {
                 full_text: vec![none(3)],
             }
         );
-        assert_eq!(stats.included, 1);
+        // A local artifact (a hash, no source_url) is retrieved.
+        assert_eq!(stats.included, 2);
         assert_eq!(stats.not_retrieved, 2);
         // No log: nothing identified.
         assert_eq!(stats.identified, Identified::default());
