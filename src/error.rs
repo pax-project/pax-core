@@ -20,8 +20,12 @@ pub enum PaxError {
     InvalidReference(#[from] CandidateIdParseError),
     #[error("no paper found for {0:?}: not declared locally, and not a valid candidate reference")]
     NotFound(String),
-    #[error("no paper found with citation key {0:?}")]
+    #[error("no paper found with citation key or alias {0:?}")]
     NoSuchPaper(String),
+    /// `name` is the alias of an excluded paper (exclusion key `key`), given
+    /// to a command that needs a declared one.
+    #[error("{name} is excluded, not in the library (excluded as {key})")]
+    ExcludedNotDeclared { name: String, key: String },
     #[error(
         "nothing to edit: specify --add-tag, --remove-tag, --notes, --rename, --title, \
          --author, --year, and/or --doi"

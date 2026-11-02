@@ -183,6 +183,13 @@ impl Exclusions {
         self.entries.iter().find(|e| e.key == key)
     }
 
+    /// The entry whose alias is `alias`, if any.
+    pub fn find_alias(&self, alias: &str) -> Option<&Exclusion> {
+        self.entries
+            .iter()
+            .find(|e| e.alias.as_deref() == Some(alias))
+    }
+
     /// Adds `exclusion`, replacing any existing entry with the same key —
     /// re-excluding a paper updates its reason and stage.
     pub fn upsert(&mut self, exclusion: Exclusion) {

@@ -105,6 +105,7 @@ pub fn code(failure: Failure<'_>) -> Code {
             | PaxError::ExclusionTitleUnresolved(..) => Code::NotFound,
             PaxError::CitationKeyExists(_)
             | PaxError::ExcludingDeclaredPaper(..)
+            | PaxError::ExcludedNotDeclared { .. }
             | PaxError::AlreadyDeclared { .. }
             | PaxError::AlreadyExcluded { .. }
             | PaxError::NoSourceUrl(_) => Code::Refused,
@@ -421,6 +422,13 @@ mod tests {
         );
         assert_eq!(
             pax(PaxError::CitationKeyExists("a2020".into())),
+            Code::Refused
+        );
+        assert_eq!(
+            pax(PaxError::ExcludedNotDeclared {
+                name: "P18".into(),
+                key: "10.1/x".into(),
+            }),
             Code::Refused
         );
         assert_eq!(

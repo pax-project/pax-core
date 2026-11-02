@@ -10,8 +10,10 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::error::PaxError;
+use crate::exclusions::Exclusions;
 use crate::library::Library;
 use crate::merge::MergedWork;
+use crate::names::{self, Named};
 use crate::paper::Paper;
 use crate::provider::{
     CandidateId, OpenAlexProvider, ProviderError, ProviderId, SearchOptions, SearchPage,
@@ -153,11 +155,12 @@ pub const CITATION_PROVIDERS: [ProviderId; 2] = [ProviderId::OpenAlex, ProviderI
 
 /// The works `seed` cites, per provider, paged up to `options.limit` with
 /// `options.filters` applied. `seed` is a `provider:id` reference (any
-/// provider) or the citation key of a paper in the library at `root`; it's
-/// resolved to each provider's own id, via its DOI or arXiv id when needed.
+/// provider) or a library name in the library at `root`: a declared paper's
+/// citation key or alias, or an excluded paper's alias. It's resolved to
+/// each provider's own id, via its DOI or arXiv id when needed.
 ///
 /// Errors only when `seed` itself is invalid: a malformed reference, or a
-/// citation key not in the library.
+/// name not in the library.
 pub async fn references(
     seed: &str,
     options: &SearchOptions,
@@ -539,22 +542,33 @@ struct SeedIds {
 }
 
 impl SeedIds {
-    /// Reads `seed` as a citation key when it has no `:` (a citation key
-    /// never does — see `show_reference`), and as a `provider:id` reference
-    /// otherwise. A reference from one provider is fetched to learn its DOI,
-    /// so the other provider can look it up; if that fetch fails, the other
-    /// provider just reports the seed as unresolvable.
+    /// Reads `seed` as a library name when it has no `:` (a citation key or
+    /// alias never has one — see `show_reference`), and as a `provider:id`
+    /// reference otherwise. An excluded paper's alias resolves through its
+    /// exclusion key, a DOI or a `provider:id`. A reference from one provider
+    /// is fetched to learn its DOI, so the other provider can look it up; if
+    /// that fetch fails, the other provider just reports the seed as
+    /// unresolvable.
     async fn resolve(seed: &str, root: &Path, config: &Config) -> Result<Self, PaxError> {
-        if !seed.contains(':') {
+        let reference = if seed.contains(':') {
+            seed.to_string()
+        } else {
             let library = Library::load(&nix::papers_path(root))
                 .map_err(|_| PaxError::NoSuchPaper(seed.to_string()))?;
-            let paper = library
-                .find(seed)
-                .ok_or_else(|| PaxError::NoSuchPaper(seed.to_string()))?;
-            return Ok(Self::from_paper(paper));
-        }
+            let exclusions = Exclusions::load(&nix::excluded_path(root))?;
+            match names::lookup(seed, &library, &exclusions) {
+                Some(Named::Declared(paper)) => return Ok(Self::from_paper(paper)),
+                // An excluded paper's alias: its exclusion key is a DOI or a
+                // `provider:id` reference, resolved like one given directly.
+                Some(Named::Excluded(exclusion)) if exclusion.key.starts_with("10.") => {
+                    return Ok(Self::from_doi(Some(&exclusion.key)));
+                }
+                Some(Named::Excluded(exclusion)) => exclusion.key.clone(),
+                None => return Err(PaxError::NoSuchPaper(seed.to_string())),
+            }
+        };
 
-        let id: CandidateId = seed.parse()?;
+        let id: CandidateId = reference.parse()?;
         let mut ids = match id.provider {
             ProviderId::Crossref => return Ok(Self::from_doi(Some(&id.native_id))),
             ProviderId::OpenAlex => SeedIds {
@@ -1071,6 +1085,50 @@ mod tests {
             Err(PaxError::NoSuchPaper(_))
         ));
         assert_eq!(results.seeds[2].same_as, Some(0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn aliases_resolve_as_seeds_declared_and_excluded() {
+        let root = std::env::temp_dir().join(format!("pax-alias-seeds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        nix::init_library(&root).unwrap();
+        std::fs::write(
+            nix::papers_path(&root),
+            r#"{
+  dijkstra1968 = {
+    doi = "10.1145/363095.363143";
+    title = "Go To Statement Considered Harmful";
+    authors = [ ];
+    alias = "P17";
+  };
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            nix::excluded_path(&root),
+            r#"{
+  "10.1/abc" = { title = "T"; reason = "R"; stage = "screening"; alias = "P18"; };
+}
+"#,
+        )
+        .unwrap();
+        let config = Config::default();
+        let resolve = |seed: &'static str| {
+            let future = std::pin::pin!(SeedIds::resolve(seed, &root, &config));
+            match future.poll(&mut std::task::Context::from_waker(std::task::Waker::noop())) {
+                std::task::Poll::Ready(result) => result,
+                std::task::Poll::Pending => panic!("{seed}: a library name needs no network"),
+            }
+        };
+        assert_eq!(
+            resolve("P17").unwrap().doi.as_deref(),
+            Some("10.1145/363095.363143")
+        );
+        assert_eq!(resolve("P18").unwrap().doi.as_deref(), Some("10.1/abc"));
+        assert!(matches!(resolve("P19"), Err(PaxError::NoSuchPaper(_))));
         let _ = std::fs::remove_dir_all(&root);
     }
 

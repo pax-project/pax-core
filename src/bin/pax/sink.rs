@@ -7,8 +7,9 @@
 //! stdout (`pax search … > results.txt`) captures the results alone.
 
 use pax_core::{
-    CandidateWork, CheckReport, CheckStatus, FetchOutcome, FilterApplication, IncompleteReason,
-    LabelCounts, LibraryIndex, MergeReport, Paper, ProviderId, SearchPage, SeedMergeReport, Stats,
+    CandidateWork, CheckReport, CheckStatus, Exclusion, FetchOutcome, FilterApplication,
+    IncompleteReason, LabelCounts, LibraryIndex, MergeReport, Paper, ProviderId, SearchPage,
+    SeedMergeReport, Stats,
 };
 
 pub trait Sink {
@@ -68,6 +69,8 @@ pub trait Sink {
     fn candidate(&mut self, candidate: &CandidateWork);
     fn papers(&mut self, papers: &[Paper]);
     fn paper(&mut self, paper: &Paper);
+    /// An excluded paper's record, for `show` given its alias.
+    fn exclusion(&mut self, exclusion: &Exclusion);
     fn export(&mut self, bibtex: &str);
     fn fetched(&mut self, citation_key: &str, outcome: &FetchOutcome);
     fn checked(&mut self, reports: &[CheckReport]);
@@ -267,6 +270,25 @@ impl Sink for TextSink {
         }
         if let Some(notes) = &paper.local.notes {
             println!("Notes:        {}", notes);
+        }
+    }
+
+    fn exclusion(&mut self, exclusion: &Exclusion) {
+        println!("Excluded:     {}", exclusion.key);
+        println!("Title:        {}", exclusion.title);
+        if let Some(year) = exclusion.year {
+            println!("Year:         {year}");
+        }
+        println!("Stage:        {}", exclusion.stage);
+        println!("Reason:       {}", exclusion.reason);
+        if let Some(criterion) = &exclusion.criterion {
+            println!("Criterion:    {criterion}");
+        }
+        if let Some(round) = &exclusion.round {
+            println!("Round:        {round}");
+        }
+        if let Some(alias) = &exclusion.alias {
+            println!("Alias:        {alias}");
         }
     }
 

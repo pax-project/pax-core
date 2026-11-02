@@ -604,6 +604,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
         Command::Show { reference } => {
             match pax_core::show_reference(&reference, Path::new("."), config).await {
                 Ok(pax_core::ShowResult::Declared(paper)) => sink.paper(&paper),
+                Ok(pax_core::ShowResult::Excluded(exclusion)) => sink.exclusion(&exclusion),
                 Ok(pax_core::ShowResult::Candidate(work)) => sink.candidate(&work),
                 Err(e) => return fail(sink, &e),
             }

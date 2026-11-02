@@ -47,6 +47,13 @@ impl Library {
             .find(|p| p.local.citation_key == citation_key)
     }
 
+    /// The declared paper whose alias is `alias`, if any.
+    pub fn find_alias(&self, alias: &str) -> Option<&Paper> {
+        self.papers
+            .iter()
+            .find(|p| p.local.alias.as_deref() == Some(alias))
+    }
+
     pub fn find_mut(&mut self, citation_key: &str) -> Option<&mut Paper> {
         self.papers
             .iter_mut()

@@ -13,6 +13,7 @@ pub mod identity;
 pub mod library;
 pub mod library_index;
 pub mod merge;
+mod names;
 pub mod nix;
 mod nix_attrs;
 pub mod paper;
@@ -1423,32 +1424,38 @@ mod local_filter_tests {
     }
 }
 
-/// The result of resolving a `show` reference: either a paper already
-/// declared in the local library, or an unresolved candidate from a
-/// provider.
+/// The result of resolving a `show` reference: a paper already declared in
+/// the local library, a paper excluded in `excluded.nix`, or an unresolved
+/// candidate from a provider.
 pub enum ShowResult {
     Declared(Paper),
+    /// An excluded paper, named by its alias.
+    Excluded(Exclusion),
     Candidate(CandidateWork),
 }
 
 /// Resolves a `show` reference. A `CandidateId` always contains `:`
-/// (`provider:native_id`); a citation key, by construction of
-/// `citation_key::generate`, never does — so the colon's presence decides
-/// which address space `reference` belongs to before either lookup is
-/// attempted, rather than trying one and falling back to the other.
+/// (`provider:native_id`); a library name — a citation key (by construction
+/// of `citation_key::generate`) or an alias ([`paper::is_valid_alias`]) —
+/// never does, so the colon's presence decides which address space
+/// `reference` belongs to before either lookup is attempted, rather than
+/// trying one and falling back to the other. A library name is a declared
+/// paper's citation key or alias, or an excluded paper's alias.
 pub async fn show_reference(
     reference: &str,
     root: &Path,
     config: &Config,
 ) -> Result<ShowResult, PaxError> {
     if !reference.contains(':') {
-        let path = nix::papers_path(root);
-        if let Ok(library) = Library::load(&path)
-            && let Some(paper) = library.find(reference)
-        {
-            return Ok(ShowResult::Declared(paper.clone()));
-        }
-        return Err(PaxError::NotFound(reference.to_string()));
+        let Ok(library) = Library::load(&nix::papers_path(root)) else {
+            return Err(PaxError::NotFound(reference.to_string()));
+        };
+        let exclusions = Exclusions::load(&nix::excluded_path(root))?;
+        return match names::lookup(reference, &library, &exclusions) {
+            Some(names::Named::Declared(paper)) => Ok(ShowResult::Declared(paper.clone())),
+            Some(names::Named::Excluded(exclusion)) => Ok(ShowResult::Excluded(exclusion.clone())),
+            None => Err(PaxError::NotFound(reference.to_string())),
+        };
     }
 
     let id: CandidateId = reference.parse()?;
@@ -1635,14 +1642,16 @@ pub async fn exclude_paper_with(
 /// paper again.
 ///
 /// `reference` is an entry's exclusion key (what
-/// [`PaxError::AlreadyExcluded`] names), a DOI, or a provider reference. It
-/// matches an entry by the same keys [`LibraryIndex::is_excluded`] does: a
-/// DOI, an arXiv id in any version, or a `provider:id` key. A provider
-/// reference that matches no entry by itself is resolved, so a paper
-/// excluded under its DOI is found from any provider's reference to it;
-/// a key or a DOI needs no network. Only one entry is removed: the exact
+/// [`PaxError::AlreadyExcluded`] names), its alias, a DOI, or a provider
+/// reference. It matches an entry by the same keys
+/// [`LibraryIndex::is_excluded`] does: a DOI, an arXiv id in any version, or
+/// a `provider:id` key. A provider reference that matches no entry by itself
+/// is resolved, so a paper excluded under its DOI is found from any
+/// provider's reference to it; a key, an alias or a DOI needs no network.
+/// Only one entry is removed: the exact
 /// key if there is one, else the first match. Fails with
-/// [`PaxError::NotExcluded`] when nothing matches.
+/// [`PaxError::NotExcluded`] when nothing matches. The returned entry
+/// carries the alias it freed, if it had one.
 pub async fn unexclude_paper(
     reference: &str,
     root: &Path,
@@ -1652,7 +1661,7 @@ pub async fn unexclude_paper(
     let path = nix::excluded_path(root);
     let mut exclusions = Exclusions::load(&path)?;
 
-    let key = match unexclude_match(&exclusions, reference, config).await? {
+    let key = match unexclude_match(&exclusions, reference, root, config).await? {
         Some(exclusion) => exclusion.key.clone(),
         None => return Err(PaxError::NotExcluded(reference.to_string())),
     };
@@ -1667,12 +1676,21 @@ pub async fn unexclude_paper(
 async fn unexclude_match<'a>(
     exclusions: &'a Exclusions,
     reference: &str,
+    root: &Path,
     config: &Config,
 ) -> Result<Option<&'a Exclusion>, PaxError> {
     if let Some(exclusion) = exclusions.get(reference) {
         return Ok(Some(exclusion));
     }
-    if doi_exclusion_key(reference).starts_with("10.") {
+    let is_doi = doi_exclusion_key(reference).starts_with("10.");
+    if !is_doi && paper::is_valid_alias(reference) {
+        let library = Library::load(&nix::papers_path(root))?;
+        return Ok(match names::lookup(reference, &library, exclusions) {
+            Some(names::Named::Excluded(exclusion)) => Some(exclusion),
+            _ => None,
+        });
+    }
+    if is_doi {
         return Ok(library_index::find_exclusion(
             exclusions,
             &identity::doi_id_keys(reference),
@@ -1787,14 +1805,27 @@ fn normalized_title(title: &str) -> String {
 /// Removes a declared paper from the local library at `root`. Only the
 /// declaration/metadata is removed — Nix remains responsible for garbage
 /// collecting any unused artifacts on its own (see `docs/mvp.md` at tag `1.0.0`).
-pub fn remove_paper(citation_key: &str, root: &Path) -> Result<(), PaxError> {
+///
+/// `name` is the paper's citation key or alias; an excluded paper's alias is
+/// refused with [`PaxError::ExcludedNotDeclared`]. Removing a paper frees
+/// its alias; [`remove_paper_entry`] returns the removed paper, so a caller
+/// can say which.
+pub fn remove_paper(name: &str, root: &Path) -> Result<(), PaxError> {
+    remove_paper_entry(name, root).map(|_| ())
+}
+
+/// [`remove_paper`], returning the paper it removed.
+pub fn remove_paper_entry(name: &str, root: &Path) -> Result<Paper, PaxError> {
     let path = nix::papers_path(root);
     let mut library = Library::load(&path)?;
-    if !library.remove(citation_key) {
-        return Err(PaxError::NoSuchPaper(citation_key.to_string()));
-    }
+    let citation_key = names::declared_key(name, &library, root)?;
+    let paper = library
+        .find(&citation_key)
+        .cloned()
+        .expect("declared_key names a declared paper");
+    library.remove(&citation_key);
     library.save(&path)?;
-    Ok(())
+    Ok(paper)
 }
 
 /// What to change about a declared paper, passed to [`edit_paper`]. Every
@@ -1842,7 +1873,10 @@ impl PaperEdits {
 /// (`library::is_valid_citation_key` — citation keys are unquoted Nix
 /// identifiers, so an invalid one would corrupt `papers.nix`) and for
 /// collision against every other declared paper before anything is written.
-pub fn edit_paper(citation_key: &str, root: &Path, edits: &PaperEdits) -> Result<(), PaxError> {
+///
+/// `name` is the paper's citation key or alias; an excluded paper's alias is
+/// refused with [`PaxError::ExcludedNotDeclared`].
+pub fn edit_paper(name: &str, root: &Path, edits: &PaperEdits) -> Result<(), PaxError> {
     if edits.is_empty() {
         return Err(PaxError::NoChangesSpecified);
     }
@@ -1854,17 +1888,18 @@ pub fn edit_paper(citation_key: &str, root: &Path, edits: &PaperEdits) -> Result
 
     let path = nix::papers_path(root);
     let mut library = Library::load(&path)?;
+    let citation_key = names::declared_key(name, &library, root)?;
 
     if let Some(new_key) = &edits.rename
-        && new_key != citation_key
+        && *new_key != citation_key
         && library.find(new_key).is_some()
     {
         return Err(PaxError::CitationKeyExists(new_key.clone()));
     }
 
     let paper = library
-        .find_mut(citation_key)
-        .ok_or_else(|| PaxError::NoSuchPaper(citation_key.to_string()))?;
+        .find_mut(&citation_key)
+        .expect("declared_key names a declared paper");
     paper::apply_local_edits(
         &mut paper.local,
         &edits.add_tags,
@@ -2045,6 +2080,178 @@ mod edit_paper_tests {
     }
 }
 
+#[cfg(test)]
+mod alias_resolution_tests {
+    use super::*;
+    use std::fs;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
+    /// Polls a future that never waits: a library name needs no network.
+    fn block_on<F: Future>(future: F) -> F::Output {
+        match pin!(future)
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("unexpectedly waited on the network"),
+        }
+    }
+
+    /// `turing1936` declared as P17, `10.1/abc` excluded as P18.
+    fn library(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("pax-alias-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("research")).unwrap();
+        fs::write(
+            nix::papers_path(&root),
+            r#"{
+  turing1936 = {
+    title = "On Computable Numbers";
+    authors = [ "Alan Turing" ];
+    alias = "P17";
+  };
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            nix::excluded_path(&root),
+            r#"{
+  "10.1/abc" = { title = "Excluded"; reason = "not empirical"; stage = "screening"; alias = "P18"; };
+}
+"#,
+        )
+        .unwrap();
+        root
+    }
+
+    fn papers(root: &Path) -> Library {
+        Library::load(&nix::papers_path(root)).unwrap()
+    }
+
+    #[test]
+    fn edit_accepts_an_alias() {
+        let root = library("edit");
+        let edits = PaperEdits {
+            notes: Some("via alias".to_string()),
+            ..Default::default()
+        };
+        edit_paper("P17", &root, &edits).unwrap();
+        let library = papers(&root);
+        let paper = library.find("turing1936").unwrap();
+        assert_eq!(paper.local.notes.as_deref(), Some("via alias"));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_rename_keeps_the_alias() {
+        let root = library("rename");
+        let edits = PaperEdits {
+            rename: Some("turing36".to_string()),
+            ..Default::default()
+        };
+        edit_paper("P17", &root, &edits).unwrap();
+        let library = papers(&root);
+        assert_eq!(
+            library.find_alias("P17").unwrap().local.citation_key,
+            "turing36"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn remove_accepts_an_alias_and_returns_the_paper_it_freed() {
+        let root = library("remove");
+        let removed = remove_paper_entry("P17", &root).unwrap();
+        assert_eq!(removed.local.citation_key, "turing1936");
+        assert_eq!(removed.local.alias.as_deref(), Some("P17"));
+        assert!(papers(&root).papers().is_empty());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn open_accepts_an_alias() {
+        let root = library("open");
+        assert!(matches!(
+            resolve_artifact_path("P17", &root),
+            Ok(ResolvedArtifact::NoSourceUrl)
+        ));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn commands_that_need_a_declared_paper_refuse_an_excluded_alias() {
+        let root = library("refuse");
+        let excluded = |result: Result<(), PaxError>| {
+            matches!(
+                result,
+                Err(PaxError::ExcludedNotDeclared { name, key }) if name == "P18" && key == "10.1/abc"
+            )
+        };
+        let edits = PaperEdits {
+            notes: Some("x".to_string()),
+            ..Default::default()
+        };
+        assert!(excluded(edit_paper("P18", &root, &edits)));
+        assert!(excluded(remove_paper("P18", &root)));
+        assert!(excluded(fetch_paper("P18", &root).map(|_| ())));
+        assert!(excluded(resolve_artifact_path("P18", &root).map(|_| ())));
+        let error = remove_paper("P18", &root).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "P18 is excluded, not in the library (excluded as 10.1/abc)"
+        );
+        assert!(matches!(
+            remove_paper("P19", &root),
+            Err(PaxError::NoSuchPaper(_))
+        ));
+        assert_eq!(papers(&root).papers().len(), 1);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn show_resolves_a_declared_and_an_excluded_alias() {
+        let root = library("show");
+        let config = Config::default();
+        assert!(matches!(
+            block_on(show_reference("P17", &root, &config)),
+            Ok(ShowResult::Declared(paper)) if paper.local.citation_key == "turing1936"
+        ));
+        assert!(matches!(
+            block_on(show_reference("P18", &root, &config)),
+            Ok(ShowResult::Excluded(exclusion)) if exclusion.key == "10.1/abc"
+        ));
+        assert!(matches!(
+            block_on(show_reference("P19", &root, &config)),
+            Err(PaxError::NotFound(_))
+        ));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unexclude_accepts_an_alias_and_returns_the_entry_it_freed() {
+        let root = library("unexclude");
+        let config = Config::default();
+        let removed = block_on(unexclude_paper("P18", &root, &config)).unwrap();
+        assert_eq!(removed.key, "10.1/abc");
+        assert_eq!(removed.alias.as_deref(), Some("P18"));
+        assert!(
+            Exclusions::load(&nix::excluded_path(&root))
+                .unwrap()
+                .entries()
+                .is_empty()
+        );
+        // A declared paper's alias isn't an exclusion.
+        assert!(matches!(
+            block_on(unexclude_paper("P17", &root, &config)),
+            Err(PaxError::NotExcluded(_))
+        ));
+        fs::remove_dir_all(&root).ok();
+    }
+}
+
 /// The result of `fetch_paper`: whether an artifact was newly materialized or
 /// was already fetched (and so didn't need a network call).
 pub enum FetchOutcome {
@@ -2056,12 +2263,17 @@ pub enum FetchOutcome {
 /// content hash. Idempotent: a paper that already has a hash is reported as
 /// already fetched rather than re-hitting the network — verifying a *stale*
 /// hash is `check`'s job, not `fetch`'s (see §2.6 of `docs/mvp.md` at tag `1.0.0`).
-pub fn fetch_paper(citation_key: &str, root: &Path) -> Result<FetchOutcome, PaxError> {
+///
+/// `name` is the paper's citation key or alias; an excluded paper's alias is
+/// refused with [`PaxError::ExcludedNotDeclared`].
+pub fn fetch_paper(name: &str, root: &Path) -> Result<FetchOutcome, PaxError> {
     let path = nix::papers_path(root);
     let mut library = Library::load(&path)?;
+    let citation_key = names::declared_key(name, &library, root)?;
+    let citation_key = citation_key.as_str();
     let paper = library
         .find_mut(citation_key)
-        .ok_or_else(|| PaxError::NoSuchPaper(citation_key.to_string()))?;
+        .expect("declared_key names a declared paper");
 
     if let Some(hash) = &paper.artifact.hash {
         return Ok(FetchOutcome::AlreadyFetched { hash: hash.clone() });
@@ -2315,15 +2527,17 @@ pub enum ResolvedArtifact {
 /// attempting a Nix build (which would fail on the `null` hash with an
 /// opaque evaluation error); one with no `source_url` at all is
 /// `NoSourceUrl`, since there's nothing to fetch even automatically.
-pub fn resolve_artifact_path(
-    citation_key: &str,
-    root: &Path,
-) -> Result<ResolvedArtifact, PaxError> {
+///
+/// `name` is the paper's citation key or alias; an excluded paper's alias is
+/// refused with [`PaxError::ExcludedNotDeclared`].
+pub fn resolve_artifact_path(name: &str, root: &Path) -> Result<ResolvedArtifact, PaxError> {
     let path = nix::papers_path(root);
     let library = Library::load(&path)?;
+    let citation_key = names::declared_key(name, &library, root)?;
+    let citation_key = citation_key.as_str();
     let paper = library
         .find(citation_key)
-        .ok_or_else(|| PaxError::NoSuchPaper(citation_key.to_string()))?;
+        .expect("declared_key names a declared paper");
 
     if paper.artifact.hash.is_none() {
         return Ok(if paper.artifact.source_url.is_some() {
