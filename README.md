@@ -109,7 +109,7 @@ pax cited-by arxiv:1706.03762 --limit 200
 pax cited-by vaswani2017 --year 2023- --type journal-article
 ```
 
-The paper can be any `provider:id` reference from `search`, or the citation key of a paper in your library. pax looks it up in each provider by that provider's own id when it has one, otherwise by DOI, otherwise by arXiv id (for a library paper without a DOI, read from an arxiv.org source URL); a provider it can't be found in says so, and the other still answers.
+The paper can be any `provider:id` reference from `search`, the citation key or [alias](#aliases) of a paper in your library, or an excluded paper's alias. pax looks it up in each provider by that provider's own id when it has one, otherwise by DOI, otherwise by arXiv id (for a library paper without a DOI, read from an arxiv.org source URL); a provider it can't be found in says so, and the other still answers.
 
 Like `search`, each provider reports its `retrieved N of M` count, then the two lists are merged into one, with the same `merged: X → Y (Z duplicates, U unmatched)` line and one row per paper listing every provider's reference. Papers already in your library are marked `[in library]`, and excluded ones `[excluded]` (see [Excluding papers](#excluding-papers)). They take the same `--limit`, `--all`, `--year`, `--type`, `--lang`, `--label` and `--with-abstracts` flags. OpenAlex applies the filters server-side; Semantic Scholar's citation lists take no filters, so year and type are applied there after retrieval, and language not at all. Semantic Scholar serves at most 9,999 entries of a list, and skips references it couldn't match to a paper.
 
@@ -132,7 +132,7 @@ Any `withheld`, `failed` or `unresolved` list makes the command exit 3 while ano
 
 #### Several seeds
 
-A snowballing round starts from a set of papers, so `refs` and `cited-by` take several seeds at once, each a `provider:id` reference or a citation key:
+A snowballing round starts from a set of papers, so `refs` and `cited-by` take several seeds at once, each a `provider:id` reference, a citation key or an alias:
 
 ```Bash
 pax refs vaswani2017 he2016 openalex:W2194775991
@@ -141,7 +141,7 @@ pax cited-by vaswani2017 arxiv:1810.04805 --year 2020-
 
 Each seed's provider counts print under a `seed <seed>:` line, with the same reasons as for one seed. Then one list is merged across every seed and provider, and each row gets a `seeds:` line naming the seeds whose lists returned it. `--limit`, `--all` and the filters apply per seed per provider, as for one seed. Seeds are looked up one after another, not all at once, because Semantic Scholar's unauthenticated rate limit is tight.
 
-Two seeds that are the same paper (the same string, or sharing a provider id, DOI or arXiv id, e.g. a citation key and the `openalex:` id of the same work) are looked up once. The later one prints `same paper as <seed>`, and its lists count as the earlier one's. A seed that doesn't resolve (a malformed reference, or a citation key not in the library) fails only itself, and the other seeds still answer. The command exits 4 only when no seed resolves, and exits 3 when some seeds fail while others return lists.
+Two seeds that are the same paper (the same string, or sharing a provider id, DOI or arXiv id, e.g. a citation key and the `openalex:` id of the same work) are looked up once. The later one prints `same paper as <seed>`, and its lists count as the earlier one's. A seed that doesn't resolve (a malformed reference, or a citation key or alias not in the library) fails only itself, and the other seeds still answer. The command exits 4 only when no seed resolves, and exits 3 when some seeds fail while others return lists.
 
 With one seed, the output is exactly as above. In the library, `pax_core::references_many` / `cited_by_many` (and `references_many_logged` / `cited_by_many_logged`) return a `SeedResults`: each seed's per-provider lists and `incomplete()` reasons, and `merge()`, the merged list whose rows report their `seeds()` and `providers()`.
 
@@ -191,7 +191,7 @@ Each line is one JSON object for one provider's part in one command, so a comman
 | `v` | Schema version, `1`. It changes only when a field changes meaning or is removed; new fields can appear without it changing. |
 | `command` | `search`, `search-author` (`search --author`), `refs`, `cited-by` or `related`. |
 | `query` | The query, or the author name for `search-author`. Only on `search` / `search-author`. |
-| `seed` | The paper as given: a `provider:id` reference or a citation key. Only on `refs` / `cited-by` / `related`. |
+| `seed` | The paper as given: a `provider:id` reference, a citation key or an alias. Only on `refs` / `cited-by` / `related`. |
 | `provider` | `openalex`, `crossref`, `semanticscholar` or `arxiv`. |
 | `date` | When the command ran, ISO 8601 in UTC to the second. Every line of one command has the same date. |
 | `run` | An opaque id shared by every line one command wrote, and by no other command's. It ties together the lines of a `refs` / `cited-by` / `related` run over several seeds. Lines written before pax recorded it don't have it. |
@@ -225,7 +225,7 @@ pax exclude openalex:W2072794470 --reason "not empirical" --stage screening
 pax exclude 10.1145/3474085.3475385 --reason "wrong domain" --stage full-text --criterion X3 --round R1
 ```
 
-The reference is a DOI or a `search` result. pax looks up the title, and keys the entry by the paper's DOI when it has one (so the exclusion matches it from any provider), otherwise by the `provider:id`. Keys are version-less: `arxiv:2301.01234v2` is keyed as `arxiv:2301.01234`, and every version of an excluded paper counts as excluded. `--stage` is `screening` (title/abstract) or `full-text`, the two exclusion stages a PRISMA flow diagram reports. `--title` sets the title yourself, and is required when the reference can't be resolved. The entry also records the publication year when the provider gives one; `--year YYYY` sets it yourself, like `--title`. `--criterion` records the protocol's exclusion criterion (e.g. `X3`) and `--round` the screening round (e.g. `R1`, the same label you'd give that round's searches). Both are optional free text that pax doesn't check against your protocol, and `--reason` is still required. Excluding the same paper again replaces its reason, stage, year, criterion and round; a paper already in `papers.nix` can't be excluded until it's removed.
+The reference is a DOI or a `search` result. pax looks up the title, and keys the entry by the paper's DOI when it has one (so the exclusion matches it from any provider), otherwise by the `provider:id`. Keys are version-less: `arxiv:2301.01234v2` is keyed as `arxiv:2301.01234`, and every version of an excluded paper counts as excluded. `--stage` is `screening` (title/abstract) or `full-text`, the two exclusion stages a PRISMA flow diagram reports. `--title` sets the title yourself, and is required when the reference can't be resolved. The entry also records the publication year when the provider gives one; `--year YYYY` sets it yourself, like `--title`. `--criterion` records the protocol's exclusion criterion (e.g. `X3`) and `--round` the screening round (e.g. `R1`, the same label you'd give that round's searches). Both are optional free text that pax doesn't check against your protocol, and `--reason` is still required. `--alias P18` gives the paper an [alias](#aliases). Excluding the same paper again replaces its reason, stage, year, criterion, round and alias; a paper already in `papers.nix` can't be excluded until it's removed.
 
 ```Nix
 {
@@ -249,9 +249,29 @@ $ pax add crossref:10.1145/3474085.3475385
 Error: crossref:10.1145/3474085.3475385 was excluded at full-text ("wrong domain", key 10.1145/3474085.3475385); run `pax unexclude 10.1145/3474085.3475385` first to reverse that decision
 ```
 
-Reversing a screening decision is its own explicit step, so nothing reverses one by accident (`add` has no `--force`). `pax unexclude` takes the exclusion key `add` names, a DOI, or a `search` result, removes that one entry from `excluded.nix` and prints what it removed; after it, `add` accepts the paper. A `search` result that doesn't match an entry by its own id is resolved, so a paper excluded under its DOI can be unexcluded from any provider's reference to it. Unexcluding something that isn't excluded exits 4.
+Reversing a screening decision is its own explicit step, so nothing reverses one by accident (`add` has no `--force`). `pax unexclude` takes the exclusion key `add` names, the entry's alias, a DOI, or a `search` result, removes that one entry from `excluded.nix` and prints what it removed; after it, `add` accepts the paper. A `search` result that doesn't match an entry by its own id is resolved, so a paper excluded under its DOI can be unexcluded from any provider's reference to it. Unexcluding something that isn't excluded exits 4.
 
 The flake never reads `excluded.nix`, and a library without it simply has no exclusions.
+
+## Aliases
+
+A systematic review numbers its studies (P1…Pn) in its protocol and data-extraction sheets, including the ones it excludes. An alias puts that number on the paper itself, so you can use it instead of the citation key:
+
+```Bash
+pax edit turing1936 --alias P17     # on a declared paper
+pax exclude 10.1/abc --stage screening --reason "not empirical" --alias P18   # on an excluded paper
+pax show P17                        # same as: pax show turing1936
+pax fetch P17 / pax open P17 / pax remove P17 / pax refs P17 / pax cited-by P17
+pax edit P17 --alias ""             # clear it
+```
+
+A paper has up to three names: its `provider:id` reference from `search`, its citation key (what `\cite{}` uses, generated by `add`, changed by `edit --rename`), and its alias (yours, and only you change it). An alias is stored as `alias = "P17";` on the paper's entry in `papers.nix` or `excluded.nix`, and only when set. It's letters, digits, `_`, `.` and `-`: no `:`, which marks a `provider:id` reference, and no spaces, so it needs no quoting. `export bibtex` leaves it out.
+
+Citation keys and aliases in both files are one namespace, so every name resolves to exactly one paper. `edit --alias` and `exclude --alias` refuse a name another paper already has, as an alias or a citation key, and name that paper (exit 5); `edit --rename` refuses one too, and `add` never generates a citation key equal to an alias. A name is looked up as a citation key first, then as an alias, case-sensitively.
+
+`list` prints the alias before the citation key and `show` prints an `Alias:` line. On an excluded paper, `pax show P18` prints the exclusion record (key, title, stage, reason, criterion, round), `refs` / `cited-by` / `related` take it as a seed through its exclusion key (a DOI or a `provider:id`), and `pax unexclude P18` reverses the exclusion; `fetch`, `open`, `edit` and `remove` refuse it with `P18 is excluded, not in the library` (exit 5).
+
+An alias survives `edit --rename`. `remove` and `unexclude` free it and print it, so you can give it back on the other side: after `pax unexclude P18` and `pax add`, `pax edit <key> --alias P18`; or, to exclude a declared paper at full text, `pax remove P17` then `pax exclude <ref> … --alias P17`. `exclude` replaces an earlier exclusion of the same paper, so re-running it is also how to add or change an exclusion's alias, and like `--criterion` and `--round`, an alias not given again is cleared.
 
 ## PRISMA counts
 
@@ -356,12 +376,12 @@ Every command exits with a code a script can branch on:
 | --- | --- |
 | 0 | Success. |
 | 1 | Any other failure, e.g. `nix` failing to fetch or build; also `check` or `sync` finding problems in the library, or a `search`, `refs`, `cited-by` or `related` that succeeded but couldn't write the [search log](#search-log). |
-| 2 | Wrong arguments: an unknown command or flag, a malformed `provider:id` or citation key, or flags that can't be combined. |
+| 2 | Wrong arguments: an unknown command or flag, a malformed `provider:id`, citation key or alias, or flags that can't be combined. |
 | 3 | Partial: in `search`, `refs`, `cited-by` or `related`, at least one provider failed (network, rate limit, provider error) while others answered, so the results are incomplete. In `refs`, `cited-by` and `related` that includes a list withheld by the provider or a provider that can't look the seed up, since its list is still missing; a list cut short by `--limit` isn't (see [Citation graph](#citation-graph)). In `search --doi`, a provider that has no record of the DOI isn't a failure: it answered, so when the others returned results `pax` exits 0 and notes it on stderr. |
-| 4 | Not found: a reference, seed or citation key doesn't resolve, e.g. no provider has a record of the `refs` / `cited-by` / `related` seed (with several seeds, of any of them) or the `search --doi` DOI, or `unexclude` names a paper that isn't excluded. |
-| 5 | Refused: the library rejected the operation, e.g. adding or excluding a paper already declared, adding an excluded paper, renaming to a citation key in use, fetching a paper with no PDF source, or `init` where a library exists. |
+| 4 | Not found: a reference, seed, citation key or alias doesn't resolve, e.g. no provider has a record of the `refs` / `cited-by` / `related` seed (with several seeds, of any of them) or the `search --doi` DOI, or `unexclude` names a paper that isn't excluded. |
+| 5 | Refused: the library rejected the operation, e.g. adding or excluding a paper already declared, adding an excluded paper, renaming to a citation key in use, giving a paper an alias or citation key another paper has, giving `fetch` / `open` / `edit` / `remove` an excluded paper's alias, fetching a paper with no PDF source, or `init` where a library exists. |
 | 6 | Every provider failed (network, rate limit, provider error). |
-| 7 | The library is missing, not initialized, or unreadable. A command that needs a library checks for `research/papers.nix` before doing anything else, so `add` fails before any network call, and so do a citation key given to `show`, `refs`, `cited-by` or `related` and `search --local`; a `provider:id` reference and a plain `search` work without one. |
+| 7 | The library is missing, not initialized, or unreadable. A command that needs a library checks for `research/papers.nix` before doing anything else, so `add` fails before any network call, and so do a citation key or alias given to `show`, `refs`, `cited-by` or `related` and `search --local`; a `provider:id` reference and a plain `search` work without one. |
 
 ## License
 
