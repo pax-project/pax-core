@@ -1866,8 +1866,11 @@ pub fn remove_paper_entry(name: &str, root: &Path) -> Result<Paper, PaxError> {
 /// What to change about a declared paper, passed to [`edit_paper`]. Every
 /// field is opt-in — only a field that's `Some`/non-empty gets touched,
 /// matching §2.10 of `docs/mvp.md` at tag `1.0.0`: "the original external metadata should not be
-/// silently overwritten without user intent."
+/// silently overwritten without user intent." Non-exhaustive, so fields can
+/// be added without breaking callers: build one with [`PaperEdits::new`] and
+/// the `with_*` methods.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct PaperEdits {
     pub add_tags: Vec<String>,
     pub remove_tags: Vec<String>,
@@ -1894,6 +1897,61 @@ pub struct PaperEdits {
 }
 
 impl PaperEdits {
+    /// No edits; set the ones to make with the `with_*` methods.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_add_tags(mut self, add_tags: Vec<String>) -> Self {
+        self.add_tags = add_tags;
+        self
+    }
+
+    pub fn with_remove_tags(mut self, remove_tags: Vec<String>) -> Self {
+        self.remove_tags = remove_tags;
+        self
+    }
+
+    pub fn with_notes(mut self, notes: Option<String>) -> Self {
+        self.notes = notes;
+        self
+    }
+
+    pub fn with_rename(mut self, rename: Option<String>) -> Self {
+        self.rename = rename;
+        self
+    }
+
+    pub fn with_title(mut self, title: Option<String>) -> Self {
+        self.title = title;
+        self
+    }
+
+    pub fn with_authors(mut self, authors: Option<Vec<String>>) -> Self {
+        self.authors = authors;
+        self
+    }
+
+    pub fn with_year(mut self, year: Option<i32>) -> Self {
+        self.year = year;
+        self
+    }
+
+    pub fn with_doi(mut self, doi: Option<String>) -> Self {
+        self.doi = doi;
+        self
+    }
+
+    pub fn with_source_url(mut self, source_url: Option<String>) -> Self {
+        self.source_url = source_url;
+        self
+    }
+
+    pub fn with_alias(mut self, alias: Option<String>) -> Self {
+        self.alias = alias;
+        self
+    }
+
     fn is_empty(&self) -> bool {
         self.add_tags.is_empty()
             && self.remove_tags.is_empty()

@@ -745,22 +745,18 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             doi,
             source_url,
         } => {
-            let edits = pax_core::PaperEdits {
-                add_tags: add_tag,
-                remove_tags: remove_tag,
-                notes,
-                rename,
-                title,
-                authors: if author.is_empty() {
-                    None
-                } else {
-                    Some(author)
-                },
-                year,
-                doi,
-                source_url,
-                alias,
-            };
+            let authors = (!author.is_empty()).then_some(author);
+            let edits = pax_core::PaperEdits::new()
+                .with_add_tags(add_tag)
+                .with_remove_tags(remove_tag)
+                .with_notes(notes)
+                .with_rename(rename)
+                .with_title(title)
+                .with_authors(authors)
+                .with_year(year)
+                .with_doi(doi)
+                .with_source_url(source_url)
+                .with_alias(alias);
             match pax_core::edit_paper(&citation_key, Path::new("."), &edits) {
                 Ok(()) => sink.message(&format!("Updated {citation_key}")),
                 Err(e) => return fail(sink, &e),

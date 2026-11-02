@@ -20,7 +20,11 @@ pub struct Artifact {
     pub hash: Option<String>,
 }
 
+/// How the user organizes a declared paper. Non-exhaustive, so fields can be
+/// added without breaking callers: build one with [`Local::new`] and the
+/// `with_*` methods, or [`Local::default`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct Local {
     pub citation_key: String,
     pub tags: Vec<String>,
@@ -29,6 +33,31 @@ pub struct Local {
     /// ID), accepted wherever the citation key is. Unlike the key, only the
     /// user changes it: it survives a rename. See [`is_valid_alias`].
     pub alias: Option<String>,
+}
+
+impl Local {
+    /// Local metadata with this citation key, and no tags, notes or alias.
+    pub fn new(citation_key: impl Into<String>) -> Self {
+        Local {
+            citation_key: citation_key.into(),
+            ..Local::default()
+        }
+    }
+
+    pub fn with_tags(mut self, tags: Vec<String>) -> Self {
+        self.tags = tags;
+        self
+    }
+
+    pub fn with_notes(mut self, notes: Option<String>) -> Self {
+        self.notes = notes;
+        self
+    }
+
+    pub fn with_alias(mut self, alias: Option<String>) -> Self {
+        self.alias = alias;
+        self
+    }
 }
 
 /// A paper declared in the local library, per the three-part shape from
@@ -165,6 +194,19 @@ mod tests {
         let mut artifact = original.clone();
         apply_artifact_edits(&mut artifact, None);
         assert_eq!(artifact, original);
+    }
+
+    #[test]
+    fn local_new_and_with_methods_set_each_field() {
+        let local = Local::new("turing1936")
+            .with_tags(vec!["logic".to_string()])
+            .with_notes(Some("n".to_string()))
+            .with_alias(Some("P17".to_string()));
+        assert_eq!(local.citation_key, "turing1936");
+        assert_eq!(local.tags, vec!["logic".to_string()]);
+        assert_eq!(local.notes.as_deref(), Some("n"));
+        assert_eq!(local.alias.as_deref(), Some("P17"));
+        assert_eq!(Local::new("k").alias, None);
     }
 
     #[test]
