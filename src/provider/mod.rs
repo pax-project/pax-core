@@ -29,6 +29,16 @@ use thiserror::Error;
 /// has to offer.
 pub(crate) const SEARCH_RESULT_LIMIT: usize = 50;
 
+/// The providers a search asks when [`SearchOptions::providers`] names none:
+/// the general-purpose ones. [`ProviderId::Dblp`] covers computer science
+/// only, so a search asks it only when it's named.
+pub const DEFAULT_SEARCH_PROVIDERS: &[ProviderId] = &[
+    ProviderId::OpenAlex,
+    ProviderId::Crossref,
+    ProviderId::SemanticScholar,
+    ProviderId::ArXiv,
+];
+
 /// How many results a paged search should retrieve from each provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -56,6 +66,12 @@ pub struct SearchOptions {
     /// then request it. OpenAlex, Crossref and arXiv return abstracts either way.
     /// Off by default, since abstracts make responses several times larger.
     pub abstracts: bool,
+    /// The providers a search asks, in any order; empty (the default) means
+    /// [`DEFAULT_SEARCH_PROVIDERS`]. Naming a provider outside that set, such
+    /// as [`ProviderId::Dblp`], is how it joins a search. Only searches read
+    /// it: the citation and related-works functions always ask their own
+    /// providers ([`crate::CITATION_PROVIDERS`]).
+    pub providers: Vec<ProviderId>,
 }
 
 impl Default for SearchOptions {
@@ -67,6 +83,7 @@ impl Default for SearchOptions {
             filters: Filters::default(),
             label: None,
             abstracts: false,
+            providers: Vec::new(),
         }
     }
 }
@@ -92,6 +109,29 @@ impl SearchOptions {
     pub fn with_abstracts(mut self, abstracts: bool) -> Self {
         self.abstracts = abstracts;
         self
+    }
+
+    /// See [`SearchOptions::providers`].
+    pub fn with_providers(mut self, providers: impl IntoIterator<Item = ProviderId>) -> Self {
+        self.providers = providers.into_iter().collect();
+        self
+    }
+
+    /// The providers a search asks, in [`crate::merge::MERGE_ORDER`]: the ones
+    /// named in [`SearchOptions::providers`], or [`DEFAULT_SEARCH_PROVIDERS`]
+    /// when none are.
+    pub fn search_providers(&self) -> Vec<ProviderId> {
+        crate::merge::MERGE_ORDER
+            .iter()
+            .copied()
+            .filter(|provider| {
+                if self.providers.is_empty() {
+                    DEFAULT_SEARCH_PROVIDERS.contains(provider)
+                } else {
+                    self.providers.contains(provider)
+                }
+            })
+            .collect()
     }
 }
 
@@ -653,6 +693,25 @@ mod tests {
         assert_eq!(id.provider, ProviderId::Dblp);
         assert_eq!(id.native_id, "conf/icse/Smith20");
         assert_eq!(id.to_string(), "dblp:conf/icse/Smith20");
+    }
+
+    #[test]
+    fn a_search_asks_the_default_providers_unless_others_are_named() {
+        assert_eq!(
+            SearchOptions::default().search_providers(),
+            DEFAULT_SEARCH_PROVIDERS
+        );
+        assert!(!DEFAULT_SEARCH_PROVIDERS.contains(&ProviderId::Dblp));
+        let named = SearchOptions::default().with_providers([
+            ProviderId::Dblp,
+            ProviderId::OpenAlex,
+            ProviderId::Dblp,
+        ]);
+        // In merge order, each once.
+        assert_eq!(
+            named.search_providers(),
+            [ProviderId::OpenAlex, ProviderId::Dblp]
+        );
     }
 
     #[test]
