@@ -1511,7 +1511,9 @@ pub async fn exclude_paper(
 /// `reason` and `stage`, and optionally a `title` (as in [`exclude_paper`]),
 /// a publication `year`, the protocol's `criterion` (e.g. `X3`) and the
 /// screening `round` (e.g. `R1`). Criterion and round are free text pax
-/// doesn't validate; blank ones count as unset.
+/// doesn't validate; blank ones count as unset. The `alias` (e.g. `P18`) must
+/// be a valid alias ([`paper::is_valid_alias`]) no other paper holds as an
+/// alias or citation key; a blank one counts as unset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ExclusionOptions {
@@ -1524,11 +1526,12 @@ pub struct ExclusionOptions {
     pub year: Option<i32>,
     pub criterion: Option<String>,
     pub round: Option<String>,
+    pub alias: Option<String>,
 }
 
 impl ExclusionOptions {
-    /// Options with a reason and stage, and no title, year, criterion or
-    /// round.
+    /// Options with a reason and stage, and no title, year, criterion,
+    /// round or alias.
     pub fn new(reason: impl Into<String>, stage: ExclusionStage) -> Self {
         ExclusionOptions {
             reason: reason.into(),
@@ -1537,6 +1540,7 @@ impl ExclusionOptions {
             year: None,
             criterion: None,
             round: None,
+            alias: None,
         }
     }
 
@@ -1559,12 +1563,18 @@ impl ExclusionOptions {
         self.round = round;
         self
     }
+
+    pub fn with_alias(mut self, alias: Option<String>) -> Self {
+        self.alias = alias;
+        self
+    }
 }
 
 /// [`exclude_paper`], recording everything in `options`: a given `year`
-/// replaces the resolved one, and the criterion and round are recorded.
-/// Re-excluding a paper replaces its whole entry, so a year neither given nor
-/// resolved again, or a criterion or round not given again, is cleared.
+/// replaces the resolved one, and the criterion, round and alias are
+/// recorded. Re-excluding a paper replaces its whole entry, so a year neither
+/// given nor resolved again, or a criterion, round or alias not given again,
+/// is cleared.
 pub async fn exclude_paper_with(
     reference: &str,
     options: &ExclusionOptions,
@@ -1588,6 +1598,13 @@ pub async fn exclude_paper_with(
         .as_deref()
         .map(str::trim)
         .filter(|t| !t.is_empty());
+    let alias = set(&options.alias);
+    // Before resolving, so a malformed alias costs no network.
+    if let Some(alias) = alias.as_deref()
+        && !paper::is_valid_alias(alias)
+    {
+        return Err(PaxError::InvalidAlias(alias.to_string()));
+    }
     let library = Library::load(&nix::papers_path(root))?;
 
     let reference = reference.trim();
@@ -1641,10 +1658,15 @@ pub async fn exclude_paper_with(
 
     let path = nix::excluded_path(root);
     let mut exclusions = Exclusions::load(&path)?;
+    if let Some(alias) = &alias {
+        let owner = NameHolder::Excluded(resolved.key.clone());
+        names::check_alias(alias, &library, &exclusions, Some(&owner))?;
+    }
     let exclusion = Exclusion::new(resolved.key, resolved.title, reason.to_string(), stage)
         .with_year(resolved.year)
         .with_criterion(set(&options.criterion))
-        .with_round(set(&options.round));
+        .with_round(set(&options.round))
+        .with_alias(alias);
     exclusions.upsert(exclusion.clone());
     exclusions.save(&path)?;
     Ok(exclusion)
@@ -2357,6 +2379,83 @@ mod alias_resolution_tests {
             papers(&root).find_alias("P17").unwrap().local.citation_key,
             "hewitt1973"
         );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Excludes `doi` under `alias`, offline: a DOI with a title.
+    fn exclude_as(root: &Path, doi: &str, alias: &str) -> Result<Exclusion, PaxError> {
+        let options = ExclusionOptions::new("off topic", ExclusionStage::FullText)
+            .with_title(Some("A title".to_string()))
+            .with_alias(Some(alias.to_string()));
+        block_on(exclude_paper_with(doi, &options, root, &Config::default()))
+    }
+
+    fn exclusion_alias(root: &Path, key: &str) -> Option<String> {
+        Exclusions::load(&nix::excluded_path(root))
+            .unwrap()
+            .get(key)?
+            .alias
+            .clone()
+    }
+
+    #[test]
+    fn exclude_sets_an_alias_and_re_excluding_changes_it() {
+        let root = library("exclude-alias");
+        let exclusion = exclude_as(&root, "10.1/new", "P20").unwrap();
+        assert_eq!(exclusion.alias.as_deref(), Some("P20"));
+        assert_eq!(exclusion_alias(&root, "10.1/new").as_deref(), Some("P20"));
+
+        // The paper's own alias isn't taken from itself.
+        exclude_as(&root, "10.1/abc", "P18").unwrap();
+        exclude_as(&root, "10.1/abc", "P21").unwrap();
+        assert_eq!(exclusion_alias(&root, "10.1/abc").as_deref(), Some("P21"));
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn exclude_refuses_an_invalid_alias_or_one_another_paper_holds() {
+        let root = library("exclude-taken");
+        assert!(matches!(
+            exclude_as(&root, "10.1/new", "P:20"),
+            Err(PaxError::InvalidAlias(_))
+        ));
+        let taken = |alias| match exclude_as(&root, "10.1/new", alias) {
+            Err(PaxError::NameTaken { holder, .. }) => Some(holder),
+            _ => None,
+        };
+        assert_eq!(
+            taken("P17"),
+            Some(NameHolder::Declared("turing1936".to_string()))
+        );
+        assert_eq!(
+            taken("hewitt1973"),
+            Some(NameHolder::Declared("hewitt1973".to_string()))
+        );
+        assert_eq!(
+            taken("P18"),
+            Some(NameHolder::Excluded("10.1/abc".to_string()))
+        );
+        assert_eq!(exclusion_alias(&root, "10.1/new"), None);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_freed_alias_can_be_taken_on_the_other_side() {
+        let root = library("move");
+        // Declared to excluded: remove, then exclude under the same alias.
+        remove_paper("P17", &root).unwrap();
+        exclude_as(&root, "10.1/turing", "P17").unwrap();
+        // Excluded to declared: unexclude, then give a declared paper the alias.
+        block_on(unexclude_paper("P18", &root, &Config::default())).unwrap();
+        set_alias(&root, "hewitt1973", "P18").unwrap();
+        assert!(matches!(
+            block_on(show_reference("P17", &root, &Config::default())),
+            Ok(ShowResult::Excluded(exclusion)) if exclusion.key == "10.1/turing"
+        ));
+        assert!(matches!(
+            block_on(show_reference("P18", &root, &Config::default())),
+            Ok(ShowResult::Declared(paper)) if paper.local.citation_key == "hewitt1973"
+        ));
         fs::remove_dir_all(&root).ok();
     }
 
