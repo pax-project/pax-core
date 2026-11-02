@@ -342,6 +342,53 @@ enum Lists {
     Related,
 }
 
+impl Lists {
+    /// The fewest requests one seed's list takes from Semantic Scholar: the
+    /// seed's counts and a page for a citation list, a single request for
+    /// recommendations.
+    fn semantic_scholar_requests(self) -> u32 {
+        match self {
+            Lists::Citations => 2,
+            Lists::Related => 1,
+        }
+    }
+}
+
+/// How long a run must be expected to wait on Semantic Scholar's pacing
+/// before [`pacing_note`] says so.
+const PACING_NOTE_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A note for stderr, before a run of `seeds` seeds, on how long pacing
+/// Semantic Scholar's requests will make it take at least, so a long run
+/// doesn't look hung; `None` for a run too short to notice.
+fn pacing_note(seeds: usize, lists: Lists, has_api_key: bool) -> Option<String> {
+    let interval = pax_core::SemanticScholarProvider::DEFAULT_MIN_INTERVAL;
+    let requests = u32::try_from(seeds)
+        .unwrap_or(u32::MAX)
+        .saturating_mul(lists.semantic_scholar_requests());
+    let wait = interval.saturating_mul(requests.saturating_sub(1));
+    if wait < PACING_NOTE_AFTER {
+        return None;
+    }
+    let mut note =
+        format!("requests are spaced {interval:?} apart, so {seeds} seeds take at least {wait:?}");
+    if !has_api_key {
+        note.push_str(
+            "; without SEMANTIC_SCHOLAR_API_KEY they share the unauthenticated rate limit, \
+             so retries may add more",
+        );
+    }
+    Some(note)
+}
+
+/// Prints [`pacing_note`], if there is one, as a Semantic Scholar note.
+fn note_pacing(sink: &mut impl Sink, seeds: usize, lists: Lists, config: &pax_core::Config) {
+    let has_api_key = config.semantic_scholar_api_key.is_some();
+    if let Some(note) = pacing_note(seeds, lists, has_api_key) {
+        sink.provider_note(ProviderId::SemanticScholar, &note);
+    }
+}
+
 /// Prints each seed's provider counts, marked with why a list is incomplete
 /// if it is, then one list merged across every seed and provider, the way
 /// `search` does. With one seed the output is that seed's alone; with
@@ -605,6 +652,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
         }
         Command::Refs { seeds, paging } => {
             let options = paging.options();
+            note_pacing(sink, seeds.len(), Lists::Citations, config);
             let pax_core::Logged { results, log, .. } =
                 pax_core::references_many_logged(&seeds, &options, Path::new("."), config).await;
             let code = show_citations(sink, &results, Lists::Citations, options.abstracts);
@@ -612,6 +660,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
         }
         Command::CitedBy { seeds, paging } => {
             let options = paging.options();
+            note_pacing(sink, seeds.len(), Lists::Citations, config);
             let pax_core::Logged { results, log, .. } =
                 pax_core::cited_by_many_logged(&seeds, &options, Path::new("."), config).await;
             let code = show_citations(sink, &results, Lists::Citations, options.abstracts);
@@ -619,6 +668,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
         }
         Command::Related { seeds, paging } => {
             let options = paging.options();
+            note_pacing(sink, seeds.len(), Lists::Related, config);
             let pax_core::Logged { results, log, .. } =
                 pax_core::related_many_logged(&seeds, &options, Path::new("."), config).await;
             let code = show_citations(sink, &results, Lists::Related, options.abstracts);
@@ -852,5 +902,32 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             }
             Err(e) => fail(sink, &e),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_few_seeds_get_no_pacing_note() {
+        assert_eq!(pacing_note(1, Lists::Citations, false), None);
+        assert_eq!(pacing_note(5, Lists::Citations, false), None);
+        assert_eq!(pacing_note(10, Lists::Related, false), None);
+    }
+
+    #[test]
+    fn many_seeds_are_told_how_long_pacing_takes() {
+        assert_eq!(
+            pacing_note(20, Lists::Citations, true).as_deref(),
+            Some("requests are spaced 1s apart, so 20 seeds take at least 39s")
+        );
+    }
+
+    #[test]
+    fn without_a_key_the_note_mentions_the_shared_limit() {
+        let note = pacing_note(20, Lists::Related, false).unwrap();
+        assert!(note.starts_with("requests are spaced 1s apart, so 20 seeds take at least 19s"));
+        assert!(note.contains("SEMANTIC_SCHOLAR_API_KEY"));
     }
 }
