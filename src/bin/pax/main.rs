@@ -85,17 +85,26 @@ enum Command {
         #[arg(long)]
         label: Option<String>,
     },
-    ///List papers already declared in the library
+    ///List papers already declared in the library, or with --excluded the excluded ones
     List {
         /// Only papers with a matching author (case-insensitive substring)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "excluded")]
         author: Option<String>,
         /// Only papers published in this year
         #[arg(long)]
         year: Option<i32>,
         /// Only papers with this exact tag
-        #[arg(long)]
+        #[arg(long, conflicts_with = "excluded")]
         tag: Option<String>,
+        /// List the papers in research/excluded.nix instead
+        #[arg(long)]
+        excluded: bool,
+        /// With --excluded: only exclusions under this exact criterion, e.g. X3
+        #[arg(long, requires = "excluded")]
+        criterion: Option<String>,
+        /// With --excluded: only exclusions from this exact round, e.g. R1
+        #[arg(long, requires = "excluded")]
+        round: Option<String>,
     },
     ///Remove a declared paper from the library
     Remove {
@@ -643,7 +652,29 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 Err(e) => fail(sink, &e),
             }
         }
-        Command::List { author, year, tag } => {
+        Command::List {
+            excluded: true,
+            year,
+            criterion,
+            round,
+            ..
+        } => {
+            let exclusions =
+                match pax_core::Exclusions::load(&pax_core::nix::excluded_path(Path::new("."))) {
+                    Ok(exclusions) => exclusions,
+                    Err(e) => return fail(sink, &e),
+                };
+            let filter = pax_core::ExclusionFilter::new()
+                .with_year(year)
+                .with_criterion(criterion)
+                .with_round(round);
+            let matching = pax_core::filter_exclusions(exclusions.entries(), &filter);
+            sink.exclusion_list(&matching, exclusions.entries().is_empty());
+            Code::Success
+        }
+        Command::List {
+            author, year, tag, ..
+        } => {
             let library = match pax_core::Library::load(&pax_core::nix::papers_path(Path::new(".")))
             {
                 Ok(library) => library,

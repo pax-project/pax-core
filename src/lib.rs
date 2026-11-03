@@ -34,8 +34,8 @@ pub use citations::{
 };
 pub use error::PaxError;
 pub use exclusions::{
-    Exclusion, ExclusionStage, Exclusions, UnknownExclusionStage, candidate_exclusion_key,
-    doi_exclusion_key, exclusion_key,
+    Exclusion, ExclusionFilter, ExclusionStage, Exclusions, UnknownExclusionStage,
+    candidate_exclusion_key, doi_exclusion_key, exclusion_key, filter_exclusions,
 };
 pub use github::publish_to_github_release;
 pub use identity::{IdentityKey, identity_key, identity_keys};

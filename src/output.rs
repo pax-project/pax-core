@@ -193,6 +193,25 @@ impl From<&Exclusion> for Excluded {
     }
 }
 
+/// Excluded papers, in `research/excluded.nix` order (sorted by key), as
+/// `list --excluded` gives them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct ExclusionList {
+    /// Empty when nothing is excluded, or when no exclusion matches a
+    /// filter.
+    pub exclusions: Vec<Excluded>,
+}
+
+impl ExclusionList {
+    pub fn new(exclusions: &[Exclusion]) -> Self {
+        ExclusionList {
+            exclusions: exclusions.iter().map(Excluded::from).collect(),
+        }
+    }
+}
+
 /// What `show` found. Exactly one field is set: `declared` for a paper in
 /// the library, `excluded` for an excluded paper named by its alias,
 /// `candidate` for a provider reference, `records` for a DOI looked up at

@@ -297,6 +297,68 @@ pub fn doi_exclusion_key(doi: &str) -> String {
     crate::normalize_doi(doi.trim()).to_ascii_lowercase()
 }
 
+/// Filter criteria for listing exclusions (`pax list --excluded`). All
+/// fields combine with AND; a `None` field matches everything. `criterion`
+/// and `round` match exactly, like [`crate::ListFilter::tag`]: they're short
+/// labels the user wrote themselves.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ExclusionFilter {
+    /// Only exclusions with this publication year.
+    pub year: Option<i32>,
+    /// Only exclusions recorded under this criterion.
+    pub criterion: Option<String>,
+    /// Only exclusions recorded in this screening round.
+    pub round: Option<String>,
+}
+
+impl ExclusionFilter {
+    /// A filter matching every exclusion.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Only exclusions with this publication year (`None`: any).
+    pub fn with_year(mut self, year: Option<i32>) -> Self {
+        self.year = year;
+        self
+    }
+
+    /// Only exclusions recorded under this criterion (`None`: any).
+    pub fn with_criterion(mut self, criterion: Option<String>) -> Self {
+        self.criterion = criterion;
+        self
+    }
+
+    /// Only exclusions recorded in this round (`None`: any).
+    pub fn with_round(mut self, round: Option<String>) -> Self {
+        self.round = round;
+        self
+    }
+
+    /// Whether `exclusion` matches every criterion set.
+    pub fn matches(&self, exclusion: &Exclusion) -> bool {
+        self.year.is_none_or(|y| exclusion.year == Some(y))
+            && self
+                .criterion
+                .as_deref()
+                .is_none_or(|c| exclusion.criterion.as_deref() == Some(c))
+            && self
+                .round
+                .as_deref()
+                .is_none_or(|r| exclusion.round.as_deref() == Some(r))
+    }
+}
+
+/// The exclusions in `exclusions` that `filter` matches, in order.
+pub fn filter_exclusions(exclusions: &[Exclusion], filter: &ExclusionFilter) -> Vec<Exclusion> {
+    exclusions
+        .iter()
+        .filter(|e| filter.matches(e))
+        .cloned()
+        .collect()
+}
+
 /// The key `work` is excluded under, and the one to look up when flagging
 /// it: its DOI when it has one, so an exclusion matches the same paper from
 /// any provider; otherwise its `provider:id` ([`candidate_exclusion_key`]).
@@ -617,6 +679,57 @@ mod tests {
             exclusions.get("arxiv:2301.01234").unwrap().reason,
             "not empirical"
         );
+    }
+
+    #[test]
+    fn a_filter_narrows_exclusions_by_year_criterion_and_round() {
+        let entry = |key: &str, year, criterion: &str, round: &str| {
+            Exclusion::new(
+                key.to_string(),
+                "T".to_string(),
+                "r".to_string(),
+                ExclusionStage::Screening,
+            )
+            .with_year(year)
+            .with_criterion(Some(criterion.to_string()))
+            .with_round(Some(round.to_string()))
+        };
+        let all = vec![
+            entry("a", Some(2019), "X1", "R1"),
+            entry("b", Some(2020), "X3", "R1"),
+            entry("c", None, "X3", "R2"),
+            Exclusion::new(
+                "d".to_string(),
+                "T".to_string(),
+                "r".to_string(),
+                ExclusionStage::FullText,
+            ),
+        ];
+        let keys = |filter: ExclusionFilter| -> Vec<String> {
+            filter_exclusions(&all, &filter)
+                .into_iter()
+                .map(|e| e.key)
+                .collect()
+        };
+        assert_eq!(keys(ExclusionFilter::new()), ["a", "b", "c", "d"]);
+        assert_eq!(keys(ExclusionFilter::new().with_year(Some(2020))), ["b"]);
+        assert_eq!(
+            keys(ExclusionFilter::new().with_criterion(Some("X3".to_string()))),
+            ["b", "c"]
+        );
+        assert_eq!(
+            keys(ExclusionFilter::new().with_round(Some("R1".to_string()))),
+            ["a", "b"]
+        );
+        assert_eq!(
+            keys(
+                ExclusionFilter::new()
+                    .with_criterion(Some("X3".to_string()))
+                    .with_round(Some("R1".to_string()))
+            ),
+            ["b"]
+        );
+        assert!(keys(ExclusionFilter::new().with_round(Some("r1".to_string()))).is_empty());
     }
 
     #[test]
