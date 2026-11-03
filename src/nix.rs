@@ -2,7 +2,7 @@
 //! declared papers, and an initial empty `papers.nix` (see [`crate::library`]
 //! for the schema PAX writes into it as papers are declared). Also owns the
 //! one place `pax-core` shells out to the `nix` binary — to fetch and hash an
-//! artifact, per the project's "PAX understands papers, Nix understands
+//! artifact, or add one from a file the user already has, per the project's "PAX understands papers, Nix understands
 //! artifacts" split (see `CLAUDE.md`).
 
 use std::fs::{create_dir, write};
@@ -106,6 +106,71 @@ pub fn prefetch_file(url: &str, name: &str) -> Result<String, PaxError> {
     parse_prefetch_output(&output.stdout)
 }
 
+/// How long the local-file `nix` calls (`hash file`, `store add-file`,
+/// `path-info`, `nix-store --print-fixed-path`) may run. None touches the
+/// network; a large PDF only needs to be read and copied once.
+const LOCAL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Runs a `nix` command that reads only local files and returns its trimmed
+/// stdout, or its stderr as a [`PaxError::Fetch`].
+fn run_local(cmd: &mut Command) -> Result<String, PaxError> {
+    let output = run_with_timeout(cmd, LOCAL_TIMEOUT, PaxError::Fetch)?;
+    if !output.status.success() {
+        return Err(PaxError::Fetch(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// The SRI sha256 hash of `file`'s contents, as `nix store prefetch-file`
+/// would record it for the same bytes downloaded from a URL.
+pub(crate) fn hash_file(file: &Path) -> Result<String, PaxError> {
+    run_local(
+        Command::new("nix")
+            .args(["hash", "file", "--type", "sha256", "--sri"])
+            .arg(file),
+    )
+}
+
+/// Copies `file` into the Nix store under `name` (the citation key, for the
+/// reason [`prefetch_file`] gives), hashed flat: the same store path a
+/// fixed-output derivation with that name and hash has, so `research/flake.nix`
+/// finds it already built.
+pub(crate) fn add_file(file: &Path, name: &str) -> Result<PathBuf, PaxError> {
+    run_local(
+        Command::new("nix")
+            .args(["store", "add-file", "--name", name])
+            .arg(file),
+    )
+    .map(PathBuf::from)
+}
+
+/// Where the artifact named `name` with flat sha256 `hash` lives in the Nix
+/// store, if it's there: what [`add_file`] returned when it was added. Asks
+/// only the local store, so it never downloads anything.
+pub(crate) fn local_artifact_path(hash: &str, name: &str) -> Result<Option<PathBuf>, PaxError> {
+    let path =
+        run_local(Command::new("nix-store").args(["--print-fixed-path", "sha256", hash, name]))?;
+    let output = run_with_timeout(
+        Command::new("nix").args(["path-info", &path]),
+        LOCAL_TIMEOUT,
+        PaxError::Fetch,
+    )?;
+    Ok(output.status.success().then(|| PathBuf::from(path)))
+}
+
+/// Whether the library's `research/flake.nix` builds local artifacts
+/// ([`crate::Artifact::is_local`]). A flake written before `fetch --file`
+/// existed passes their null `source_url` to `fetchurl`, which fails to
+/// evaluate, so `nix build` can't build them from it (`pax open` still
+/// can: it finds a local artifact in the store without the flake). Decided
+/// by whether the flake uses `requireFile`, as the current template does.
+pub fn flake_builds_local_artifacts(root: &Path) -> bool {
+    std::fs::read_to_string(root.join("research").join("flake.nix"))
+        .is_ok_and(|flake| flake.contains("requireFile"))
+}
+
 /// Stages `research/`'s own contents so `nix build`'s flake evaluation
 /// doesn't fail with "not tracked by Git" on a paper's first fetch/open —
 /// `nix build` refuses to evaluate any file that isn't tracked *at all* (a
@@ -181,5 +246,25 @@ mod tests {
     #[test]
     fn parse_prefetch_output_rejects_malformed_json() {
         assert!(parse_prefetch_output(b"not json").is_err());
+    }
+
+    #[test]
+    fn only_a_flake_from_the_current_template_builds_local_artifacts() {
+        let root = std::env::temp_dir().join(format!("pax-nix-test-flake-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(!flake_builds_local_artifacts(&root), "no flake at all");
+
+        init_library(&root).unwrap();
+        assert!(flake_builds_local_artifacts(&root));
+
+        // The template before `fetch --file`: every paper goes to fetchurl.
+        let old = "{ outputs = { self, nixpkgs }: let pkgs = import nixpkgs { system = \
+                   \"x86_64-linux\"; }; mkPaper = name: paper: pkgs.fetchurl { name = name; \
+                   url = paper.source_url; hash = paper.hash; }; in { packages.x86_64-linux = \
+                   builtins.mapAttrs mkPaper (import ./papers.nix); }; }";
+        write(root.join("research").join("flake.nix"), old).unwrap();
+        assert!(!flake_builds_local_artifacts(&root));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

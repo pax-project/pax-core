@@ -63,6 +63,23 @@ fn success_exits_0_with_results_on_stdout() {
 }
 
 #[test]
+fn a_closed_stdout_exits_0_quietly() {
+    let dir = library("closed-stdout");
+    // The read end is closed before pax starts, so its first write fails
+    // with EPIPE, as when `pax list | head` stops reading.
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let output = Command::new(env!("CARGO_BIN_EXE_pax"))
+        .arg("list")
+        .current_dir(&dir)
+        .stdout(writer)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(stderr(&output).is_empty());
+}
+
+#[test]
 fn wrong_arguments_exit_2() {
     let dir = scratch("usage");
     assert_eq!(pax(&dir, &["no-such-command"]).status.code(), Some(2));
@@ -301,6 +318,35 @@ fn adding_a_paper_twice_is_refused_with_5() {
         assert_eq!(output.status.code(), Some(5), "pax add {again}");
         assert!(stderr(&output).contains(&format!("{key:?}")));
     }
+}
+
+/// `add --label` declares the paper and logs it as another source, so
+/// `stats` doesn't count it as decided outside the log.
+#[test]
+#[ignore = "needs the network"]
+fn adding_with_a_label_logs_the_paper_as_another_source() {
+    let dir = scratch("add-label");
+    assert_eq!(pax(&dir, &["init"]).status.code(), Some(0));
+    let output = pax(
+        &dir,
+        &["add", "crossref:10.1109/CVPR.2016.90", "--label", "seeds"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout(&output).starts_with("Added "));
+    let log = fs::read_to_string(dir.join("research").join("search-log.jsonl")).unwrap();
+    assert_eq!(log.lines().count(), 1);
+    let line: serde_json::Value = serde_json::from_str(log.trim_end()).unwrap();
+    assert_eq!(line["command"], "manual");
+    assert_eq!(line["label"], "seeds");
+    assert_eq!(line["reference"], "crossref:10.1109/CVPR.2016.90");
+    let output = pax(&dir, &["stats", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        json["identified"]["other_sources"],
+        serde_json::json!({ "seeds": 1 })
+    );
+    assert_eq!(json["decided_outside_log"], 0);
+    assert_eq!(json["reports_sought"], 1);
 }
 
 const NO_LIBRARY: &str =
@@ -665,6 +711,101 @@ fn stats_counts_related_works_in_their_own_box() {
     assert_eq!(json["identified"]["total"], 7);
 }
 
+/// The line `pax add crossref:10.1145/359545.359563 --label <label>` logs
+/// for `lamport1978`.
+fn lamport_added_by_hand(label: &str) -> String {
+    format!(
+        r#"{{"v":1,"command":"manual","reference":"crossref:10.1145/359545.359563","provider":"crossref","date":"2026-01-03T00:00:00Z","run":"r1","label":"{label}","limit":1,"filters":[],"total":null,"retrieved":1,"keys":[["doi:10.1145/359545.359563","title:time clocks and the ordering of events in a distributed system|1978"]],"merge":{{"before":1,"after":1,"unmatched":0}}}}"#
+    ) + "\n"
+}
+
+#[test]
+fn stats_counts_a_paper_added_with_a_label_as_another_source() {
+    let dir = library_with_history("stats-manual");
+    let log = dir.join("research").join("search-log.jsonl");
+    let mut text = fs::read_to_string(&log).unwrap();
+    text.push_str(&lamport_added_by_hand("seeds"));
+    fs::write(&log, text).unwrap();
+    let output = pax(&dir, &["stats"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(
+        stdout.contains(
+            "\
+  Records identified from citation searching  2
+    openalex                                  2
+  Records identified from other sources       1
+    seeds                                     1
+  Duplicate records removed                   2
+Screening
+  Records screened                            4
+  Records excluded                            1
+  Records awaiting screening                  1
+  Reports sought for retrieval                2
+"
+        ),
+        "{stdout}"
+    );
+    // lamport1978 now matches a logged record.
+    assert!(
+        !stderr(&output).contains("match no search-log record"),
+        "{}",
+        stderr(&output)
+    );
+    let output = pax(&dir, &["stats", "--json", "--by-label"]);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        json["identified"]["other_sources"],
+        serde_json::json!({ "seeds": 1 })
+    );
+    assert_eq!(json["identified"]["total"], 6);
+    assert_eq!(json["decided_outside_log"], 0);
+    assert_eq!(
+        json["by_label"][1],
+        serde_json::json!({ "label": "seeds", "identified": 1, "distinct": 1, "new_distinct": 1, "duplicates": 0 })
+    );
+}
+
+#[test]
+fn a_seeds_only_review_gives_prisma_counts_that_add_up() {
+    let dir = library("stats-seeds-only");
+    fs::write(
+        dir.join("research").join("search-log.jsonl"),
+        lamport_added_by_hand("seeds"),
+    )
+    .unwrap();
+    let output = pax(&dir, &["stats", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["identified"]["databases"], serde_json::json!({}));
+    assert_eq!(json["identified"]["total"], 1);
+    assert_eq!(json["decided_outside_log"], 0);
+    let count = |field: &str| json[field].as_u64().unwrap();
+    assert_eq!(count("records_screened"), 1);
+    assert_eq!(
+        count("records_screened"),
+        count("excluded_screening") + count("reports_sought") + count("awaiting_screening")
+    );
+}
+
+#[test]
+fn a_refused_or_failed_add_with_a_label_logs_nothing() {
+    let dir = library_with_exclusion("add-label-refused");
+    let log = dir.join("research").join("search-log.jsonl");
+    // Already declared, already excluded, and (offline) unresolvable.
+    for (reference, code) in [
+        ("crossref:10.1145/359545.359563", 5),
+        ("crossref:10.1/ABC", 5),
+        ("crossref:10.1/unknown", 6),
+    ] {
+        let output = pax_offline(&dir, &["add", reference, "--label", "seeds"]);
+        assert_eq!(output.status.code(), Some(code), "pax add {reference}");
+        assert!(stdout(&output).is_empty());
+        assert!(!log.exists(), "pax add {reference} logged");
+    }
+}
+
 #[test]
 fn stats_json_is_one_object_for_scripts() {
     let dir = library_with_history("stats-json");
@@ -679,6 +820,7 @@ fn stats_json_is_one_object_for_scripts() {
                 "databases": { "arxiv": 1, "openalex": 2 },
                 "citation_searching": { "openalex": 2 },
                 "related_works": {},
+                "other_sources": {},
                 "total": 5
             },
             "duplicates_removed": 2,
@@ -950,4 +1092,173 @@ fn edit_clears_an_alias_with_an_empty_value() {
     assert_eq!(pax(&dir, &["show", "P17"]).status.code(), Some(4));
     let papers = std::fs::read_to_string(dir.join("research").join("papers.nix")).unwrap();
     assert!(!papers.contains("alias"), "{papers}");
+}
+
+/// Records `hash` on `papers.nix`'s one paper, `lamport1978`, which has no
+/// `source_url`: a local artifact, as `fetch --file` leaves it.
+fn record_hash(dir: &std::path::Path, hash: &str) {
+    let papers = dir.join("research").join("papers.nix");
+    let text = fs::read_to_string(&papers).unwrap();
+    fs::write(
+        &papers,
+        text.replace("hash = null;", &format!("hash = {hash:?};")),
+    )
+    .unwrap();
+}
+
+/// A valid SRI sha256 hash no file in a Nix store has.
+const ABSENT_HASH: &str = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+#[test]
+fn fetch_force_needs_file() {
+    let dir = library("fetch-force");
+    let output = pax_offline(&dir, &["fetch", "lamport1978", "--force"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("--file"), "{}", stderr(&output));
+}
+
+#[test]
+fn fetch_file_refuses_a_path_that_isnt_a_file_with_2() {
+    let dir = library("fetch-file-missing");
+    for path in ["no-such.pdf", "research"] {
+        let output = pax_offline(&dir, &["fetch", "lamport1978", "--file", path]);
+        assert_eq!(output.status.code(), Some(2), "{path}");
+        assert!(
+            stderr(&output).contains("is not a file"),
+            "{}",
+            stderr(&output)
+        );
+    }
+    let papers = fs::read_to_string(dir.join("research").join("papers.nix")).unwrap();
+    assert!(papers.contains("hash = null;"), "{papers}");
+}
+
+#[test]
+fn fetch_file_needs_a_declared_paper() {
+    let dir = library("fetch-file-unknown");
+    fs::write(dir.join("paper.pdf"), "%PDF").unwrap();
+    let output = pax_offline(&dir, &["fetch", "nosuchkey", "--file", "paper.pdf"]);
+    assert_eq!(output.status.code(), Some(4));
+}
+
+#[test]
+fn stats_counts_a_local_artifact_as_included() {
+    let dir = library("stats-local");
+    record_hash(&dir, ABSENT_HASH);
+    let output = pax(&dir, &["stats", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains(r#""not_retrieved": 0"#), "{out}");
+    assert!(out.contains(r#""included": 1"#), "{out}");
+}
+
+#[test]
+fn fetch_without_a_source_suggests_fetch_file() {
+    let dir = library("fetch-no-source");
+    let output = pax_offline(&dir, &["fetch", "lamport1978"]);
+    assert_eq!(output.status.code(), Some(5));
+    assert!(
+        stderr(&output).contains("pax fetch lamport1978 --file <path>"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+#[ignore = "needs nix"]
+fn fetch_file_stores_the_file_and_records_its_hash() {
+    let dir = library("fetch-file");
+    // Unique bytes, so the store path is this run's own.
+    let content = format!(
+        "%PDF-1.4 pax fetch --file test {:?}",
+        std::time::SystemTime::now()
+    );
+    fs::write(dir.join("paper.pdf"), &content).unwrap();
+    fs::write(dir.join("other.pdf"), format!("{content} (another file)")).unwrap();
+
+    let output = pax(&dir, &["fetch", "lamport1978", "--file", "paper.pdf"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout(&output).starts_with("Fetched lamport1978 (sha256-"));
+    // `pax init` wrote the current flake, which builds local artifacts.
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+    let papers = fs::read_to_string(dir.join("research").join("papers.nix")).unwrap();
+    assert!(papers.contains("source_url = null;"), "{papers}");
+    assert!(papers.contains("hash = \"sha256-"), "{papers}");
+
+    let output = pax(&dir, &["stats", "--json"]);
+    assert!(stdout(&output).contains(r#""included": 1"#));
+    let output = pax(&dir, &["check"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stdout(&output));
+    assert!(stdout(&output).contains("lamport1978: reproducible"));
+    let output = pax(&dir, &["sync"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout(&output).contains("Already fetched lamport1978"));
+
+    // `open` finds it in the store without the flake, so a flake from
+    // before `fetch --file` opens it too.
+    fs::write(
+        dir.join("research").join("flake.nix"),
+        "{ outputs = { self, nixpkgs }: { }; }\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_pax"))
+        .args(["open", "lamport1978"])
+        .current_dir(&dir)
+        .env("PAX_PDF_VIEWER", "cat")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), content);
+
+    // The same file again is fine, with a warning that this flake can't
+    // build it.
+    let output = pax(&dir, &["fetch", "lamport1978", "--file", "paper.pdf"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("research/flake.nix predates `fetch --file`"),
+        "{}",
+        stderr(&output)
+    );
+
+    // A different file is refused until --force.
+    let papers = dir.join("research").join("papers.nix");
+    let before = fs::read_to_string(&papers).unwrap();
+    let output = pax(&dir, &["fetch", "lamport1978", "--file", "other.pdf"]);
+    assert_eq!(output.status.code(), Some(5));
+    assert!(stderr(&output).contains("--force"), "{}", stderr(&output));
+    assert_eq!(fs::read_to_string(&papers).unwrap(), before);
+    let output = pax(
+        &dir,
+        &["fetch", "lamport1978", "--file", "other.pdf", "--force"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_ne!(fs::read_to_string(&papers).unwrap(), before);
+}
+
+#[test]
+#[ignore = "needs nix"]
+fn a_local_artifact_missing_from_the_store_exits_8() {
+    let dir = library("local-missing");
+    record_hash(&dir, ABSENT_HASH);
+    let hint = "pax fetch lamport1978 --file <path>";
+
+    let output = pax(&dir, &["check"]);
+    assert_eq!(output.status.code(), Some(8), "{}", stdout(&output));
+    assert!(stdout(&output).contains("lamport1978: MISSING"));
+    assert!(stdout(&output).contains(hint));
+    assert!(stdout(&output).contains("1 missing"));
+
+    for args in [
+        &["sync"][..],
+        &["fetch", "lamport1978"],
+        &["open", "lamport1978"],
+    ] {
+        let output = pax(&dir, args);
+        assert_eq!(output.status.code(), Some(8), "{args:?}");
+        assert!(
+            stderr(&output).contains(hint),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+    }
 }

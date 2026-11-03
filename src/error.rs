@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use thiserror::Error;
 
 use crate::exclusions::ExclusionStage;
@@ -32,10 +34,35 @@ pub enum PaxError {
          --author, --year, and/or --doi"
     )]
     NoChangesSpecified,
-    #[error("no PDF source recorded for {0:?}; nothing to fetch")]
+    #[error(
+        "no PDF source recorded for {0:?}; nothing to fetch (add a copy you have with `pax fetch \
+         {0} --file <path>`)"
+    )]
     NoSourceUrl(String),
     #[error("fetch failed: {0}")]
     Fetch(String),
+    /// The path given to [`crate::fetch_file`] isn't a readable file.
+    #[error("{} is not a file", .0.display())]
+    NotAFile(PathBuf),
+    /// The file given to [`crate::fetch_file`] isn't the content already
+    /// recorded for the paper: its hash differs.
+    #[error(
+        "{citation_key} already has an artifact with hash {recorded}, but this file's hash is \
+         {actual}; pass --force to replace it"
+    )]
+    HashMismatch {
+        citation_key: String,
+        recorded: String,
+        actual: String,
+    },
+    /// The paper's artifact was added from a local file
+    /// ([`crate::Artifact::is_local`]) that isn't in this machine's Nix
+    /// store, so nothing can fetch it: the user has to provide it again.
+    #[error(
+        "{0} was added from a local file, which isn't in this Nix store; provide it again with \
+         `pax fetch {0} --file <path>`"
+    )]
+    LocalArtifactMissing(String),
     #[error("build failed: {0}")]
     Build(String),
     #[error("upload failed: {0}")]

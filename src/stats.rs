@@ -39,8 +39,7 @@ pub struct Stats {
     /// full text (a declared paper can't be excluded, so a full-text
     /// exclusion passed screening first).
     pub reports_sought: usize,
-    /// Declared papers with no fetchable artifact: no `source_url` or no
-    /// `hash` recorded.
+    /// Declared papers with no artifact: no `hash` recorded.
     pub not_retrieved: usize,
     /// Papers read in full: `reports_sought - not_retrieved`.
     pub reports_assessed: usize,
@@ -48,14 +47,16 @@ pub struct Stats {
     pub excluded_full_text: FullTextExclusions,
     /// Papers excluded at each stage, by the protocol's criterion.
     pub excluded_by_criterion: CriterionExclusions,
-    /// Declared papers with a fetchable artifact. A declared paper without
-    /// one is only counted in `not_retrieved`.
+    /// Declared papers with an artifact: a `hash`, fetched from a URL or
+    /// added from a local file. A declared paper without one is only
+    /// counted in `not_retrieved`.
     pub included: usize,
     /// Log lines where the provider failed, so retrieved no records; they
     /// count nowhere else.
     pub skipped_log_lines: usize,
     /// Declared or excluded papers that match no logged record, e.g. added
-    /// from a DOI the reviewer already knew. Still counted in their box.
+    /// from a DOI the reviewer already knew without `add --label`. Still
+    /// counted in their box.
     pub decided_outside_log: usize,
     /// The records identified under each search-log label, labels in the
     /// order they first appear in the log; unlabelled lines are one group.
@@ -96,7 +97,12 @@ pub struct Identified {
     /// folding it into citation searching would overstate what the reference
     /// lists and forward citations found.
     pub related_works: BTreeMap<String, usize>,
-    /// Every record identified, from all three.
+    /// Papers the reviewer added by hand (`add --label`, logged as `manual`),
+    /// keyed by the label rather than a provider, e.g. `seeds`: PRISMA's
+    /// "other methods" too, one source per label, each reported apart from
+    /// the searches. A `manual` line with no label is keyed by `""`.
+    pub other_sources: BTreeMap<String, usize>,
+    /// Every record identified, from all four.
     pub total: usize,
 }
 
@@ -143,7 +149,9 @@ pub struct ReasonCount {
 /// - **identified**: each answering provider's retrieved records, summed per
 ///   provider — `search` / `search --author` lines as databases, `refs` /
 ///   `cited-by` lines as citation searching, `related` lines as related
-///   works (see [`Identified::related_works`]). A line whose provider failed
+///   works (see [`Identified::related_works`]), and `manual` lines (papers
+///   added by hand with `add --label`) per label as other sources (see
+///   [`Identified::other_sources`]). A line whose provider failed
 ///   retrieved nothing and is only counted in `skipped_log_lines`.
 /// - **duplicates removed**: identified records minus distinct papers across
 ///   the *whole* log, not per command. Two records are the same paper when
@@ -153,10 +161,12 @@ pub struct ReasonCount {
 /// - **excluded at screening / full text**: `excluded.nix` entries by
 ///   `stage`, the full-text ones grouped by `reason`, and both grouped by
 ///   `criterion` (`excluded_by_criterion`).
-/// - **not retrieved**: declared papers with no `source_url` or no `hash` —
-///   those `check_library` reports as not fetched. Decided from
-///   `papers.nix` alone, with no network: a recorded artifact whose source
-///   has since gone away isn't counted (that's `check_library`'s job).
+/// - **not retrieved**: declared papers with no `hash` — those
+///   `check_library` reports as not fetched. A paper with a hash and no
+///   `source_url` was added from a local file ([`crate::fetch_file`]) and is
+///   retrieved. Decided from `papers.nix` alone, with no network: a recorded
+///   artifact whose source has since gone away isn't counted (that's
+///   `check_library`'s job).
 /// - **reports sought**: the papers that passed screening — declared, or
 ///   excluded at full text. **Assessed**: reports sought minus those not
 ///   retrieved (never below zero).
@@ -172,8 +182,9 @@ pub struct ReasonCount {
 ///   in the order labels first appear, the records identified, the distinct
 ///   papers among them, and how many of those no earlier label identified;
 ///   that last count sums to `records_screened` over every label.
-/// - **included**: the declared papers with a fetchable artifact, so a paper
-///   is never both included and not retrieved.
+/// - **included**: the declared papers with a recorded artifact (a `hash`,
+///   whether fetched from a URL or added from a local file), so a paper is
+///   never both included and not retrieved.
 ///
 /// The boxes balance, as a PRISMA diagram's must, when every declared or
 /// excluded paper was found by a logged search (`decided_outside_log` is
@@ -207,14 +218,18 @@ pub fn stats(root: &Path) -> Result<Stats, PaxError> {
             stats.skipped_log_lines += 1;
             continue;
         };
-        let column = match entry.command {
+        let (column, source) = match entry.command {
             SearchCommand::Refs | SearchCommand::CitedBy => {
-                &mut stats.identified.citation_searching
+                (&mut stats.identified.citation_searching, entry.provider)
             }
-            SearchCommand::Related => &mut stats.identified.related_works,
-            _ => &mut stats.identified.databases,
+            SearchCommand::Related => (&mut stats.identified.related_works, entry.provider),
+            SearchCommand::Manual => (
+                &mut stats.identified.other_sources,
+                labels[label].clone().unwrap_or_default(),
+            ),
+            _ => (&mut stats.identified.databases, entry.provider),
         };
-        *column.entry(entry.provider).or_default() += keys.len();
+        *column.entry(source).or_default() += keys.len();
         for record in keys {
             let parsed = record
                 .iter()
@@ -289,7 +304,7 @@ pub fn stats(root: &Path) -> Result<Stats, PaxError> {
     let (retrieved, not_retrieved): (Vec<_>, Vec<_>) = library
         .papers()
         .iter()
-        .partition(|paper| paper.artifact.source_url.is_some() && paper.artifact.hash.is_some());
+        .partition(|paper| paper.artifact.hash.is_some());
     stats.included = retrieved.len();
     stats.not_retrieved = not_retrieved.len();
     stats.reports_sought = library.papers().len() + stats.excluded_full_text.total;
@@ -463,6 +478,7 @@ mod tests {
     fn line(command: &str, provider: &str, keys: Option<&[&[&str]]>) -> String {
         let input = match command {
             "refs" | "cited-by" | "related" => r#""seed":"lamport1978""#,
+            "manual" => r#""reference":"crossref:10.1/x""#,
             _ => r#""query":"q""#,
         };
         let outcome = match keys {
@@ -575,6 +591,107 @@ mod tests {
         assert_eq!(stats.duplicates_removed, 1);
         assert_eq!(stats.records_screened, 3);
         assert_eq!(stats.skipped_log_lines, 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn papers_added_by_hand_are_other_sources_per_label() {
+        let root = scratch_library("manual");
+        write_log(
+            &root,
+            &[
+                line("search", "openalex", Some(&[&["doi:10.1/a"]])),
+                labelled(
+                    "seeds",
+                    line("manual", "crossref", Some(&[&["doi:10.1/a"]])),
+                ),
+                labelled(
+                    "seeds",
+                    line("manual", "openalex", Some(&[&["doi:10.1/b"]])),
+                ),
+                labelled(
+                    "expert",
+                    line("manual", "arxiv", Some(&[&["arxiv:2001.1"]])),
+                ),
+                // Hand-written, unlabelled: still another source, not a
+                // database.
+                line("manual", "crossref", Some(&[&["doi:10.1/c"]])),
+            ],
+        );
+        let stats = stats(&root).unwrap();
+        assert_eq!(
+            stats.identified.databases,
+            BTreeMap::from([("openalex".to_string(), 1)])
+        );
+        assert_eq!(
+            stats.identified.other_sources,
+            BTreeMap::from([
+                (String::new(), 1),
+                ("expert".to_string(), 1),
+                ("seeds".to_string(), 2),
+            ])
+        );
+        assert!(stats.identified.citation_searching.is_empty());
+        assert_eq!(stats.identified.total, 5);
+        // `a`, found by a search and added as a seed, is one paper.
+        assert_eq!(stats.duplicates_removed, 1);
+        assert_eq!(stats.records_screened, 4);
+        let seeds = stats
+            .by_label
+            .iter()
+            .find(|counts| counts.label.as_deref() == Some("seeds"))
+            .unwrap();
+        assert_eq!((seeds.identified, seeds.new_distinct), (2, 1));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_seeds_only_review_decides_nothing_outside_the_log_and_balances() {
+        let root = scratch_library("seeds-only");
+        write_log(
+            &root,
+            &[
+                labelled(
+                    "seeds",
+                    line(
+                        "manual",
+                        "crossref",
+                        Some(&[&["doi:10.1/a", "title:a paper|2020"]]),
+                    ),
+                ),
+                labelled(
+                    "seeds",
+                    line(
+                        "manual",
+                        "arxiv",
+                        Some(&[&["arxiv:2001.00001", "title:b paper|2021"]]),
+                    ),
+                ),
+            ],
+        );
+        write_papers(
+            &root,
+            &[
+                ("a2020", Some("10.1/a"), "A paper", 2020, None),
+                (
+                    "b2021",
+                    None,
+                    "B paper",
+                    2021,
+                    Some("https://arxiv.org/pdf/2001.00001"),
+                ),
+            ],
+        );
+        let stats = stats(&root).unwrap();
+        assert_eq!(stats.identified.total, 2);
+        assert_eq!(stats.decided_outside_log, 0);
+        assert_eq!(stats.awaiting_screening, 0);
+        assert_eq!(stats.records_screened, 2);
+        assert_eq!(stats.reports_sought, 2);
+        assert_eq!(
+            stats.records_screened,
+            stats.excluded_screening + stats.reports_sought + stats.awaiting_screening
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -717,6 +834,16 @@ mod tests {
     tags = [ ];
     notes = null;
   };
+  localfile2003 = {
+    doi = null;
+    title = "Added from a local file";
+    authors = [ ];
+    year = 2003;
+    source_url = null;
+    hash = "sha256-BBBB";
+    tags = [ ];
+    notes = null;
+  };
 }
 "#,
         )
@@ -751,7 +878,8 @@ mod tests {
                 full_text: vec![none(3)],
             }
         );
-        assert_eq!(stats.included, 1);
+        // A local artifact (a hash, no source_url) is retrieved.
+        assert_eq!(stats.included, 2);
         assert_eq!(stats.not_retrieved, 2);
         // No log: nothing identified.
         assert_eq!(stats.identified, Identified::default());
@@ -1066,6 +1194,7 @@ mod tests {
                 databases: BTreeMap::from([("openalex".to_string(), 2)]),
                 citation_searching: BTreeMap::new(),
                 related_works: BTreeMap::new(),
+                other_sources: BTreeMap::new(),
                 total: 2,
             },
             duplicates_removed: 1,
@@ -1088,7 +1217,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_string(&stats).unwrap(),
-            r#"{"identified":{"databases":{"openalex":2},"citation_searching":{},"related_works":{},"total":2},"duplicates_removed":1,"records_screened":1,"excluded_screening":0,"awaiting_screening":0,"reports_sought":0,"not_retrieved":0,"reports_assessed":0,"excluded_full_text":{"total":1,"reasons":[{"reason":"r","count":1}]},"excluded_by_criterion":{"screening":[],"full_text":[]},"included":0,"skipped_log_lines":0,"decided_outside_log":0,"by_label":[{"label":"R1","identified":2,"distinct":1,"new_distinct":1,"duplicates":1}]}"#
+            r#"{"identified":{"databases":{"openalex":2},"citation_searching":{},"related_works":{},"other_sources":{},"total":2},"duplicates_removed":1,"records_screened":1,"excluded_screening":0,"awaiting_screening":0,"reports_sought":0,"not_retrieved":0,"reports_assessed":0,"excluded_full_text":{"total":1,"reasons":[{"reason":"r","count":1}]},"excluded_by_criterion":{"screening":[],"full_text":[]},"included":0,"skipped_log_lines":0,"decided_outside_log":0,"by_label":[{"label":"R1","identified":2,"distinct":1,"new_distinct":1,"duplicates":1}]}"#
         );
     }
 
