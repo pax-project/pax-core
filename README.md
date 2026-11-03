@@ -82,7 +82,7 @@ pax search "actor model" --provider dblp
 pax search "actor model" --provider openalex --provider dblp
 ```
 
-dblp results page and report totals like the others, merge with them by DOI, arXiv id or title and year, and are logged as their own `dblp` database in the [search log](#search-log) and [PRISMA counts](#prisma-counts). Its references are dblp keys (`dblp:conf/icse/Smith20`), which `pax add` and `pax show` take. dblp has no abstracts and no citation graph, so `refs`, `cited-by` and `related` don't ask it; a `dblp:` seed is looked up in the other providers by its DOI. Its search can't search by author alone, so `--author` searches dblp by full text. dblp sometimes answers automated clients with a bot check instead of results; pax reports that as dblp's error, and the other providers still answer.
+dblp results page and report totals like the others, merge with them by DOI, arXiv id or title and year, and are logged as their own `dblp` database in the [search log](#search-log) and [PRISMA counts](#prisma-counts). Its references are dblp keys (`dblp:conf/icse/Smith20`), which `pax add` and `pax show` take. dblp has no abstracts and no citation graph, so `refs`, `cited-by` and `related` don't ask it; a `dblp:` seed is looked up in the other providers by its DOI. pax asks dblp through its [SPARQL endpoint](https://sparql.dblp.org), since dblp.org's own search API answers automated clients with a bot check instead of results. A search returns the publications whose title has every word of the query (a word of four or more letters also matches as a prefix, so `model` matches `models`), newest first; `--author` returns those with an author or editor whose name has every word given. Should dblp answer with a web page instead of data, pax reports that as dblp's error, and the other providers still answer.
 
 `pax add <result>` declares a search result in `research/papers.nix`, recording its open PDF link as `source_url` for `pax fetch`. If the resolved record has no PDF but has a DOI, `add` looks the DOI up in the other providers and takes a PDF link from them: an arXiv-hosted PDF if any provider has one, otherwise the first PDF link it finds (OpenAlex, then Crossref, then Semantic Scholar). If none has one, or the lookup fails, `source_url` stays unset and can be set later with `pax edit`. A paper already in the library, by DOI or by arXiv id in any version, isn't added again: `add` refuses it and names its citation key. Nor is a paper you've [excluded](#excluding-papers): `add` names the exclusion's key, stage and reason, and `pax unexclude` reverses it.
 
@@ -104,8 +104,8 @@ Each provider applies a filter in its own query where its API supports it, so it
 
 | Filter | OpenAlex | Crossref | Semantic Scholar | arXiv | dblp |
 | --- | --- | --- | --- | --- | --- |
-| year | server | server | server | server (submission date) | server for a range of up to 30 years, else after retrieval |
-| type | server | server (no `review` type: not applied) | server (no `preprint`/`thesis` type: not applied) | every record is a preprint; any other type matches nothing | after retrieval (books and theses share one type, and there's no `review` type: not applied for those) |
+| year | server | server | server | server (submission date) | server |
+| type | server | server (no `review` type: not applied) | server (no `preprint`/`thesis` type: not applied) | every record is a preprint; any other type matches nothing | server (books and theses share one type, and there's no `review` type: not applied for those) |
 | language | server | after retrieval (records with no language are kept, marked `[language unknown]`) | not applied (no language data) | not applied (no language data) | not applied (no language data) |
 
 Crossref records often carry no language (proceedings papers never do), so its language filter can't check them. Rather than silently dropping every conference paper, pax keeps them, marks each such row `[language unknown]`, and says under Crossref's count how many it kept that way.
@@ -244,7 +244,38 @@ pax fetch doe2020 --file ~/Downloads/doe2020.pdf
 
 The file is added to the Nix store, and its hash recorded in `papers.nix` as a download's would be, so the paper counts as included in [`pax stats`](#prisma-counts) and `pax open` opens it. A paper with no `source_url` keeps none: its artifact exists only where you added the file. If a hash is already recorded and the file's differs, `fetch --file` refuses it (exit 5) and changes nothing; `--force` replaces the hash.
 
-On another machine, or after the file is garbage-collected from the store, nothing can download it again. `pax check`, `pax sync`, `pax fetch` and `pax open` then say so for that paper, `provide it again with pax fetch doe2020 --file <path>`, and exit 8 (`check` and `sync` exit 8 only when that's every problem they found). Giving the same file again restores it.
+`fetch --file` also registers a Nix garbage-collector root for the file at `research/.gcroots/doe2020`, so `nix-collect-garbage` keeps it. The roots belong to this machine, so `research/.gitignore` lists `.gcroots/`: `pax init` writes it, and `fetch --file` adds the line to an existing library's `.gitignore` when it's missing. Deleting a root (or the library) leaves the file for the next garbage collection to remove.
+
+The limitation remains that the Nix store is the only copy pax keeps: on another machine, or on this one if the store is wiped, nothing can download the file again. `pax check`, `pax sync`, `pax fetch` and `pax open` then say so for that paper, `provide it again with pax fetch doe2020 --file <path>`, and exit 8 (`check` and `sync` exit 8 only when that's every problem they found). Giving the same file again restores it.
+
+### Backing them up
+
+Keep a copy of these PDFs somewhere other than the store, for example a private drive or the backup your review protocol names:
+
+```Bash
+pax export pdfs ~/backup/review-pdfs
+```
+
+`export pdfs` copies every paper added from a local file out of the Nix store as `<dir>/<citation_key>.pdf`, creating the directory if needed and replacing earlier copies, and writes `<dir>/manifest.json`, mapping each exported citation key to the hash its file must match:
+
+```JSON
+{
+  "doe2020": "sha256-…"
+}
+```
+
+Papers with a `source_url` aren't copied: Nix can download them again. A paper that's already missing from the store is reported, left out of the manifest, and makes `export pdfs` exit 8.
+
+To restore, on another machine or after the store lost the files:
+
+```Bash
+pax sync --from ~/backup/review-pdfs
+pax check
+```
+
+`sync --from` is `sync` that first looks in the directory: each paper added from a local file whose `<citation_key>.pdf` is there is added back to the store, with its garbage-collector root, when the file's hash is the one recorded in `papers.nix`. A file whose hash differs is reported and skipped; the recorded hash never changes (to replace it, use `fetch --file --force`). Papers with no file in the directory are synced as usual, so one still missing is reported and, when that's the only problem, `sync` exits 8. `check` then exits 0 once every paper is back. The hashes `sync --from` checks are those in `papers.nix`; the manifest documents the backup, and isn't needed to restore it.
+
+A library from before garbage-collector roots has none for its files: `pax export pdfs <dir>` followed by `pax sync --from <dir>` adds them.
 
 `nix build research#doe2020` builds such a paper from the store, or fails with the same instruction, with a `research/flake.nix` written by this version's `pax init`. A flake from an earlier version passes every paper to `fetchurl`, which can't evaluate one without a URL: `fetch --file` warns when your flake is one of those. pax itself doesn't need the flake for these papers, so `pax open` works either way; to make `nix build` work, replace `research/flake.nix` with the current [template](templates/flake.nix.template).
 
@@ -420,13 +451,13 @@ Every command exits with a code a script can branch on:
 | --- | --- |
 | 0 | Success. |
 | 1 | Any other failure, e.g. `nix` failing to fetch or build; also `check` or `sync` finding problems in the library, or a `search`, `refs`, `cited-by` or `related` that succeeded but couldn't write the [search log](#search-log). |
-| 2 | Wrong arguments: an unknown command or flag, a malformed `provider:id`, citation key or alias, a `fetch --file` path that isn't a file, or flags that can't be combined. |
+| 2 | Wrong arguments: an unknown command or flag, a malformed `provider:id`, citation key or alias, a `fetch --file` path that isn't a file, a `sync --from` path that isn't a directory, or flags that can't be combined. |
 | 3 | Partial: in `search`, `refs`, `cited-by` or `related`, at least one provider failed (network, rate limit, provider error) while others answered, so the results are incomplete. In `refs`, `cited-by` and `related` that includes a list withheld by the provider or a provider that can't look the seed up, since its list is still missing; a list cut short by `--limit` isn't (see [Citation graph](#citation-graph)). In `search --doi`, a provider that has no record of the DOI isn't a failure: it answered, so when the others returned results `pax` exits 0 and notes it on stderr. |
 | 4 | Not found: a reference, seed, citation key or alias doesn't resolve, e.g. no provider has a record of the `refs` / `cited-by` / `related` seed (with several seeds, of any of them) or the `search --doi` DOI, or `unexclude` names a paper that isn't excluded. |
 | 5 | Refused: the library rejected the operation, e.g. adding or excluding a paper already declared, adding an excluded paper, renaming to a citation key in use, giving a paper an alias or citation key another paper has, giving `fetch` / `open` / `edit` / `remove` an excluded paper's alias, fetching a paper with no PDF source, a `fetch --file` whose hash differs from the recorded one without `--force`, or `init` where a library exists. |
 | 6 | Every provider failed (network, rate limit, provider error). |
 | 7 | The library is missing, not initialized, or unreadable. A command that needs a library checks for `research/papers.nix` before doing anything else, so `add` fails before any network call, and so do a citation key or alias given to `show`, `refs`, `cited-by` or `related` and `search --local`; a `provider:id` reference and a plain `search` work without one. |
-| 8 | A file to provide again: a paper added with [`fetch --file`](#papers-you-already-have) isn't in this machine's Nix store, and nothing can download it. `fetch` and `open` exit 8 for that paper; `check` and `sync` exit 8 when every problem they found is one of these, and 1 when there's any other. |
+| 8 | A file to provide again: a paper added with [`fetch --file`](#papers-you-already-have) isn't in this machine's Nix store, and nothing can download it. `fetch` and `open` exit 8 for that paper; `check`, `sync` and `export pdfs` exit 8 when every problem they found is one of these, and 1 when there's any other. |
 
 ### JSON output
 
@@ -444,8 +475,9 @@ Every command exits with a code a script can branch on:
 | `remove`, `edit` | The paper (as it is after the edit). |
 | `exclude`, `unexclude` | The exclusion: `key`, `title`, `reason`, `stage`, `year`, `criterion`, `round`, `alias`. |
 | `export bibtex` | `{"citation_keys": [...], "bibtex": "…"}`. |
+| `export pdfs` | `{"directory", "manifest", "papers": [{"citation_key", "status": "exported" \| "missing" \| "failed", "hash", "file", "error"}], "exported", "missing", "failed"}`. |
 | `fetch` | `{"citation_key", "status": "fetched" \| "already-fetched", "hash", …}`. |
-| `sync` | `{"papers": [...]}`, one `fetch` document per paper; one that failed has a `status` such as `no-source-url`, `fetch-failed` or `file-needed` and a `reason`. |
+| `sync` | `{"papers": [...]}`, one `fetch` document per paper; one that failed has a `status` such as `no-source-url`, `fetch-failed` or `file-needed` and a `reason`. With `--from`, a restored paper is `fetched`, and a backup file that doesn't match is `hash-mismatch`. |
 | `check` | `{"papers": [{"citation_key", "status", "expected", "actual", "error"}], "checked", "reproducible", "not_fetched", "mismatched", "errored", "missing"}`. |
 | `open` | `{"citation_key", "path"}`, once the viewer started; the viewer's own output goes to stderr. |
 | `init` | `{"path": "./research"}`. |

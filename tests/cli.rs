@@ -1339,6 +1339,182 @@ fn a_local_artifact_missing_from_the_store_exits_8() {
             stderr(&output)
         );
     }
+
+    // Nothing to export, and an empty backup restores nothing.
+    let output = pax(&dir, &["export", "pdfs", "backup"]);
+    assert_eq!(output.status.code(), Some(8), "{}", stderr(&output));
+    assert!(stderr(&output).contains(hint), "{}", stderr(&output));
+    assert!(!dir.join("backup").join("lamport1978.pdf").exists());
+    let manifest = fs::read_to_string(dir.join("backup").join("manifest.json")).unwrap();
+    assert_eq!(manifest, "{}\n");
+    let output = pax(&dir, &["sync", "--from", "backup"]);
+    assert_eq!(output.status.code(), Some(8), "{}", stderr(&output));
+}
+
+#[test]
+fn init_keeps_the_gc_roots_out_of_git() {
+    let dir = scratch("init-gitignore");
+    assert_eq!(pax(&dir, &["init"]).status.code(), Some(0));
+    assert_eq!(
+        fs::read_to_string(dir.join("research").join(".gitignore")).unwrap(),
+        ".gcroots/\n"
+    );
+}
+
+#[test]
+fn export_pdfs_with_no_local_artifacts_writes_an_empty_manifest() {
+    let dir = library("export-pdfs-none");
+    let output = pax(&dir, &["export", "pdfs", "backup"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).starts_with("0 of 0 papers"),
+        "{}",
+        stdout(&output)
+    );
+    let manifest = fs::read_to_string(dir.join("backup").join("manifest.json")).unwrap();
+    assert_eq!(manifest, "{}\n");
+
+    let output = pax(&dir, &["--json", "export", "pdfs", "backup"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let exported = json(&output);
+    assert_eq!(exported["papers"], serde_json::json!([]));
+    assert_eq!(exported["exported"], 0);
+    assert_eq!(exported["directory"], "backup");
+    assert_eq!(exported["manifest"], "backup/manifest.json");
+}
+
+#[test]
+fn sync_from_a_path_that_isnt_a_directory_exits_2() {
+    let dir = library("sync-from-missing");
+    fs::write(dir.join("file.pdf"), "%PDF").unwrap();
+    for path in ["no-such-dir", "file.pdf"] {
+        let output = pax_offline(&dir, &["sync", "--from", path]);
+        assert_eq!(output.status.code(), Some(2), "{path}");
+        assert!(
+            stderr(&output).contains("is not a directory"),
+            "{}",
+            stderr(&output)
+        );
+    }
+}
+
+/// The store path `research/.gcroots/<key>` roots.
+fn gc_root(dir: &std::path::Path, key: &str) -> PathBuf {
+    fs::read_link(dir.join("research").join(".gcroots").join(key)).unwrap()
+}
+
+/// Whether `nix-store --delete` deleted `path`: it refuses while a GC root
+/// holds it.
+fn nix_store_delete(path: &std::path::Path) -> bool {
+    let output = Command::new("nix-store")
+        .arg("--delete")
+        .arg(path)
+        .output()
+        .unwrap();
+    output.status.success() && !path.exists()
+}
+
+#[test]
+#[ignore = "needs nix"]
+fn a_local_artifact_is_rooted_backed_up_and_restored() {
+    let dir = library("local-backup");
+    // Unique bytes, so the store path is this run's own.
+    let content = format!(
+        "%PDF-1.4 pax backup test {:?}",
+        std::time::SystemTime::now()
+    );
+    fs::write(dir.join("paper.pdf"), &content).unwrap();
+    let output = pax(&dir, &["fetch", "lamport1978", "--file", "paper.pdf"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+
+    // The GC root holds the store path, and stays out of git.
+    let store_path = gc_root(&dir, "lamport1978");
+    assert!(store_path.starts_with("/nix/store/"), "{store_path:?}");
+    assert!(!nix_store_delete(&store_path), "rooted, so not deleted");
+    assert!(store_path.exists());
+    let gitignore = fs::read_to_string(dir.join("research").join(".gitignore")).unwrap();
+    assert!(
+        gitignore.lines().any(|line| line == ".gcroots/"),
+        "{gitignore}"
+    );
+
+    // A library from before GC roots gets the .gitignore line on fetch --file.
+    fs::remove_file(dir.join("research").join(".gitignore")).unwrap();
+    let output = pax(&dir, &["fetch", "lamport1978", "--file", "paper.pdf"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        fs::read_to_string(dir.join("research").join(".gitignore")).unwrap(),
+        ".gcroots/\n"
+    );
+
+    // Export: the file and the manifest with its hash.
+    let papers = fs::read_to_string(dir.join("research").join("papers.nix")).unwrap();
+    let hash = papers
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("hash = \""))
+        .and_then(|rest| rest.strip_suffix("\";"))
+        .unwrap()
+        .to_string();
+    let output = pax(&dir, &["export", "pdfs", "backup"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("Exported lamport1978 to backup/lamport1978.pdf"),
+        "{}",
+        stdout(&output)
+    );
+    let backup = dir.join("backup");
+    assert_eq!(
+        fs::read_to_string(backup.join("lamport1978.pdf")).unwrap(),
+        content
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(backup.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest, serde_json::json!({ "lamport1978": hash }));
+    // Exporting again replaces the copy.
+    let output = pax(&dir, &["--json", "export", "pdfs", "backup"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let exported = json(&output);
+    assert_eq!(exported["exported"], 1);
+    assert_eq!(exported["papers"][0]["status"], "exported");
+    assert_eq!(exported["papers"][0]["hash"], hash.as_str());
+    assert_eq!(exported["papers"][0]["file"], "backup/lamport1978.pdf");
+
+    // A fresh store: without its root, the path can be deleted.
+    fs::remove_file(dir.join("research").join(".gcroots").join("lamport1978")).unwrap();
+    assert!(nix_store_delete(&store_path), "unrooted, so deleted");
+    assert_eq!(pax(&dir, &["check"]).status.code(), Some(8));
+
+    // A file that doesn't match is reported and skipped, never forced.
+    let wrong = dir.join("wrong");
+    fs::create_dir_all(&wrong).unwrap();
+    fs::write(wrong.join("lamport1978.pdf"), format!("{content} (edited)")).unwrap();
+    let output = pax(&dir, &["sync", "--from", "wrong"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("doesn't match lamport1978's recorded hash"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("research").join("papers.nix")).unwrap(),
+        papers
+    );
+    let output = pax(&dir, &["--json", "sync", "--from", "wrong"]);
+    assert_eq!(json(&output)["papers"][0]["status"], "hash-mismatch");
+    assert_eq!(pax(&dir, &["check"]).status.code(), Some(8));
+
+    // Restore: the file comes back, rooted again.
+    let output = pax(&dir, &["sync", "--from", "backup"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout(&output).contains("Fetched lamport1978"));
+    let output = pax(&dir, &["check"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stdout(&output));
+    assert_eq!(gc_root(&dir, "lamport1978"), store_path);
+    assert!(!nix_store_delete(&store_path), "rooted again");
+
+    // Leave nothing behind in the store.
+    fs::remove_file(dir.join("research").join(".gcroots").join("lamport1978")).unwrap();
+    assert!(nix_store_delete(&store_path));
 }
 
 /// stdout parsed as the one JSON document `--json` prints.

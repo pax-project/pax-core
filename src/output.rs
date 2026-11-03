@@ -22,7 +22,7 @@ use crate::merge::{MERGE_ORDER, MergeReport, MergedWork};
 use crate::paper::{Paper, PaperRef};
 use crate::provider::{CandidateWork, ProviderError, ProviderId, SearchPage};
 use crate::search_log::LogOutcome;
-use crate::{ArtifactCheck, CheckStatus, FetchOutcome, SyncReport};
+use crate::{ArtifactCheck, CheckStatus, FetchOutcome, PdfCopy, PdfExport, SyncReport};
 
 /// One provider's record of a paper.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -796,6 +796,90 @@ impl Exported {
     }
 }
 
+/// How copying one local artifact out of the Nix store ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum PdfCopyState {
+    /// Copied, and listed in the manifest.
+    Exported,
+    /// Not in this machine's Nix store, so there's nothing to copy: provide
+    /// it again (`fetch --file`).
+    Missing,
+    /// The copy couldn't be written.
+    Failed,
+}
+
+/// One local artifact's copy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct PdfCopyReport {
+    pub citation_key: String,
+    pub status: PdfCopyState,
+    /// The recorded hash, which the copy matches.
+    pub hash: String,
+    /// Where the copy was written, when it was.
+    pub file: Option<String>,
+    /// Why it wasn't exported.
+    pub error: Option<String>,
+}
+
+impl From<&PdfCopy> for PdfCopyReport {
+    fn from(copy: &PdfCopy) -> Self {
+        let (status, file, error) = match &copy.result {
+            Ok(file) => (
+                PdfCopyState::Exported,
+                Some(file.display().to_string()),
+                None,
+            ),
+            Err(e @ PaxError::LocalArtifactMissing(_)) => {
+                (PdfCopyState::Missing, None, Some(e.to_string()))
+            }
+            Err(e) => (PdfCopyState::Failed, None, Some(e.to_string())),
+        };
+        PdfCopyReport {
+            citation_key: copy.citation_key.clone(),
+            status,
+            hash: copy.hash.clone(),
+            file,
+            error,
+        }
+    }
+}
+
+/// Every local artifact copied out of the Nix store by
+/// [`crate::export_pdfs`], then the totals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct ExportedPdfs {
+    /// The backup directory.
+    pub directory: String,
+    /// The manifest: each exported citation key's hash.
+    pub manifest: String,
+    pub papers: Vec<PdfCopyReport>,
+    pub exported: usize,
+    pub missing: usize,
+    pub failed: usize,
+}
+
+impl ExportedPdfs {
+    pub fn new(export: &PdfExport) -> Self {
+        let papers: Vec<PdfCopyReport> = export.papers.iter().map(PdfCopyReport::from).collect();
+        let count = |state| papers.iter().filter(|p| p.status == state).count();
+        ExportedPdfs {
+            directory: export.dir.display().to_string(),
+            manifest: export.manifest.display().to_string(),
+            exported: count(PdfCopyState::Exported),
+            missing: count(PdfCopyState::Missing),
+            failed: count(PdfCopyState::Failed),
+            papers,
+        }
+    }
+}
+
 /// Where one paper's artifact stands, as `check` reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -955,7 +1039,9 @@ impl FetchResult {
     pub fn failed(citation_key: &str, error: &PaxError) -> Self {
         let status = match error {
             PaxError::NoSourceUrl(_) => FetchState::NoSourceUrl,
-            PaxError::HashMismatch { .. } => FetchState::HashMismatch,
+            PaxError::HashMismatch { .. } | PaxError::BackupMismatch { .. } => {
+                FetchState::HashMismatch
+            }
             PaxError::Build(_) => FetchState::BuildFailed,
             PaxError::LocalArtifactMissing(_) => FetchState::FileNeeded,
             _ => FetchState::FetchFailed,

@@ -21,8 +21,8 @@ use pax_core::output;
 use pax_core::{
     ArtifactCheck, CandidateWork, CheckStatus, Exclusion, FetchOutcome, FilterApplication,
     IncompleteReason, LabelCounts, LibraryIndex, LogOutcome, MergeReport, Paper, PaperRef,
-    PaxError, ProviderError, ProviderId, SearchPage, SeedMergeReport, SeedResults, ShowResult,
-    Stats, SyncReport,
+    PaxError, PdfExport, ProviderError, ProviderId, SearchPage, SeedMergeReport, SeedResults,
+    ShowResult, Stats, SyncReport,
 };
 use serde::Serialize;
 
@@ -88,6 +88,8 @@ pub trait Sink {
     fn edited(&mut self, name: &str, paper: &Paper);
     /// `papers`, exported as BibTeX.
     fn export(&mut self, papers: &[Paper]);
+    /// The local artifacts `export pdfs` copied out of the Nix store.
+    fn exported_pdfs(&mut self, export: &PdfExport);
     /// A paper fetched by `fetch`, as `name` named it; `citation_key` is the
     /// citation key that names.
     fn fetched(&mut self, name: &str, citation_key: &str, outcome: &FetchOutcome);
@@ -487,6 +489,25 @@ impl Sink for TextSink {
         }
     }
 
+    fn exported_pdfs(&mut self, export: &PdfExport) {
+        let mut exported = 0;
+        for copy in &export.papers {
+            match &copy.result {
+                Ok(file) => {
+                    exported += 1;
+                    out!("Exported {} to {}", copy.citation_key, file.display());
+                }
+                Err(e) => self.error(&format!("{}: {e}", copy.citation_key)),
+            }
+        }
+        out!(
+            "{exported} of {} papers added from a local file exported to {}; hashes in {}",
+            export.papers.len(),
+            export.dir.display(),
+            export.manifest.display()
+        );
+    }
+
     fn synced(&mut self, reports: &[SyncReport]) {
         if reports.is_empty() {
             self.message("Library is empty");
@@ -527,7 +548,7 @@ impl Sink for TextSink {
             if let Some(PaxError::LocalArtifactMissing(_)) = &report.error {
                 missing += 1;
                 out!(
-                    "{}: MISSING — added from a local file that isn't in this Nix store; provide it again with `pax fetch {} --file <path>`",
+                    "{}: MISSING — added from a local file that isn't in this Nix store; provide it again with `pax fetch {} --file <path>`, or restore a backup with `pax sync --from <dir>`",
                     report.citation_key,
                     report.citation_key
                 );
@@ -1153,6 +1174,10 @@ impl Sink for JsonSink {
 
     fn export(&mut self, papers: &[Paper]) {
         self.document(&output::Exported::new(papers));
+    }
+
+    fn exported_pdfs(&mut self, export: &PdfExport) {
+        self.document(&output::ExportedPdfs::new(export));
     }
 
     fn fetched(&mut self, _name: &str, citation_key: &str, outcome: &FetchOutcome) {
