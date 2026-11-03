@@ -16,6 +16,7 @@ pub mod merge;
 mod names;
 pub mod nix;
 mod nix_attrs;
+pub mod output;
 pub mod paper;
 mod process;
 pub mod provider;

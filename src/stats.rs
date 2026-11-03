@@ -20,6 +20,7 @@ use crate::search_log::{SEARCH_LOG_VERSION, SearchCommand, SearchLogEntry, searc
 /// A library's PRISMA 2020 flow-diagram counts. See [`stats`] for where each
 /// one comes from.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
 pub struct Stats {
     /// Records identified, per source.
@@ -66,6 +67,7 @@ pub struct Stats {
 
 /// The records identified under one search-log label.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
 pub struct LabelCounts {
     /// The label; `None` for the lines without one.
@@ -83,6 +85,7 @@ pub struct LabelCounts {
 
 /// Records identified, per provider (by its log tag, e.g. `openalex`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
 pub struct Identified {
     /// From database searches (`search`, `search --author`).
@@ -108,6 +111,7 @@ pub struct Identified {
 
 /// Full-text exclusions, grouped by reason.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
 pub struct FullTextExclusions {
     pub total: usize,
@@ -117,6 +121,7 @@ pub struct FullTextExclusions {
 
 /// Exclusions at each stage, grouped by criterion.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
 pub struct CriterionExclusions {
     /// Title/abstract screening exclusions.
@@ -130,6 +135,7 @@ pub struct CriterionExclusions {
 /// None` for exclusions recording none; a stage with no exclusions has no
 /// entries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
 pub struct CriterionCount {
     pub criterion: Option<String>,
@@ -138,6 +144,7 @@ pub struct CriterionCount {
 
 /// How many papers were excluded for one reason.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[non_exhaustive]
 pub struct ReasonCount {
     pub reason: String,
