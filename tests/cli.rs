@@ -927,12 +927,21 @@ fn stats_on_a_fresh_library_is_zeros() {
 #[test]
 fn stats_outside_a_library_exits_7() {
     let dir = scratch("stats-no-library");
-    for args in [&["stats"][..], &["stats", "--json"]] {
-        let output = pax(&dir, args);
-        assert_eq!(output.status.code(), Some(7), "pax {args:?}");
-        assert!(stdout(&output).is_empty());
-        assert_eq!(stderr(&output).trim_end(), NO_LIBRARY);
-    }
+    let output = pax(&dir, &["stats"]);
+    assert_eq!(output.status.code(), Some(7));
+    assert!(stdout(&output).is_empty());
+    assert_eq!(stderr(&output).trim_end(), NO_LIBRARY);
+
+    let output = pax(&dir, &["stats", "--json"]);
+    assert_eq!(output.status.code(), Some(7));
+    assert!(stdout(&output).is_empty());
+    assert_eq!(
+        json_error(&output),
+        serde_json::json!({ "error": {
+            "code": 7,
+            "message": NO_LIBRARY.strip_prefix("Error: ").unwrap()
+        } })
+    );
 }
 
 #[test]
@@ -1308,4 +1317,121 @@ fn a_local_artifact_missing_from_the_store_exits_8() {
             stderr(&output)
         );
     }
+}
+
+/// stdout parsed as the one JSON document `--json` prints.
+fn json(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|e| panic!("{e}: {}", stdout(output)))
+}
+
+/// stderr's last line parsed: with `--json`, a failure's error object.
+fn json_error(output: &Output) -> serde_json::Value {
+    let stderr = stderr(output);
+    let line = stderr.lines().last().unwrap_or_default();
+    serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {stderr}"))
+}
+
+#[test]
+fn list_json_is_the_declared_papers() {
+    let dir = library("list-json");
+    for args in [&["--json", "list"][..], &["list", "--json"]] {
+        let output = pax(&dir, args);
+        assert_eq!(output.status.code(), Some(0), "{args:?}");
+        assert!(stderr(&output).is_empty(), "{args:?}");
+        assert_eq!(
+            json(&output),
+            serde_json::json!({
+                "papers": [{
+                    "citation_key": "lamport1978",
+                    "alias": null,
+                    "title": "Time, Clocks, and the Ordering of Events in a Distributed System",
+                    "authors": ["Leslie Lamport"],
+                    "year": 1978,
+                    "doi": "10.1145/359545.359563",
+                    "venue": null,
+                    "tags": [],
+                    "notes": null,
+                    "fetched": false,
+                    "source_url": null,
+                    "hash": null
+                }]
+            }),
+            "{args:?}"
+        );
+    }
+    let output = pax(&dir, &["list", "--json", "--year", "2000"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(json(&output), serde_json::json!({ "papers": [] }));
+
+    let empty = scratch("list-json-empty");
+    assert_eq!(pax(&empty, &["init"]).status.code(), Some(0));
+    let output = pax(&empty, &["list", "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(json(&output), serde_json::json!({ "papers": [] }));
+}
+
+#[test]
+fn show_json_is_the_declared_or_excluded_paper() {
+    let dir = library("show-json");
+    fs::write(
+        dir.join("research").join("excluded.nix"),
+        r#"{
+  "10.1/abc" = { title = "A"; reason = "not empirical"; stage = "screening"; alias = "P2"; };
+}
+"#,
+    )
+    .unwrap();
+    let output = pax(&dir, &["show", "lamport1978", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).is_empty());
+    let shown = json(&output);
+    assert_eq!(shown["declared"]["citation_key"], "lamport1978");
+    assert_eq!(shown["declared"]["fetched"], false);
+    assert_eq!(shown["excluded"], serde_json::Value::Null);
+    assert_eq!(shown["candidate"], serde_json::Value::Null);
+
+    let output = pax(&dir, &["--json", "show", "P2"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        json(&output),
+        serde_json::json!({
+            "declared": null,
+            "excluded": {
+                "key": "10.1/abc",
+                "title": "A",
+                "reason": "not empirical",
+                "stage": "screening",
+                "year": null,
+                "criterion": null,
+                "round": null,
+                "alias": "P2"
+            },
+            "candidate": null
+        })
+    );
+}
+
+#[test]
+fn a_json_failure_is_an_error_object_on_stderr_with_the_same_exit_code() {
+    let dir = library("json-errors");
+    for (args, code) in [
+        (&["show", "bogus2000"][..], 4),
+        (&["remove", "bogus2000"], 4),
+        (&["search"], 2),
+        (&["no-such-command"], 2),
+        (&["list", "--year", "abc"], 2),
+    ] {
+        let text = pax(&dir, args);
+        let output = pax(&dir, &[args, &["--json"]].concat());
+        assert_eq!(text.status.code(), Some(code), "{args:?}");
+        assert_eq!(output.status.code(), Some(code), "{args:?} --json");
+        assert!(stdout(&output).is_empty(), "{args:?}");
+        let error = json_error(&output);
+        assert_eq!(error["error"]["code"], code, "{args:?}");
+        assert!(error["error"]["message"].is_string(), "{args:?}");
+    }
+    let outside = scratch("json-errors-outside");
+    let output = pax(&outside, &["--json", "list"]);
+    assert_eq!(output.status.code(), Some(7));
+    assert_eq!(json_error(&output)["error"]["code"], 7);
 }

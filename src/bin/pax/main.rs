@@ -9,7 +9,7 @@ use pax_core::{
 mod exit;
 mod sink;
 use exit::{Code, Failure};
-use sink::{Sink, TextSink};
+use sink::{JsonSink, Sink, TextSink};
 
 #[derive(Subcommand)]
 enum Command {
@@ -218,9 +218,6 @@ enum Command {
     ///declared yet; "reports sought" is the declared papers plus those
     ///excluded at full text.
     Stats {
-        /// Print the counts as one JSON object, for scripts and agents
-        #[arg(long)]
-        json: bool,
         /// Also print the records identified under each search-log label
         /// (`--label`); `--json` always includes them, as `by_label`
         #[arg(long = "by-label")]
@@ -305,6 +302,11 @@ enum ExportFormat {
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
+    /// Print the result as one JSON document on stdout, and stderr as one
+    /// JSON object per line (a failure as {"error": {"code", "message"}}),
+    /// for scripts and agents. Accepted before or after the command
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -312,8 +314,25 @@ struct Cli {
 /// Reports `failure` and returns the exit code it maps to.
 fn fail<'a>(sink: &mut impl Sink, failure: impl Into<Failure<'a>>) -> Code {
     let failure = failure.into();
-    sink.error(&failure.to_string());
-    exit::code(failure)
+    let code = exit::code(failure);
+    sink.failure(code, &failure.to_string());
+    code
+}
+
+/// Whether `--json` is among the arguments, before any `--`: how a
+/// command line clap rejected still gets its error as JSON.
+fn wants_json(args: impl IntoIterator<Item = std::ffi::OsString>) -> bool {
+    args.into_iter()
+        .skip(1)
+        .take_while(|arg| arg != "--")
+        .any(|arg| arg == "--json")
+}
+
+/// The first paragraph of clap's error, without its `error: ` prefix.
+fn usage_message(error: &clap::Error) -> String {
+    let rendered = error.render().to_string();
+    let first = rendered.split("\n\n").next().unwrap_or_default().trim();
+    first.strip_prefix("error: ").unwrap_or(first).to_string()
 }
 
 /// The hint `remove` and `unexclude` print when the paper had an alias.
@@ -518,12 +537,25 @@ fn report_log(sink: &mut impl Sink, log: pax_core::LogOutcome, code: Code) -> Co
 #[tokio::main]
 async fn main() -> ExitCode {
     dotenvy::dotenv().ok();
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        // Help and version aren't errors, and print as usual.
+        Err(e) if e.use_stderr() && wants_json(std::env::args_os()) => {
+            let code = e.exit_code();
+            eprintln!("{}", JsonSink::failure_line(code, &usage_message(&e)));
+            return ExitCode::from(u8::try_from(code).unwrap_or(1));
+        }
+        Err(e) => e.exit(),
+    };
     let config = pax_core::Config {
         semantic_scholar_api_key: std::env::var("SEMANTIC_SCHOLAR_API_KEY").ok(),
         arxiv_contact: std::env::var("ARXIV_CONTACT").ok(),
     };
-    run(cli.command, &mut TextSink, &config).await.into()
+    if cli.json {
+        run(cli.command, &mut JsonSink, &config).await.into()
+    } else {
+        run(cli.command, &mut TextSink, &config).await.into()
+    }
 }
 
 /// Whether `command` reads or writes the library in the current directory.
@@ -698,12 +730,13 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
         }
         Command::Show { reference } => {
             match pax_core::show_reference(&reference, Path::new("."), config).await {
-                Ok(pax_core::ShowResult::Declared(paper)) => sink.paper(&paper),
-                Ok(pax_core::ShowResult::Excluded(exclusion)) => sink.exclusion(&exclusion),
-                Ok(pax_core::ShowResult::Candidate(work)) => sink.candidate(&work),
-                Err(e) => return fail(sink, &e),
+                Ok(shown) => {
+                    let index = pax_core::LibraryIndex::load(Path::new("."));
+                    sink.show(&shown, &index);
+                    Code::Success
+                }
+                Err(e) => fail(sink, &e),
             }
-            Code::Success
         }
         Command::Add { reference, label } => {
             let id: CandidateId = match reference.parse() {
@@ -731,17 +764,9 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 Ok(library) => library,
                 Err(e) => return fail(sink, &e),
             };
-            if library.papers().is_empty() {
-                sink.message("Library is empty");
-            } else {
-                let filter = pax_core::ListFilter { author, year, tag };
-                let papers = pax_core::filter_papers(library.papers(), &filter);
-                if papers.is_empty() {
-                    sink.message("No papers match the given filters");
-                } else {
-                    sink.papers(&papers);
-                }
-            }
+            let filter = pax_core::ListFilter { author, year, tag };
+            let papers = pax_core::filter_papers(library.papers(), &filter);
+            sink.list(&papers, library.papers().is_empty());
             Code::Success
         }
         Command::Remove { citation_key } => {
@@ -792,8 +817,9 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                     Code::Success
                 }
                 Err(e @ pax_core::PaxError::ExclusionTitleUnresolved(..)) => {
-                    sink.error(&format!("{e} with --title"));
-                    exit::code(Failure::Pax(&e))
+                    let code = exit::code(Failure::Pax(&e));
+                    sink.failure(code, &format!("{e} with --title"));
+                    code
                 }
                 Err(e) => fail(sink, &e),
             }
@@ -911,12 +937,15 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             match resolved {
                 Ok(pax_core::ResolvedArtifact::Path(path)) => open_in_viewer(sink, &path),
                 Ok(pax_core::ResolvedArtifact::NoSourceUrl) => {
-                    sink.error(&format!(
+                    let message = format!(
                         "{citation_key:?} has no PDF source recorded — the provider found no \
                          open-access copy when it was added, so there's nothing to fetch; add a \
                          copy you have with `pax fetch {citation_key} --file <path>`"
-                    ));
-                    exit::code(Failure::Pax(&pax_core::PaxError::NoSourceUrl(citation_key)))
+                    );
+                    let error = pax_core::PaxError::NoSourceUrl(citation_key);
+                    let code = exit::code(Failure::Pax(&error));
+                    sink.failure(code, &message);
+                    code
                 }
                 Ok(pax_core::ResolvedArtifact::NotFetched) => fail(
                     sink,
@@ -947,16 +976,9 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             }
             Err(e) => fail(sink, &e),
         },
-        Command::Stats { json, by_label } => match pax_core::stats(Path::new(".")) {
+        Command::Stats { by_label } => match pax_core::stats(Path::new(".")) {
             Ok(stats) => {
-                if json {
-                    sink.stats_json(&stats);
-                } else {
-                    sink.stats(&stats);
-                    if by_label {
-                        sink.stats_by_label(&stats);
-                    }
-                }
+                sink.stats(&stats, by_label);
                 Code::Success
             }
             Err(e) => fail(sink, &e),

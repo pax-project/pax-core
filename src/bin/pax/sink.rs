@@ -5,15 +5,30 @@
 //!
 //! Results go to stdout; errors and warnings go to stderr, so redirecting
 //! stdout (`pax search … > results.txt`) captures the results alone.
+//!
+//! Two sinks: [`TextSink`], for people, and [`JsonSink`] (`--json`), which
+//! prints each command's result as one JSON document, a
+//! [`pax_core::output`] shape, and writes stderr as one JSON object per
+//! line: `{"error": {"code", "message"}}` for the failure that ends a
+//! command, `{"warning": {"message"}}` (with `provider` when one is
+//! concerned) for anything else.
 
+use pax_core::output;
 use pax_core::{
     ArtifactCheck, CandidateWork, CheckStatus, Exclusion, FetchOutcome, FilterApplication,
     IncompleteReason, LabelCounts, LibraryIndex, MergeReport, Paper, PaxError, ProviderId,
-    SearchPage, SeedMergeReport, Stats,
+    SearchPage, SeedMergeReport, ShowResult, Stats,
 };
+use serde::Serialize;
+
+use crate::exit::Code;
 
 pub trait Sink {
     fn message(&mut self, message: &str);
+    /// Why the command failed, exiting with `code`.
+    fn failure(&mut self, code: Code, message: &str);
+    /// An error that doesn't end the command, e.g. one seed or paper among
+    /// several failing.
     fn error(&mut self, message: &str);
     /// A note about the results that isn't itself a result, e.g. a filter
     /// a provider couldn't apply.
@@ -66,20 +81,20 @@ pub trait Sink {
         language_unknown: &dyn Fn(&CandidateWork) -> bool,
         abstracts: bool,
     );
-    fn candidate(&mut self, candidate: &CandidateWork);
+    /// What `show` found: a declared paper, an excluded paper's record (given
+    /// its alias), or a provider's record, flagged against `index`.
+    fn show(&mut self, shown: &ShowResult, index: &LibraryIndex);
+    /// `search --local`'s matches.
     fn papers(&mut self, papers: &[Paper]);
-    fn paper(&mut self, paper: &Paper);
-    /// An excluded paper's record, for `show` given its alias.
-    fn exclusion(&mut self, exclusion: &Exclusion);
+    /// `list`'s papers, those matching its filters; `library_empty` says
+    /// whether the library has none at all.
+    fn list(&mut self, papers: &[Paper], library_empty: bool);
     fn export(&mut self, bibtex: &str);
     fn fetched(&mut self, citation_key: &str, outcome: &FetchOutcome);
     fn checked(&mut self, reports: &[ArtifactCheck]);
-    /// The PRISMA flow-diagram counts, aligned under the box names.
-    fn stats(&mut self, stats: &Stats);
-    /// The per-label counts, as a table after the flow-diagram counts.
-    fn stats_by_label(&mut self, stats: &Stats);
-    /// The PRISMA flow-diagram counts as one JSON object.
-    fn stats_json(&mut self, stats: &Stats);
+    /// The PRISMA flow-diagram counts; with `by_label`, also the per-label
+    /// counts (which the JSON always has).
+    fn stats(&mut self, stats: &Stats, by_label: bool);
 }
 
 /// `println!` that ends the process quietly with exit 0 when stdout's reader
@@ -102,6 +117,10 @@ pub struct TextSink;
 impl Sink for TextSink {
     fn message(&mut self, message: &str) {
         out!("{message}");
+    }
+
+    fn failure(&mut self, _code: Code, message: &str) {
+        self.error(message);
     }
 
     fn error(&mut self, message: &str) {
@@ -214,26 +233,12 @@ impl Sink for TextSink {
         }
     }
 
-    fn candidate(&mut self, candidate: &CandidateWork) {
-        out!("Title:      {}", candidate.title);
-        out!("Authors:    {}", candidate.authors.join(", "));
-        out!("Published:  {}", candidate.publish_date);
-        out!(
-            "DOI:        {}",
-            candidate.doi.as_deref().unwrap_or("(no doi)")
-        );
-        out!(
-            "Venue:      {}",
-            candidate.venue.as_deref().unwrap_or("(no venue)")
-        );
-        out!(
-            "PDF source: {}",
-            candidate.pdf_url.as_deref().unwrap_or("(none found)")
-        );
-        if let Some(abstract_text) = &candidate.abstract_text {
-            out!("Abstract:   {abstract_text}");
+    fn show(&mut self, shown: &ShowResult, _index: &LibraryIndex) {
+        match shown {
+            ShowResult::Declared(paper) => print_paper(paper),
+            ShowResult::Excluded(exclusion) => print_exclusion(exclusion),
+            ShowResult::Candidate(work) => print_candidate(work),
         }
-        out!("Reference:  {}", candidate.id);
     }
 
     fn papers(&mut self, papers: &[Paper]) {
@@ -252,64 +257,13 @@ impl Sink for TextSink {
         }
     }
 
-    fn paper(&mut self, paper: &Paper) {
-        out!("Title:        {}", paper.identity.title);
-        out!("Authors:      {}", paper.identity.authors.join(", "));
-        if let Some(year) = paper.identity.year {
-            out!("Year:         {}", year);
-        }
-        out!(
-            "DOI:          {}",
-            paper.identity.doi.as_deref().unwrap_or("(no doi)")
-        );
-        out!(
-            "Venue:        {}",
-            paper.identity.venue.as_deref().unwrap_or("(no venue)")
-        );
-        out!("Citation key: {}", paper.local.citation_key);
-        if let Some(alias) = &paper.local.alias {
-            out!("Alias:        {alias}");
-        }
-        out!(
-            "PDF source:   {}",
-            paper
-                .artifact
-                .source_url
-                .as_deref()
-                .unwrap_or("(not resolved)")
-        );
-        out!(
-            "Artifact:     {}",
-            if paper.artifact.hash.is_some() {
-                "Fetched"
-            } else {
-                "Not fetched"
-            }
-        );
-        if !paper.local.tags.is_empty() {
-            out!("Tags:         {}", paper.local.tags.join(", "));
-        }
-        if let Some(notes) = &paper.local.notes {
-            out!("Notes:        {}", notes);
-        }
-    }
-
-    fn exclusion(&mut self, exclusion: &Exclusion) {
-        out!("Excluded:     {}", exclusion.key);
-        out!("Title:        {}", exclusion.title);
-        if let Some(year) = exclusion.year {
-            out!("Year:         {year}");
-        }
-        out!("Stage:        {}", exclusion.stage);
-        out!("Reason:       {}", exclusion.reason);
-        if let Some(criterion) = &exclusion.criterion {
-            out!("Criterion:    {criterion}");
-        }
-        if let Some(round) = &exclusion.round {
-            out!("Round:        {round}");
-        }
-        if let Some(alias) = &exclusion.alias {
-            out!("Alias:        {alias}");
+    fn list(&mut self, papers: &[Paper], library_empty: bool) {
+        if library_empty {
+            self.message("Library is empty");
+        } else if papers.is_empty() {
+            self.message("No papers match the given filters");
+        } else {
+            self.papers(papers);
         }
     }
 
@@ -376,7 +330,7 @@ impl Sink for TextSink {
         );
     }
 
-    fn stats(&mut self, stats: &Stats) {
+    fn stats(&mut self, stats: &Stats, by_label: bool) {
         for line in stats_lines(stats) {
             out!("{line}");
         }
@@ -392,24 +346,99 @@ impl Sink for TextSink {
                 stats.decided_outside_log
             ));
         }
-    }
-
-    fn stats_by_label(&mut self, stats: &Stats) {
-        if stats.by_label.is_empty() {
-            return;
-        }
-        out!();
-        out!("By label");
-        for line in label_lines(&stats.by_label) {
-            out!("{line}");
+        if by_label && !stats.by_label.is_empty() {
+            out!();
+            out!("By label");
+            for line in label_lines(&stats.by_label) {
+                out!("{line}");
+            }
         }
     }
+}
 
-    fn stats_json(&mut self, stats: &Stats) {
-        out!(
-            "{}",
-            serde_json::to_string_pretty(stats).expect("Stats serializes")
-        );
+/// A provider's record, for `show`.
+fn print_candidate(candidate: &CandidateWork) {
+    out!("Title:      {}", candidate.title);
+    out!("Authors:    {}", candidate.authors.join(", "));
+    out!("Published:  {}", candidate.publish_date);
+    out!(
+        "DOI:        {}",
+        candidate.doi.as_deref().unwrap_or("(no doi)")
+    );
+    out!(
+        "Venue:      {}",
+        candidate.venue.as_deref().unwrap_or("(no venue)")
+    );
+    out!(
+        "PDF source: {}",
+        candidate.pdf_url.as_deref().unwrap_or("(none found)")
+    );
+    if let Some(abstract_text) = &candidate.abstract_text {
+        out!("Abstract:   {abstract_text}");
+    }
+    out!("Reference:  {}", candidate.id);
+}
+
+/// A declared paper, for `show`.
+fn print_paper(paper: &Paper) {
+    out!("Title:        {}", paper.identity.title);
+    out!("Authors:      {}", paper.identity.authors.join(", "));
+    if let Some(year) = paper.identity.year {
+        out!("Year:         {}", year);
+    }
+    out!(
+        "DOI:          {}",
+        paper.identity.doi.as_deref().unwrap_or("(no doi)")
+    );
+    out!(
+        "Venue:        {}",
+        paper.identity.venue.as_deref().unwrap_or("(no venue)")
+    );
+    out!("Citation key: {}", paper.local.citation_key);
+    if let Some(alias) = &paper.local.alias {
+        out!("Alias:        {alias}");
+    }
+    out!(
+        "PDF source:   {}",
+        paper
+            .artifact
+            .source_url
+            .as_deref()
+            .unwrap_or("(not resolved)")
+    );
+    out!(
+        "Artifact:     {}",
+        if paper.artifact.hash.is_some() {
+            "Fetched"
+        } else {
+            "Not fetched"
+        }
+    );
+    if !paper.local.tags.is_empty() {
+        out!("Tags:         {}", paper.local.tags.join(", "));
+    }
+    if let Some(notes) = &paper.local.notes {
+        out!("Notes:        {}", notes);
+    }
+}
+
+/// An excluded paper's record, for `show` given its alias.
+fn print_exclusion(exclusion: &Exclusion) {
+    out!("Excluded:     {}", exclusion.key);
+    out!("Title:        {}", exclusion.title);
+    if let Some(year) = exclusion.year {
+        out!("Year:         {year}");
+    }
+    out!("Stage:        {}", exclusion.stage);
+    out!("Reason:       {}", exclusion.reason);
+    if let Some(criterion) = &exclusion.criterion {
+        out!("Criterion:    {criterion}");
+    }
+    if let Some(round) = &exclusion.round {
+        out!("Round:        {round}");
+    }
+    if let Some(alias) = &exclusion.alias {
+        out!("Alias:        {alias}");
     }
 }
 
@@ -757,6 +786,133 @@ fn stats_lines(stats: &Stats) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// `--json`: each command's result as one pretty-printed JSON document on
+/// stdout, and stderr as one compact JSON object per line.
+pub struct JsonSink;
+
+impl JsonSink {
+    /// Prints `value` as the command's one JSON document.
+    fn document(&mut self, value: &impl Serialize) {
+        out!(
+            "{}",
+            serde_json::to_string_pretty(value).expect("output shapes serialize")
+        );
+    }
+
+    /// The failure that ends a command, as `{"error": {"code", "message"}}`.
+    pub fn failure_line(code: i32, message: &str) -> String {
+        serde_json::json!({ "error": { "code": code, "message": message } }).to_string()
+    }
+
+    fn warning_line(&mut self, provider: Option<ProviderId>, message: &str) {
+        let mut warning = serde_json::json!({ "message": message });
+        if let Some(provider) = provider {
+            warning["provider"] = provider.to_string().into();
+        }
+        eprintln!("{}", serde_json::json!({ "warning": warning }));
+    }
+}
+
+impl Sink for JsonSink {
+    fn message(&mut self, _message: &str) {
+        // A confirmation for people; the document carries the result.
+    }
+
+    fn failure(&mut self, code: Code, message: &str) {
+        eprintln!("{}", JsonSink::failure_line(code as i32, message));
+    }
+
+    fn error(&mut self, message: &str) {
+        self.warning_line(None, message);
+    }
+
+    fn warning(&mut self, message: &str) {
+        self.warning_line(None, message);
+    }
+
+    fn provider_error(&mut self, provider: ProviderId, message: &str) {
+        self.warning_line(Some(provider), message);
+    }
+
+    fn provider_note(&mut self, provider: ProviderId, message: &str) {
+        self.warning_line(Some(provider), message);
+    }
+
+    fn provider_header(&mut self, provider: ProviderId) {
+        TextSink.provider_header(provider);
+    }
+
+    fn page_header(&mut self, provider: ProviderId, page: &SearchPage) {
+        TextSink.page_header(provider, page);
+    }
+
+    fn citation_header(
+        &mut self,
+        provider: ProviderId,
+        page: Option<&SearchPage>,
+        reason: Option<IncompleteReason>,
+    ) {
+        TextSink.citation_header(provider, page, reason);
+    }
+
+    fn candidates(&mut self, candidates: &[CandidateWork], index: &LibraryIndex) {
+        TextSink.candidates(candidates, index);
+    }
+
+    fn merged(
+        &mut self,
+        report: &MergeReport,
+        index: &LibraryIndex,
+        language_unknown: &dyn Fn(&CandidateWork) -> bool,
+        abstracts: bool,
+    ) {
+        TextSink.merged(report, index, language_unknown, abstracts);
+    }
+
+    fn seed_header(&mut self, seed: &str, same_as: Option<&str>) {
+        TextSink.seed_header(seed, same_as);
+    }
+
+    fn merged_seeds(
+        &mut self,
+        report: &SeedMergeReport,
+        seeds: &[&str],
+        index: &LibraryIndex,
+        language_unknown: &dyn Fn(&CandidateWork) -> bool,
+        abstracts: bool,
+    ) {
+        TextSink.merged_seeds(report, seeds, index, language_unknown, abstracts);
+    }
+
+    fn show(&mut self, shown: &ShowResult, index: &LibraryIndex) {
+        self.document(&output::Shown::new(shown, index));
+    }
+
+    fn papers(&mut self, papers: &[Paper]) {
+        self.document(&output::PaperList::new(papers));
+    }
+
+    fn list(&mut self, papers: &[Paper], _library_empty: bool) {
+        self.document(&output::PaperList::new(papers));
+    }
+
+    fn export(&mut self, bibtex: &str) {
+        TextSink.export(bibtex);
+    }
+
+    fn fetched(&mut self, citation_key: &str, outcome: &FetchOutcome) {
+        TextSink.fetched(citation_key, outcome);
+    }
+
+    fn checked(&mut self, reports: &[ArtifactCheck]) {
+        TextSink.checked(reports);
+    }
+
+    fn stats(&mut self, stats: &Stats, _by_label: bool) {
+        self.document(stats);
+    }
 }
 
 #[cfg(test)]
