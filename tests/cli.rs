@@ -1433,6 +1433,151 @@ fn show_json_is_the_declared_or_excluded_paper() {
     );
 }
 
+/// A library with lamport1978 declared and three exclusions: two from round
+/// R1 (one with criterion X3 and alias P2), one from R2 with criterion X3.
+fn library_with_exclusions(name: &str) -> PathBuf {
+    let dir = library(name);
+    fs::write(
+        dir.join("research").join("excluded.nix"),
+        r#"{
+  "10.1/a" = { title = "A"; year = 2019; reason = "not empirical"; stage = "screening"; criterion = "X3"; round = "R1"; alias = "P2"; };
+  "10.1/b" = { title = "B"; year = 2020; reason = "wrong domain"; stage = "full-text"; round = "R1"; };
+  "openalex:W3" = { title = "C"; reason = "duplicate"; stage = "screening"; criterion = "X3"; round = "R2"; };
+}
+"#,
+    )
+    .unwrap();
+    dir
+}
+
+/// The keys `list --excluded --json` printed.
+fn json_exclusion_keys(output: &Output) -> Vec<String> {
+    json(output)["exclusions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{}", stdout(output)))
+        .iter()
+        .map(|e| e["key"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn list_excluded_prints_every_exclusion() {
+    let dir = library_with_exclusions("list-excluded");
+    let output = pax(&dir, &["list", "--excluded"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).is_empty());
+    assert_eq!(
+        stdout(&output),
+        "P2  10.1/a\n\tA\n\t2019\n\tscreening, criterion X3, round R1: not empirical\n\
+         10.1/b\n\tB\n\t2020\n\tfull-text, round R1: wrong domain\n\
+         openalex:W3\n\tC\n\tscreening, criterion X3, round R2: duplicate\n"
+    );
+
+    let output = pax(&dir, &["list", "--excluded", "--round", "R2"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        stdout(&output),
+        "openalex:W3\n\tC\n\tscreening, criterion X3, round R2: duplicate\n"
+    );
+
+    let output = pax(&dir, &["list", "--excluded", "--round", "R9"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "No exclusions match the given filters\n");
+
+    let none = library("list-excluded-none");
+    let output = pax(&none, &["list", "--excluded"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "No papers are excluded\n");
+}
+
+#[test]
+fn list_excluded_filters_narrow_the_list() {
+    let dir = library_with_exclusions("list-excluded-filters");
+    for (filters, keys) in [
+        (&[][..], &["10.1/a", "10.1/b", "openalex:W3"][..]),
+        (&["--round", "R1"], &["10.1/a", "10.1/b"]),
+        (&["--criterion", "X3"], &["10.1/a", "openalex:W3"]),
+        (&["--criterion", "X3", "--round", "R1"], &["10.1/a"]),
+        (&["--year", "2020"], &["10.1/b"]),
+        (&["--round", "r1"], &[]),
+    ] {
+        let mut args = vec!["list", "--excluded", "--json"];
+        args.extend_from_slice(filters);
+        let output = pax(&dir, &args);
+        assert_eq!(output.status.code(), Some(0), "{args:?}");
+        assert_eq!(json_exclusion_keys(&output), keys, "{args:?}");
+    }
+}
+
+#[test]
+fn list_excluded_json_is_the_exclusions_as_show_gives_them() {
+    let dir = library_with_exclusions("list-excluded-json");
+    let output = pax(&dir, &["--json", "list", "--excluded", "--round", "R1"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).is_empty());
+    let listed = json(&output);
+    assert_eq!(
+        listed,
+        serde_json::json!({
+            "exclusions": [
+                {
+                    "key": "10.1/a",
+                    "title": "A",
+                    "reason": "not empirical",
+                    "stage": "screening",
+                    "year": 2019,
+                    "criterion": "X3",
+                    "round": "R1",
+                    "alias": "P2"
+                },
+                {
+                    "key": "10.1/b",
+                    "title": "B",
+                    "reason": "wrong domain",
+                    "stage": "full-text",
+                    "year": 2020,
+                    "criterion": null,
+                    "round": "R1",
+                    "alias": null
+                }
+            ]
+        })
+    );
+    let shown = json(&pax(&dir, &["show", "P2", "--json"]));
+    assert_eq!(listed["exclusions"][0], shown["excluded"]);
+
+    let none = library("list-excluded-json-none");
+    let output = pax(&none, &["list", "--excluded", "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(json(&output), serde_json::json!({ "exclusions": [] }));
+}
+
+#[test]
+fn list_excluded_rejects_filters_that_dont_apply_with_2() {
+    let dir = library_with_exclusions("list-excluded-usage");
+    for args in [
+        &["list", "--excluded", "--author", "Lamport"][..],
+        &["list", "--excluded", "--tag", "core"],
+        &["list", "--round", "R1"],
+        &["list", "--criterion", "X3"],
+    ] {
+        let output = pax(&dir, args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(stdout(&output).is_empty(), "{args:?}");
+    }
+    let output = pax(&dir, &["list", "--round", "R1", "--json"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(json_error(&output)["error"]["code"], 2);
+}
+
+#[test]
+fn list_excluded_outside_a_library_exits_7() {
+    let dir = scratch("list-excluded-no-library");
+    let output = pax(&dir, &["list", "--excluded"]);
+    assert_eq!(output.status.code(), Some(7));
+    assert!(stdout(&output).is_empty());
+}
+
 #[test]
 fn a_json_failure_is_an_error_object_on_stderr_with_the_same_exit_code() {
     let dir = library("json-errors");

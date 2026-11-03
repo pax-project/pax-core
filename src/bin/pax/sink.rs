@@ -71,6 +71,9 @@ pub trait Sink {
     /// `list`'s papers, those matching its filters; `library_empty` says
     /// whether the library has none at all.
     fn list(&mut self, papers: &[Paper], library_empty: bool);
+    /// `list --excluded`'s exclusions, those matching its filters;
+    /// `none_recorded` says whether `excluded.nix` has none at all.
+    fn exclusion_list(&mut self, exclusions: &[Exclusion], none_recorded: bool);
     /// A library created at `root`.
     fn initialized(&mut self, root: &Path);
     /// A paper added as `key`; `log`, when the add was logged under a label.
@@ -424,13 +427,7 @@ impl Sink for TextSink {
     }
 
     fn excluded(&mut self, exclusion: &Exclusion) {
-        let mut decision = exclusion.stage.to_string();
-        if let Some(criterion) = &exclusion.criterion {
-            decision.push_str(&format!(", criterion {criterion}"));
-        }
-        if let Some(round) = &exclusion.round {
-            decision.push_str(&format!(", round {round}"));
-        }
+        let mut decision = decision(exclusion);
         if let Some(alias) = &exclusion.alias {
             decision.push_str(&format!(", alias {alias}"));
         }
@@ -461,6 +458,25 @@ impl Sink for TextSink {
             self.message("No papers match the given filters");
         } else {
             self.papers(papers);
+        }
+    }
+
+    fn exclusion_list(&mut self, exclusions: &[Exclusion], none_recorded: bool) {
+        if none_recorded {
+            self.message("No papers are excluded");
+        } else if exclusions.is_empty() {
+            self.message("No exclusions match the given filters");
+        }
+        for exclusion in exclusions {
+            match &exclusion.alias {
+                Some(alias) => out!("{alias}  {}", exclusion.key),
+                None => out!("{}", exclusion.key),
+            }
+            out!("\t{}", exclusion.title);
+            if let Some(year) = exclusion.year {
+                out!("\t{year}");
+            }
+            out!("\t{}: {}", decision(exclusion), exclusion.reason);
         }
     }
 
@@ -647,6 +663,19 @@ fn print_paper(paper: &Paper) {
     if let Some(notes) = &paper.local.notes {
         out!("Notes:        {}", notes);
     }
+}
+
+/// An exclusion's stage, then its criterion and round when recorded:
+/// `full-text, criterion X3, round R1`.
+fn decision(exclusion: &Exclusion) -> String {
+    let mut decision = exclusion.stage.to_string();
+    if let Some(criterion) = &exclusion.criterion {
+        decision.push_str(&format!(", criterion {criterion}"));
+    }
+    if let Some(round) = &exclusion.round {
+        decision.push_str(&format!(", round {round}"));
+    }
+    decision
 }
 
 /// An excluded paper's record, for `show` given its alias.
@@ -1092,6 +1121,10 @@ impl Sink for JsonSink {
 
     fn list(&mut self, papers: &[Paper], _library_empty: bool) {
         self.document(&output::PaperList::new(papers));
+    }
+
+    fn exclusion_list(&mut self, exclusions: &[Exclusion], _none_recorded: bool) {
+        self.document(&output::ExclusionList::new(exclusions));
     }
 
     fn initialized(&mut self, root: &Path) {
