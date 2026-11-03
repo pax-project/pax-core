@@ -336,9 +336,25 @@ fn usage_message(error: &clap::Error) -> String {
     first.strip_prefix("error: ").unwrap_or(first).to_string()
 }
 
+/// The citation key `name` (a citation key or alias) names in the library,
+/// for reporting; `name` itself when it names no declared paper.
+fn citation_key_of(name: &str) -> String {
+    pax_core::Library::load(&pax_core::nix::papers_path(Path::new(".")))
+        .ok()
+        .and_then(|library| {
+            let paper = library.find(name).or_else(|| library.find_alias(name))?;
+            Some(paper.local.citation_key.clone())
+        })
+        .unwrap_or_else(|| name.to_string())
+}
+
 fn open_in_viewer(sink: &mut impl Sink, path: &Path) -> Code {
     let viewer = std::env::var("PAX_PDF_VIEWER").unwrap_or_else(|_| "xdg-open".to_string());
-    match std::process::Command::new(&viewer).arg(path).status() {
+    let status = std::process::Command::new(&viewer)
+        .arg(path)
+        .stdout(sink.child_stdout())
+        .status();
+    match status {
         Ok(status) if status.success() => Code::Success,
         Ok(status) => fail(
             sink,
@@ -719,23 +735,24 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             format: ExportFormat::Bibtex,
         } => match pax_core::Library::load(&pax_core::nix::papers_path(Path::new("."))) {
             Ok(library) => {
-                sink.export(&pax_core::bibtex::render(library.papers()));
+                sink.export(library.papers());
                 Code::Success
             }
             Err(e) => fail(sink, &e),
         },
         Command::Fetch {
-            citation_key,
+            citation_key: name,
             file,
             force,
         } => {
             let root = Path::new(".");
+            let citation_key = citation_key_of(&name);
             let outcome = match &file {
-                Some(file) => pax_core::fetch_file(&citation_key, file, force, root),
-                None => pax_core::fetch_paper(&citation_key, root),
+                Some(file) => pax_core::fetch_file(&name, file, force, root),
+                None => pax_core::fetch_paper(&name, root),
             };
             match outcome {
-                Ok(outcome) => sink.fetched(&citation_key, &outcome),
+                Ok(outcome) => sink.fetched(&name, &citation_key, &outcome),
                 Err(e) => return fail(sink, &e),
             }
             if file.is_some() && !pax_core::nix::flake_builds_local_artifacts(root) {
@@ -749,10 +766,6 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             Code::Success
         }
         Command::Check => match pax_core::check_artifacts(Path::new(".")) {
-            Ok(checks) if checks.is_empty() => {
-                sink.message("Library is empty");
-                Code::Success
-            }
             Ok(checks) => {
                 sink.checked(&checks);
                 exit::artifacts(checks.iter().filter_map(|check| {
@@ -780,7 +793,13 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 other => other,
             };
             match resolved {
-                Ok(pax_core::ResolvedArtifact::Path(path)) => open_in_viewer(sink, &path),
+                Ok(pax_core::ResolvedArtifact::Path(path)) => {
+                    let code = open_in_viewer(sink, &path);
+                    if code == Code::Success {
+                        sink.opened(&citation_key_of(&citation_key), &path);
+                    }
+                    code
+                }
                 Ok(pax_core::ResolvedArtifact::NoSourceUrl) => {
                     let message = format!(
                         "{citation_key:?} has no PDF source recorded — the provider found no \
@@ -800,17 +819,8 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             }
         }
         Command::Sync => match pax_core::sync_library(Path::new(".")) {
-            Ok(reports) if reports.is_empty() => {
-                sink.message("Library is empty");
-                Code::Success
-            }
             Ok(reports) => {
-                for report in &reports {
-                    match &report.result {
-                        Ok(outcome) => sink.fetched(&report.citation_key, outcome),
-                        Err(e) => sink.error(&format!("{}: {e}", report.citation_key)),
-                    }
-                }
+                sink.synced(&reports);
                 exit::artifacts(reports.iter().filter_map(|report| {
                     report
                         .result

@@ -15,13 +15,14 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::process::Stdio;
 
 use pax_core::output;
 use pax_core::{
     ArtifactCheck, CandidateWork, CheckStatus, Exclusion, FetchOutcome, FilterApplication,
     IncompleteReason, LabelCounts, LibraryIndex, LogOutcome, MergeReport, Paper, PaperRef,
     PaxError, ProviderError, ProviderId, SearchPage, SeedMergeReport, SeedResults, ShowResult,
-    Stats,
+    Stats, SyncReport,
 };
 use serde::Serialize;
 
@@ -34,12 +35,8 @@ pub type SearchResults = HashMap<ProviderId, Result<SearchPage, ProviderError>>;
 pub type DoiResults = HashMap<ProviderId, Result<Vec<CandidateWork>, ProviderError>>;
 
 pub trait Sink {
-    fn message(&mut self, message: &str);
     /// Why the command failed, exiting with `code`.
     fn failure(&mut self, code: Code, message: &str);
-    /// An error that doesn't end the command, e.g. one seed or paper among
-    /// several failing.
-    fn error(&mut self, message: &str);
     /// A note about the results that isn't itself a result, e.g. a filter
     /// a provider couldn't apply.
     fn warning(&mut self, message: &str);
@@ -86,9 +83,19 @@ pub trait Sink {
     fn unexcluded(&mut self, exclusion: &Exclusion);
     /// The paper `edit` edited, as `name` named it, as it is now.
     fn edited(&mut self, name: &str, paper: &Paper);
-    fn export(&mut self, bibtex: &str);
-    fn fetched(&mut self, citation_key: &str, outcome: &FetchOutcome);
+    /// `papers`, exported as BibTeX.
+    fn export(&mut self, papers: &[Paper]);
+    /// A paper fetched by `fetch`, as `name` named it; `citation_key` is the
+    /// citation key that names.
+    fn fetched(&mut self, name: &str, citation_key: &str, outcome: &FetchOutcome);
+    /// `check`'s report on every declared paper.
     fn checked(&mut self, reports: &[ArtifactCheck]);
+    /// `sync`'s fetch of every declared paper.
+    fn synced(&mut self, reports: &[SyncReport]);
+    /// A declared paper's PDF, at `path`, opened in the viewer.
+    fn opened(&mut self, citation_key: &str, path: &Path);
+    /// Where a child process's stdout (the PDF viewer's) goes.
+    fn child_stdout(&self) -> Stdio;
     /// The PRISMA flow-diagram counts; with `by_label`, also the per-label
     /// counts (which the JSON always has).
     fn stats(&mut self, stats: &Stats, by_label: bool);
@@ -111,8 +118,19 @@ macro_rules! out {
 
 pub struct TextSink;
 
-/// The pieces [`TextSink`]'s search and citation output is built from.
+/// The pieces [`TextSink`]'s output is built from.
 impl TextSink {
+    /// A line of results or confirmation.
+    fn message(&mut self, message: &str) {
+        out!("{message}");
+    }
+
+    /// An error, ending the command or not (one seed or paper among
+    /// several failing).
+    fn error(&mut self, message: &str) {
+        eprintln!("Error: {message}");
+    }
+
     /// A provider that failed while the others may still have answered.
     fn provider_error(&mut self, provider: ProviderId, message: &str) {
         eprintln!("Error: {provider}: {message}");
@@ -226,16 +244,8 @@ impl TextSink {
 }
 
 impl Sink for TextSink {
-    fn message(&mut self, message: &str) {
-        out!("{message}");
-    }
-
     fn failure(&mut self, _code: Code, message: &str) {
         self.error(message);
-    }
-
-    fn error(&mut self, message: &str) {
-        eprintln!("Error: {message}");
     }
 
     fn warning(&mut self, message: &str) {
@@ -454,13 +464,32 @@ impl Sink for TextSink {
         }
     }
 
-    fn export(&mut self, bibtex: &str) {
+    fn export(&mut self, papers: &[Paper]) {
+        let bibtex = pax_core::bibtex::render(papers);
         if !bibtex.is_empty() {
             out!("{bibtex}");
         }
     }
 
-    fn fetched(&mut self, citation_key: &str, outcome: &FetchOutcome) {
+    fn synced(&mut self, reports: &[SyncReport]) {
+        if reports.is_empty() {
+            self.message("Library is empty");
+        }
+        for report in reports {
+            match &report.result {
+                Ok(outcome) => self.fetched(&report.citation_key, &report.citation_key, outcome),
+                Err(e) => self.error(&format!("{}: {e}", report.citation_key)),
+            }
+        }
+    }
+
+    fn opened(&mut self, _citation_key: &str, _path: &Path) {}
+
+    fn child_stdout(&self) -> Stdio {
+        Stdio::inherit()
+    }
+
+    fn fetched(&mut self, citation_key: &str, _key: &str, outcome: &FetchOutcome) {
         match outcome {
             FetchOutcome::AlreadyFetched { hash } => {
                 out!("Already fetched {citation_key} ({hash})");
@@ -472,6 +501,10 @@ impl Sink for TextSink {
     }
 
     fn checked(&mut self, reports: &[ArtifactCheck]) {
+        if reports.is_empty() {
+            self.message("Library is empty");
+            return;
+        }
         let (mut reproducible, mut not_fetched, mut mismatched, mut errored) = (0, 0, 0, 0);
         let mut missing = 0;
         for report in reports {
@@ -1010,16 +1043,8 @@ impl JsonSink {
 }
 
 impl Sink for JsonSink {
-    fn message(&mut self, _message: &str) {
-        // A confirmation for people; the document carries the result.
-    }
-
     fn failure(&mut self, code: Code, message: &str) {
         eprintln!("{}", JsonSink::failure_line(code as i32, message));
-    }
-
-    fn error(&mut self, message: &str) {
-        self.warning_line(None, message);
     }
 
     fn warning(&mut self, message: &str) {
@@ -1093,16 +1118,29 @@ impl Sink for JsonSink {
         self.document(&output::DeclaredPaper::from(paper));
     }
 
-    fn export(&mut self, bibtex: &str) {
-        TextSink.export(bibtex);
+    fn export(&mut self, papers: &[Paper]) {
+        self.document(&output::Exported::new(papers));
     }
 
-    fn fetched(&mut self, citation_key: &str, outcome: &FetchOutcome) {
-        TextSink.fetched(citation_key, outcome);
+    fn fetched(&mut self, _name: &str, citation_key: &str, outcome: &FetchOutcome) {
+        self.document(&output::FetchResult::new(citation_key, outcome));
     }
 
     fn checked(&mut self, reports: &[ArtifactCheck]) {
-        TextSink.checked(reports);
+        self.document(&output::CheckResults::new(reports));
+    }
+
+    fn synced(&mut self, reports: &[SyncReport]) {
+        self.document(&output::SyncResults::new(reports));
+    }
+
+    fn opened(&mut self, citation_key: &str, path: &Path) {
+        self.document(&output::Opened::new(citation_key, path));
+    }
+
+    fn child_stdout(&self) -> Stdio {
+        // Kept off stdout, which holds the one document.
+        std::io::stderr().into()
     }
 
     fn stats(&mut self, stats: &Stats, _by_label: bool) {

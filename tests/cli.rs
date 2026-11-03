@@ -1266,6 +1266,28 @@ fn fetch_file_stores_the_file_and_records_its_hash() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(stdout(&output), content);
 
+    // With --json, the viewer's output goes to stderr, leaving stdout to
+    // the document.
+    pax(&dir, &["edit", "lamport1978", "--alias", "P1"]);
+    let output = Command::new(env!("CARGO_BIN_EXE_pax"))
+        .args(["--json", "open", "P1"])
+        .current_dir(&dir)
+        .env("PAX_PDF_VIEWER", "cat")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let opened = json(&output);
+    assert_eq!(opened["citation_key"], "lamport1978");
+    assert!(opened["path"].as_str().unwrap().starts_with("/nix/store/"));
+    assert_eq!(stderr(&output), content);
+    let output = pax(&dir, &["--json", "fetch", "P1"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let fetched = json(&output);
+    assert_eq!(fetched["citation_key"], "lamport1978");
+    assert_eq!(fetched["status"], "already-fetched");
+    let output = pax(&dir, &["--json", "check"]);
+    assert_eq!(json(&output)["papers"][0]["status"], "reproducible");
+
     // The same file again is fine, with a warning that this flake can't
     // build it.
     let output = pax(&dir, &["fetch", "lamport1978", "--file", "paper.pdf"]);
@@ -1612,4 +1634,81 @@ fn a_refused_add_json_is_an_error_object() {
     let output = pax_offline(&dir, &["--json", "add", "not-a-reference"]);
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(json_error(&output)["error"]["code"], 2);
+}
+
+#[test]
+fn export_json_is_the_bibtex_text() {
+    let dir = library("export-json");
+    let text = pax(&dir, &["export", "bibtex"]);
+    let output = pax(&dir, &["export", "bibtex", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let exported = json(&output);
+    assert_eq!(
+        exported["citation_keys"],
+        serde_json::json!(["lamport1978"])
+    );
+    assert_eq!(
+        format!("{}\n", exported["bibtex"].as_str().unwrap()),
+        stdout(&text)
+    );
+}
+
+#[test]
+fn check_sync_fetch_and_open_json_without_the_network() {
+    let dir = library("artifacts-json");
+    // No hash: not fetched, which check decides without nix.
+    let output = pax(&dir, &["--json", "check"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        json(&output),
+        serde_json::json!({
+            "papers": [{
+                "citation_key": "lamport1978",
+                "status": "not-fetched",
+                "expected": null,
+                "actual": null,
+                "error": null
+            }],
+            "checked": 1,
+            "reproducible": 0,
+            "not_fetched": 1,
+            "mismatched": 0,
+            "errored": 0,
+            "missing": 0
+        })
+    );
+
+    // No source_url: nothing to fetch.
+    let text = pax_offline(&dir, &["sync"]);
+    let output = pax_offline(&dir, &["--json", "sync"]);
+    assert_eq!(output.status.code(), text.status.code());
+    assert_eq!(output.status.code(), Some(1));
+    let synced = json(&output);
+    assert_eq!(synced["papers"][0]["status"], "no-source-url");
+    assert!(synced["papers"][0]["reason"].is_string());
+
+    for args in [&["fetch", "lamport1978"][..], &["open", "lamport1978"]] {
+        let text = pax_offline(&dir, args);
+        let output = pax_offline(&dir, &[args, &["--json"]].concat());
+        assert_eq!(output.status.code(), text.status.code(), "{args:?}");
+        assert_eq!(output.status.code(), Some(5), "{args:?}");
+        assert!(stdout(&output).is_empty(), "{args:?}");
+        let error = json_error(&output);
+        assert_eq!(error["error"]["code"], 5, "{args:?}");
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("--file"),
+            "{args:?}: {error}"
+        );
+    }
+
+    let empty = scratch("artifacts-json-empty");
+    assert_eq!(pax(&empty, &["init"]).status.code(), Some(0));
+    for command in ["check", "sync"] {
+        let output = pax(&empty, &[command, "--json"]);
+        assert_eq!(output.status.code(), Some(0), "{command}");
+        assert_eq!(json(&output)["papers"], serde_json::json!([]), "{command}");
+    }
 }
