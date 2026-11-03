@@ -10,16 +10,19 @@
 
 use std::collections::HashMap;
 use std::fmt::Display;
+use std::path::Path;
 
 use serde::Serialize;
 
 use crate::citations::{CITATION_PROVIDERS, SeedMergeReport, SeedResults};
+use crate::error::PaxError;
 use crate::exclusions::Exclusion;
 use crate::library_index::LibraryIndex;
 use crate::merge::{MERGE_ORDER, MergeReport, MergedWork};
-use crate::paper::Paper;
+use crate::paper::{Paper, PaperRef};
 use crate::provider::{CandidateWork, ProviderError, ProviderId, SearchPage};
 use crate::search_log::LogOutcome;
+use crate::{ArtifactCheck, CheckStatus, FetchOutcome, SyncReport};
 
 /// One provider's record of a paper.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -708,6 +711,304 @@ impl CitationResults {
     }
 }
 
+/// A library created by [`crate::init_library`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct Initialized {
+    /// The directory holding the new `flake.nix` and `papers.nix`.
+    pub path: String,
+}
+
+impl Initialized {
+    /// The library created at `root`.
+    pub fn new(root: &Path) -> Self {
+        let papers = crate::nix::papers_path(root);
+        Initialized {
+            path: papers.parent().unwrap_or(root).display().to_string(),
+        }
+    }
+}
+
+/// A paper newly declared in the library.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct Added {
+    pub citation_key: String,
+    /// Whether the add was recorded in the search log; only present when it
+    /// was asked to be, under a label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log: Option<SearchLogStatus>,
+}
+
+impl Added {
+    /// The paper added as `key`; `log`, when the add was logged
+    /// ([`crate::add_candidate_logged`]).
+    pub fn new(key: &PaperRef, log: Option<&LogOutcome>) -> Self {
+        Added {
+            citation_key: key.0.clone(),
+            log: log.map(SearchLogStatus::from),
+        }
+    }
+}
+
+/// Declared papers rendered as BibTeX; nothing is written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct Exported {
+    /// The exported papers, in library order.
+    pub citation_keys: Vec<String>,
+    /// The BibTeX text; empty when there are no papers.
+    pub bibtex: String,
+}
+
+impl Exported {
+    /// `papers`, rendered by [`crate::bibtex::render`].
+    pub fn new(papers: &[Paper]) -> Self {
+        Exported {
+            citation_keys: papers
+                .iter()
+                .map(|paper| paper.local.citation_key.clone())
+                .collect(),
+            bibtex: crate::bibtex::render(papers),
+        }
+    }
+}
+
+/// Where one paper's artifact stands, as `check` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum CheckState {
+    /// No hash recorded yet; `fetch` hasn't run for it.
+    NotFetched,
+    /// The source still resolves to the recorded hash.
+    Reproducible,
+    /// The source now resolves to different content than recorded.
+    Mismatch,
+    /// The source couldn't be resolved (network failure, 404, ...).
+    Error,
+    /// Added from a local file that isn't in this machine's Nix store:
+    /// provide it again (`fetch --file`).
+    Missing,
+}
+
+/// One declared paper's check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct PaperCheck {
+    pub citation_key: String,
+    pub status: CheckState,
+    /// The recorded hash, on a mismatch.
+    pub expected: Option<String>,
+    /// The hash the source resolves to now, on a mismatch.
+    pub actual: Option<String>,
+    /// What went wrong, on an error or a missing local file.
+    pub error: Option<String>,
+}
+
+impl From<&ArtifactCheck> for PaperCheck {
+    fn from(check: &ArtifactCheck) -> Self {
+        let mut report = PaperCheck {
+            citation_key: check.citation_key.clone(),
+            status: CheckState::NotFetched,
+            expected: None,
+            actual: None,
+            error: None,
+        };
+        if let Some(e @ PaxError::LocalArtifactMissing(_)) = &check.error {
+            report.status = CheckState::Missing;
+            report.error = Some(e.to_string());
+            return report;
+        }
+        match &check.status {
+            CheckStatus::NotFetched => {}
+            CheckStatus::Reproducible => report.status = CheckState::Reproducible,
+            CheckStatus::Mismatch { expected, actual } => {
+                report.status = CheckState::Mismatch;
+                report.expected = Some(expected.clone());
+                report.actual = Some(actual.clone());
+            }
+            CheckStatus::Error(message) => {
+                report.status = CheckState::Error;
+                report.error = Some(message.clone());
+            }
+        }
+        report
+    }
+}
+
+/// Every declared paper's check, then the totals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct CheckResults {
+    pub papers: Vec<PaperCheck>,
+    pub checked: usize,
+    pub reproducible: usize,
+    pub not_fetched: usize,
+    pub mismatched: usize,
+    pub errored: usize,
+    pub missing: usize,
+}
+
+impl CheckResults {
+    /// [`crate::check_artifacts`]'s checks.
+    pub fn new(checks: &[ArtifactCheck]) -> Self {
+        let papers: Vec<PaperCheck> = checks.iter().map(PaperCheck::from).collect();
+        let count = |state| papers.iter().filter(|p| p.status == state).count();
+        CheckResults {
+            checked: papers.len(),
+            reproducible: count(CheckState::Reproducible),
+            not_fetched: count(CheckState::NotFetched),
+            mismatched: count(CheckState::Mismatch),
+            errored: count(CheckState::Error),
+            missing: count(CheckState::Missing),
+            papers,
+        }
+    }
+}
+
+/// How fetching one paper's artifact ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum FetchState {
+    /// Fetched now: its hash is recorded in `papers.nix`.
+    Fetched,
+    /// Its hash was already recorded.
+    AlreadyFetched,
+    /// No `source_url` is recorded, so there's nothing to download; a copy
+    /// you have can be added with `fetch --file`.
+    NoSourceUrl,
+    /// Downloading failed (network error, 404, `nix` failure); nothing was
+    /// recorded.
+    FetchFailed,
+    /// The file doesn't match the recorded hash.
+    HashMismatch,
+    /// The hash is recorded, but `nix build` couldn't produce the PDF.
+    BuildFailed,
+    /// Added from a local file that isn't in this machine's Nix store:
+    /// provide it again (`fetch --file`).
+    FileNeeded,
+    /// It didn't finish in time; the hash may still be recorded once it
+    /// does.
+    TimedOut,
+}
+
+/// One paper's fetch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct FetchResult {
+    pub citation_key: String,
+    pub status: FetchState,
+    /// The recorded Nix hash, when there is one.
+    pub hash: Option<String>,
+    /// The PDF's Nix store path, when the client built it.
+    pub store_path: Option<String>,
+    /// Why it wasn't fetched, and what to do about it.
+    pub reason: Option<String>,
+}
+
+impl FetchResult {
+    /// `citation_key`'s successful fetch.
+    pub fn new(citation_key: &str, outcome: &FetchOutcome) -> Self {
+        let (status, hash) = match outcome {
+            FetchOutcome::Fetched { hash } => (FetchState::Fetched, hash),
+            FetchOutcome::AlreadyFetched { hash } => (FetchState::AlreadyFetched, hash),
+        };
+        FetchResult {
+            citation_key: citation_key.to_string(),
+            status,
+            hash: Some(hash.clone()),
+            store_path: None,
+            reason: None,
+        }
+    }
+
+    /// `citation_key`'s failed fetch.
+    pub fn failed(citation_key: &str, error: &PaxError) -> Self {
+        let status = match error {
+            PaxError::NoSourceUrl(_) => FetchState::NoSourceUrl,
+            PaxError::HashMismatch { .. } => FetchState::HashMismatch,
+            PaxError::Build(_) => FetchState::BuildFailed,
+            PaxError::LocalArtifactMissing(_) => FetchState::FileNeeded,
+            _ => FetchState::FetchFailed,
+        };
+        FetchResult {
+            citation_key: citation_key.to_string(),
+            status,
+            hash: None,
+            store_path: None,
+            reason: Some(error.to_string()),
+        }
+    }
+
+    /// `citation_key`'s fetch, given up on after a timeout.
+    pub fn timed_out(citation_key: &str, reason: impl Into<String>) -> Self {
+        FetchResult {
+            citation_key: citation_key.to_string(),
+            status: FetchState::TimedOut,
+            hash: None,
+            store_path: None,
+            reason: Some(reason.into()),
+        }
+    }
+
+    /// With the PDF's Nix store path.
+    pub fn with_store_path(mut self, store_path: Option<String>) -> Self {
+        self.store_path = store_path;
+        self
+    }
+}
+
+/// Every declared paper's fetch, from [`crate::sync_library`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct SyncResults {
+    pub papers: Vec<FetchResult>,
+}
+
+impl SyncResults {
+    pub fn new(reports: &[SyncReport]) -> Self {
+        SyncResults {
+            papers: reports
+                .iter()
+                .map(|report| match &report.result {
+                    Ok(outcome) => FetchResult::new(&report.citation_key, outcome),
+                    Err(e) => FetchResult::failed(&report.citation_key, e),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A declared paper's PDF, opened in a viewer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct Opened {
+    pub citation_key: String,
+    /// The PDF's Nix store path.
+    pub path: String,
+}
+
+impl Opened {
+    pub fn new(citation_key: &str, path: &Path) -> Self {
+        Opened {
+            citation_key: citation_key.to_string(),
+            path: path.display().to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -818,6 +1119,33 @@ mod tests {
         let search = SearchResults::new(&results, &empty_index(), &LogOutcome::NoLibrary, true);
         let json = serde_json::to_value(&search).unwrap();
         assert_eq!(json["results"][0]["abstract"], "We study.");
+    }
+
+    #[test]
+    fn a_failed_fetch_says_what_to_do_next() {
+        let missing = FetchResult::failed("a2020", &PaxError::LocalArtifactMissing("a2020".into()));
+        let json = serde_json::to_value(&missing).unwrap();
+        assert_eq!(json["status"], "file-needed");
+        assert_eq!(json["hash"], serde_json::Value::Null);
+        assert!(json["reason"].is_string());
+        let fetched = FetchResult::new(
+            "a2020",
+            &FetchOutcome::AlreadyFetched {
+                hash: "sha256-x".into(),
+            },
+        );
+        let json = serde_json::to_value(&fetched).unwrap();
+        assert_eq!(json["status"], "already-fetched");
+        assert_eq!(json["hash"], "sha256-x");
+    }
+
+    #[test]
+    fn an_add_without_a_label_has_no_log_field() {
+        let added = Added::new(&PaperRef("a2020".into()), None);
+        assert_eq!(
+            serde_json::to_value(&added).unwrap(),
+            serde_json::json!({ "citation_key": "a2020" })
+        );
     }
 
     #[test]
