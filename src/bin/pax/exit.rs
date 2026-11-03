@@ -104,7 +104,8 @@ pub fn code(failure: Failure<'_>) -> Code {
             | PaxError::InvalidAlias(_)
             | PaxError::NoChangesSpecified
             | PaxError::MissingExclusionReason
-            | PaxError::NotAFile(_) => Code::Usage,
+            | PaxError::NotAFile(_)
+            | PaxError::NotADirectory(_) => Code::Usage,
             PaxError::NotFound(_)
             | PaxError::NoSuchPaper(_)
             | PaxError::NotExcluded(_)
@@ -116,9 +117,13 @@ pub fn code(failure: Failure<'_>) -> Code {
             | PaxError::AlreadyDeclared { .. }
             | PaxError::AlreadyExcluded { .. }
             | PaxError::NoSourceUrl(_)
-            | PaxError::HashMismatch { .. } => Code::Refused,
+            | PaxError::HashMismatch { .. }
+            | PaxError::BackupMismatch { .. } => Code::Refused,
             PaxError::LocalArtifactMissing(_) => Code::FileNeeded,
-            PaxError::Fetch(_) | PaxError::Build(_) | PaxError::Upload(_) => Code::Failure,
+            PaxError::Fetch(_)
+            | PaxError::Build(_)
+            | PaxError::Upload(_)
+            | PaxError::Backup { .. } => Code::Failure,
             // A variant added later, until it is mapped here.
             _ => Code::Failure,
         },

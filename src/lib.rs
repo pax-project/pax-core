@@ -3,6 +3,7 @@
 //! adapter (including the `pax` binary in `src/bin/pax/`, or a future
 //! `lazypax` TUI) is a client of this library, not the other way around.
 
+pub mod backup;
 pub mod bibtex;
 mod citation_key;
 mod citations;
@@ -26,6 +27,7 @@ pub mod stats;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+pub use backup::{PdfCopy, PdfExport, export_pdfs, sync_library_from};
 pub use citations::{
     CITATION_PROVIDERS, CitationError, CitationResults, Incomplete, IncompleteReason, RecordSource,
     SeedLookupError, SeedMergeReport, SeedMergedWork, SeedResult, SeedResults, cited_by,
@@ -2641,6 +2643,11 @@ pub fn fetch_paper(name: &str, root: &Path) -> Result<FetchOutcome, PaxError> {
 /// ([`PaxError::LocalArtifactMissing`]) comes back. Always
 /// [`FetchOutcome::Fetched`], since the file is added either way.
 ///
+/// The store path gets a GC root at `research/.gcroots/<citation_key>`
+/// ([`nix::gcroots_dir`]), so a garbage collection keeps it, and
+/// `research/.gitignore` gets a `.gcroots/` line when it lacks one, since
+/// the roots are this machine's.
+///
 /// `name` is the paper's citation key or alias, as for [`fetch_paper`]; a
 /// path that isn't a file is [`PaxError::NotAFile`].
 pub fn fetch_file(
@@ -2671,7 +2678,7 @@ pub fn fetch_file(
         });
     }
 
-    nix::add_file(file, citation_key)?;
+    nix::add_local_artifact(root, file, citation_key)?;
     if paper.artifact.hash.as_ref() != Some(&hash) {
         paper.artifact.hash = Some(hash.clone());
         library.save(&path)?;

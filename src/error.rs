@@ -60,9 +60,32 @@ pub enum PaxError {
     /// store, so nothing can fetch it: the user has to provide it again.
     #[error(
         "{0} was added from a local file, which isn't in this Nix store; provide it again with \
-         `pax fetch {0} --file <path>`"
+         `pax fetch {0} --file <path>`, or restore a backup with `pax sync --from <dir>`"
     )]
     LocalArtifactMissing(String),
+    /// The backup directory given to [`crate::export_pdfs`] or
+    /// [`crate::sync_library_from`] isn't a directory.
+    #[error("{} is not a directory", .0.display())]
+    NotADirectory(PathBuf),
+    /// A backup's file for a paper ([`crate::sync_library_from`]) isn't the
+    /// content recorded for it: its hash differs. Nothing was added.
+    #[error(
+        "{} doesn't match {citation_key}'s recorded hash ({recorded}, file has {actual}); \
+         skipped",
+        file.display()
+    )]
+    BackupMismatch {
+        citation_key: String,
+        file: PathBuf,
+        recorded: String,
+        actual: String,
+    },
+    /// Reading or writing a file in a backup directory failed.
+    #[error("{}: {source}", path.display())]
+    Backup {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("build failed: {0}")]
     Build(String),
     #[error("upload failed: {0}")]
