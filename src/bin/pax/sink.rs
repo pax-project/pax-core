@@ -13,15 +13,23 @@
 //! command, `{"warning": {"message"}}` (with `provider` when one is
 //! concerned) for anything else.
 
+use std::collections::HashMap;
+
 use pax_core::output;
 use pax_core::{
     ArtifactCheck, CandidateWork, CheckStatus, Exclusion, FetchOutcome, FilterApplication,
-    IncompleteReason, LabelCounts, LibraryIndex, MergeReport, Paper, PaxError, ProviderId,
-    SearchPage, SeedMergeReport, ShowResult, Stats,
+    IncompleteReason, LabelCounts, LibraryIndex, LogOutcome, MergeReport, Paper, PaxError,
+    ProviderError, ProviderId, SearchPage, SeedMergeReport, SeedResults, ShowResult, Stats,
 };
 use serde::Serialize;
 
-use crate::exit::Code;
+use crate::exit::{self, Code, Failure};
+
+/// A search's results, per provider.
+pub type SearchResults = HashMap<ProviderId, Result<SearchPage, ProviderError>>;
+
+/// `search --doi`'s records, per provider.
+pub type DoiResults = HashMap<ProviderId, Result<Vec<CandidateWork>, ProviderError>>;
 
 pub trait Sink {
     fn message(&mut self, message: &str);
@@ -33,52 +41,27 @@ pub trait Sink {
     /// A note about the results that isn't itself a result, e.g. a filter
     /// a provider couldn't apply.
     fn warning(&mut self, message: &str);
-    /// A provider that failed while the others may still have answered.
-    fn provider_error(&mut self, provider: ProviderId, message: &str);
-    /// A provider that has no record of the seed or DOI asked about, while
-    /// another provider answered: an answer, not a failure.
+    /// A note about a provider, e.g. that it has no record of the seed or
+    /// DOI asked about while another answered, or how long pacing it takes.
     fn provider_note(&mut self, provider: ProviderId, message: &str);
-    fn provider_header(&mut self, provider: ProviderId);
-    fn page_header(&mut self, provider: ProviderId, page: &SearchPage);
-    /// One citation provider's count, as [`Sink::page_header`], marked with
-    /// why the list is incomplete, if it is. `page` is `None` when the
-    /// provider returned no list.
-    fn citation_header(
+    /// A search's per-provider results, merged across providers and flagged
+    /// against `index`; with `abstracts`, each paper's abstract.
+    fn search(
         &mut self,
-        provider: ProviderId,
-        page: Option<&SearchPage>,
-        reason: Option<IncompleteReason>,
-    );
-    /// Results, each marked if it's in the library or excluded.
-    fn candidates(&mut self, candidates: &[CandidateWork], index: &LibraryIndex);
-    /// Search or citation results merged across providers. A row is marked
-    /// in library or excluded if any of its records is. `language_unknown` says
-    /// whether a record's language couldn't be checked by the filter; a
-    /// merged row is marked only if that holds for every record in it. With
-    /// `abstracts` set, each row's abstract ([`MergedWork::abstract_text`])
-    /// follows it.
-    ///
-    /// [`MergedWork::abstract_text`]: pax_core::MergedWork::abstract_text
-    fn merged(
-        &mut self,
-        report: &MergeReport,
+        results: &SearchResults,
         index: &LibraryIndex,
-        language_unknown: &dyn Fn(&CandidateWork) -> bool,
+        log: &LogOutcome,
         abstracts: bool,
     );
-    /// The line a seed's counts sit under in a multi-seed `refs` /
-    /// `cited-by` / `related`; `same_as` is the earlier seed it's the same
-    /// paper as.
-    fn seed_header(&mut self, seed: &str, same_as: Option<&str>);
-    /// Citation results merged across several seeds, as [`Sink::merged`],
-    /// each row also naming the seeds that returned it; `seeds` are their
-    /// names by index.
-    fn merged_seeds(
+    /// `search --doi`'s records of `doi`, per provider.
+    fn doi(&mut self, doi: &str, results: &DoiResults, index: &LibraryIndex);
+    /// A `refs`, `cited-by` or `related` lookup over one or more seeds.
+    fn citations(
         &mut self,
-        report: &SeedMergeReport,
-        seeds: &[&str],
+        results: &SeedResults,
+        lists: output::Lists,
         index: &LibraryIndex,
-        language_unknown: &dyn Fn(&CandidateWork) -> bool,
+        log: &LogOutcome,
         abstracts: bool,
     );
     /// What `show` found: a declared paper, an excluded paper's record (given
@@ -114,29 +97,23 @@ macro_rules! out {
 
 pub struct TextSink;
 
-impl Sink for TextSink {
-    fn message(&mut self, message: &str) {
-        out!("{message}");
-    }
-
-    fn failure(&mut self, _code: Code, message: &str) {
-        self.error(message);
-    }
-
-    fn error(&mut self, message: &str) {
-        eprintln!("Error: {message}");
-    }
-
-    fn warning(&mut self, message: &str) {
-        eprintln!("Warning: {message}");
-    }
-
+/// The pieces [`TextSink`]'s search and citation output is built from.
+impl TextSink {
+    /// A provider that failed while the others may still have answered.
     fn provider_error(&mut self, provider: ProviderId, message: &str) {
         eprintln!("Error: {provider}: {message}");
     }
 
-    fn provider_note(&mut self, provider: ProviderId, message: &str) {
-        eprintln!("Note: {provider}: {message}");
+    /// Reports a provider that returned no record for a DOI. One that has no
+    /// record of it has answered, so while another provider returned one,
+    /// that's a note rather than an error.
+    fn provider_failed(&mut self, provider: ProviderId, error: &ProviderError, another: bool) {
+        let failure = Failure::Provider(error);
+        if another && exit::is_answer(failure) {
+            self.provider_note(provider, &failure.to_string());
+        } else {
+            self.provider_error(provider, &failure.to_string());
+        }
     }
 
     fn provider_header(&mut self, provider: ProviderId) {
@@ -230,6 +207,156 @@ impl Sink for TextSink {
             if abstracts {
                 print_abstract(merged.abstract_text());
             }
+        }
+    }
+}
+
+impl Sink for TextSink {
+    fn message(&mut self, message: &str) {
+        out!("{message}");
+    }
+
+    fn failure(&mut self, _code: Code, message: &str) {
+        self.error(message);
+    }
+
+    fn error(&mut self, message: &str) {
+        eprintln!("Error: {message}");
+    }
+
+    fn warning(&mut self, message: &str) {
+        eprintln!("Warning: {message}");
+    }
+
+    fn provider_note(&mut self, provider: ProviderId, message: &str) {
+        eprintln!("Note: {provider}: {message}");
+    }
+
+    fn search(
+        &mut self,
+        results: &SearchResults,
+        index: &LibraryIndex,
+        _log: &LogOutcome,
+        abstracts: bool,
+    ) {
+        for &provider in pax_core::merge::MERGE_ORDER {
+            match results.get(&provider) {
+                Some(Ok(page)) => self.page_header(provider, page),
+                Some(Err(e)) => self.provider_error(provider, &e.to_string()),
+                None => {}
+            }
+        }
+        let language_unknown = |work: &CandidateWork| {
+            results
+                .values()
+                .flatten()
+                .any(|page| page.is_language_unknown(work))
+        };
+        self.merged(
+            &pax_core::merge_pages(results),
+            index,
+            &language_unknown,
+            abstracts,
+        );
+    }
+
+    fn doi(&mut self, _doi: &str, results: &DoiResults, index: &LibraryIndex) {
+        let listed = results.values().any(Result::is_ok);
+        // arXiv and dblp have no DOI lookup.
+        for provider in [
+            ProviderId::OpenAlex,
+            ProviderId::Crossref,
+            ProviderId::SemanticScholar,
+        ] {
+            match results.get(&provider) {
+                Some(Ok(works)) => {
+                    self.provider_header(provider);
+                    self.candidates(works, index);
+                }
+                Some(Err(e)) => self.provider_failed(provider, e, listed),
+                None => {}
+            }
+        }
+    }
+
+    /// Each seed's provider counts, marked with why a list is incomplete if
+    /// it is, then one list merged across every seed and provider, the way
+    /// `search` prints it. With one seed the output is that seed's alone;
+    /// with several, each seed's counts sit under a `seed <seed>:` line and
+    /// each merged row names the seeds that returned it.
+    ///
+    /// For related works, only a missing list is marked: a related list
+    /// never has a total, so it's never complete, and `truncated` (the limit
+    /// stopping short of a total) would say something untrue; its count line
+    /// already says the total isn't reported.
+    fn citations(
+        &mut self,
+        results: &SeedResults,
+        lists: output::Lists,
+        index: &LibraryIndex,
+        _log: &LogOutcome,
+        abstracts: bool,
+    ) {
+        let several = results.seeds.len() > 1;
+        for seed in &results.seeds {
+            // With several seeds, stderr lines name theirs.
+            let of_seed = |message: String| {
+                if several {
+                    format!("{message} (seed {})", seed.seed)
+                } else {
+                    message
+                }
+            };
+            if several {
+                let same_as = seed.same_as.map(|i| results.seeds[i].seed.as_str());
+                self.seed_header(&seed.seed, same_as);
+            }
+            let by_provider = match &seed.results {
+                Ok(by_provider) => by_provider,
+                Err(e) => {
+                    self.error(&of_seed(e.to_string()));
+                    continue;
+                }
+            };
+            for provider in pax_core::CITATION_PROVIDERS {
+                let Some(result) = by_provider.get(&provider) else {
+                    continue;
+                };
+                let reason = pax_core::incomplete_reason(result)
+                    .filter(|reason| lists == output::Lists::Citations || reason.is_missing());
+                self.citation_header(provider, result.as_ref().ok(), reason);
+                if let Err(e) = result {
+                    self.provider_error(provider, &of_seed(e.to_string()));
+                }
+            }
+        }
+        if !results.any_listed() {
+            return;
+        }
+        let language_unknown = |work: &CandidateWork| {
+            results
+                .seeds
+                .iter()
+                .filter_map(|seed| seed.results.as_ref().ok())
+                .flat_map(|lists| lists.values().flatten())
+                .any(|page| page.is_language_unknown(work))
+        };
+        if several {
+            let seeds: Vec<&str> = results.seeds.iter().map(|s| s.seed.as_str()).collect();
+            self.merged_seeds(
+                &results.merge(),
+                &seeds,
+                index,
+                &language_unknown,
+                abstracts,
+            );
+        } else if let Some(Ok(by_provider)) = results.seeds.first().map(|seed| &seed.results) {
+            self.merged(
+                &pax_core::merge_pages(by_provider),
+                index,
+                &language_unknown,
+                abstracts,
+            );
         }
     }
 
@@ -832,58 +959,35 @@ impl Sink for JsonSink {
         self.warning_line(None, message);
     }
 
-    fn provider_error(&mut self, provider: ProviderId, message: &str) {
-        self.warning_line(Some(provider), message);
-    }
-
     fn provider_note(&mut self, provider: ProviderId, message: &str) {
         self.warning_line(Some(provider), message);
     }
 
-    fn provider_header(&mut self, provider: ProviderId) {
-        TextSink.provider_header(provider);
-    }
-
-    fn page_header(&mut self, provider: ProviderId, page: &SearchPage) {
-        TextSink.page_header(provider, page);
-    }
-
-    fn citation_header(
+    fn search(
         &mut self,
-        provider: ProviderId,
-        page: Option<&SearchPage>,
-        reason: Option<IncompleteReason>,
-    ) {
-        TextSink.citation_header(provider, page, reason);
-    }
-
-    fn candidates(&mut self, candidates: &[CandidateWork], index: &LibraryIndex) {
-        TextSink.candidates(candidates, index);
-    }
-
-    fn merged(
-        &mut self,
-        report: &MergeReport,
+        results: &SearchResults,
         index: &LibraryIndex,
-        language_unknown: &dyn Fn(&CandidateWork) -> bool,
+        log: &LogOutcome,
         abstracts: bool,
     ) {
-        TextSink.merged(report, index, language_unknown, abstracts);
+        self.document(&output::SearchResults::new(results, index, log, abstracts));
     }
 
-    fn seed_header(&mut self, seed: &str, same_as: Option<&str>) {
-        TextSink.seed_header(seed, same_as);
+    fn doi(&mut self, doi: &str, results: &DoiResults, index: &LibraryIndex) {
+        self.document(&output::DoiRecords::new(doi, results, index));
     }
 
-    fn merged_seeds(
+    fn citations(
         &mut self,
-        report: &SeedMergeReport,
-        seeds: &[&str],
+        results: &SeedResults,
+        lists: output::Lists,
         index: &LibraryIndex,
-        language_unknown: &dyn Fn(&CandidateWork) -> bool,
+        log: &LogOutcome,
         abstracts: bool,
     ) {
-        TextSink.merged_seeds(report, seeds, index, language_unknown, abstracts);
+        self.document(&output::CitationResults::new(
+            results, index, log, lists, abstracts,
+        ));
     }
 
     fn show(&mut self, shown: &ShowResult, index: &LibraryIndex) {

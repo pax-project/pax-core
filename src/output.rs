@@ -462,7 +462,9 @@ impl SearchResults {
         SearchResults {
             providers: MERGE_ORDER
                 .iter()
-                .filter_map(|&provider| Some(ProviderReport::new(provider, results.get(&provider)?)))
+                .filter_map(|&provider| {
+                    Some(ProviderReport::new(provider, results.get(&provider)?))
+                })
                 .collect(),
             merge: (&merged).into(),
             results: merged
@@ -606,7 +608,10 @@ impl SeedReport {
                     providers: CITATION_PROVIDERS
                         .iter()
                         .filter_map(|&provider| {
-                            Some(ProviderReport::new(provider, lists_by_provider.get(&provider)?))
+                            Some(ProviderReport::new(
+                                provider,
+                                lists_by_provider.get(&provider)?,
+                            ))
                         })
                         .collect(),
                     complete: incomplete.is_empty(),

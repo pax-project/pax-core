@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
+use pax_core::output::Lists;
 use pax_core::{
     CandidateId, DocType, ExclusionStage, Filters, Limit, ProviderId, SearchOptions, YearRange,
 };
@@ -357,42 +358,38 @@ fn open_in_viewer(sink: &mut impl Sink, path: &Path) -> Code {
     }
 }
 
-/// Reports a provider that returned no list. One that has no record of the
-/// seed or DOI has answered, so while another provider returned a list,
-/// that's a note rather than an error.
-fn provider_failed<'a>(
+/// The fewest requests one seed's list takes from Semantic Scholar: the
+/// seed's counts and a page for a citation list, a single request for
+/// recommendations.
+fn semantic_scholar_requests(lists: Lists) -> u32 {
+    match lists {
+        Lists::Related => 1,
+        _ => 2,
+    }
+}
+
+/// The exit code of a `refs` / `cited-by` / `related` lookup, from each
+/// seed's: an invalid seed's own failure, else its lists' (see
+/// [`exit::seeds`]).
+fn citations_code(results: &pax_core::SeedResults) -> Code {
+    exit::seeds(results.seeds.iter().map(|seed| match &seed.results {
+        Ok(lists) => exit::citations(lists),
+        Err(e) => exit::code(Failure::from(e)),
+    }))
+}
+
+/// Prints a `refs` / `cited-by` / `related` lookup and returns its exit
+/// code.
+fn show_citations(
     sink: &mut impl Sink,
-    provider: ProviderId,
-    failure: impl Into<Failure<'a>>,
-    another_listed: bool,
-) {
-    let failure = failure.into();
-    if another_listed && exit::is_answer(failure) {
-        sink.provider_note(provider, &failure.to_string());
-    } else {
-        sink.provider_error(provider, &failure.to_string());
-    }
-}
-
-/// Which kind of per-seed lists [`show_citations`] prints.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Lists {
-    /// `refs` / `cited-by`: citation lists, each with the provider's total.
-    Citations,
-    /// `related`: recommendations, which have no total.
-    Related,
-}
-
-impl Lists {
-    /// The fewest requests one seed's list takes from Semantic Scholar: the
-    /// seed's counts and a page for a citation list, a single request for
-    /// recommendations.
-    fn semantic_scholar_requests(self) -> u32 {
-        match self {
-            Lists::Citations => 2,
-            Lists::Related => 1,
-        }
-    }
+    logged: pax_core::Logged<pax_core::SeedResults>,
+    lists: Lists,
+    abstracts: bool,
+) -> Code {
+    let pax_core::Logged { results, log, .. } = logged;
+    let index = pax_core::LibraryIndex::load(Path::new("."));
+    sink.citations(&results, lists, &index, &log, abstracts);
+    report_log(sink, log, citations_code(&results))
 }
 
 /// How long a run must be expected to wait on Semantic Scholar's pacing
@@ -406,7 +403,7 @@ fn pacing_note(seeds: usize, lists: Lists, has_api_key: bool) -> Option<String> 
     let interval = pax_core::SemanticScholarProvider::DEFAULT_MIN_INTERVAL;
     let requests = u32::try_from(seeds)
         .unwrap_or(u32::MAX)
-        .saturating_mul(lists.semantic_scholar_requests());
+        .saturating_mul(semantic_scholar_requests(lists));
     let wait = interval.saturating_mul(requests.saturating_sub(1));
     if wait < PACING_NOTE_AFTER {
         return None;
@@ -428,91 +425,6 @@ fn note_pacing(sink: &mut impl Sink, seeds: usize, lists: Lists, config: &pax_co
     if let Some(note) = pacing_note(seeds, lists, has_api_key) {
         sink.provider_note(ProviderId::SemanticScholar, &note);
     }
-}
-
-/// Prints each seed's provider counts, marked with why a list is incomplete
-/// if it is, then one list merged across every seed and provider, the way
-/// `search` does. With one seed the output is that seed's alone; with
-/// several, each seed's counts sit under a `seed <seed>:` line and each
-/// merged row names the seeds that returned it. With `abstracts`, each row
-/// is followed by its abstract.
-///
-/// For `related`, only a missing list is marked: a related list never has a
-/// total, so it's never complete, and `truncated` (the limit stopping short
-/// of a total) would say something untrue; its count line already says the
-/// total isn't reported.
-fn show_citations(
-    sink: &mut impl Sink,
-    results: &pax_core::SeedResults,
-    kind: Lists,
-    abstracts: bool,
-) -> Code {
-    let index = pax_core::LibraryIndex::load(Path::new("."));
-    let several = results.seeds.len() > 1;
-    let mut codes = Vec::new();
-    for seed in &results.seeds {
-        // With several seeds, stderr lines name theirs.
-        let of_seed = |message: String| {
-            if several {
-                format!("{message} (seed {})", seed.seed)
-            } else {
-                message
-            }
-        };
-        if several {
-            let same_as = seed.same_as.map(|i| results.seeds[i].seed.as_str());
-            sink.seed_header(&seed.seed, same_as);
-        }
-        let lists = match &seed.results {
-            Ok(lists) => lists,
-            Err(e) => {
-                let failure = Failure::from(e);
-                sink.error(&of_seed(failure.to_string()));
-                codes.push(exit::code(failure));
-                continue;
-            }
-        };
-        for provider in pax_core::CITATION_PROVIDERS {
-            let Some(result) = lists.get(&provider) else {
-                continue;
-            };
-            let reason = pax_core::incomplete_reason(result)
-                .filter(|reason| kind == Lists::Citations || reason.is_missing());
-            sink.citation_header(provider, result.as_ref().ok(), reason);
-            if let Err(e) = result {
-                sink.provider_error(provider, &of_seed(e.to_string()));
-            }
-        }
-        codes.push(exit::citations(lists));
-    }
-    if results.any_listed() {
-        let language_unknown = |work: &pax_core::CandidateWork| {
-            results
-                .seeds
-                .iter()
-                .filter_map(|seed| seed.results.as_ref().ok())
-                .flat_map(|lists| lists.values().flatten())
-                .any(|page| page.is_language_unknown(work))
-        };
-        if several {
-            let seeds: Vec<&str> = results.seeds.iter().map(|s| s.seed.as_str()).collect();
-            sink.merged_seeds(
-                &results.merge(),
-                &seeds,
-                &index,
-                &language_unknown,
-                abstracts,
-            );
-        } else if let Some(Ok(lists)) = results.seeds.first().map(|seed| &seed.results) {
-            sink.merged(
-                &pax_core::merge_pages(lists),
-                &index,
-                &language_unknown,
-                abstracts,
-            );
-        }
-    }
-    exit::seeds(codes)
 }
 
 /// Notes on stderr when a search wasn't logged, and fails a search whose
@@ -656,22 +568,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             let index = pax_core::LibraryIndex::load(Path::new("."));
             if let Some(doi) = &doi {
                 let results = pax_core::search_by_doi(doi, config).await;
-                let listed = results.values().any(Result::is_ok);
-                // arXiv has no DOI lookup.
-                for provider in [
-                    ProviderId::OpenAlex,
-                    ProviderId::Crossref,
-                    ProviderId::SemanticScholar,
-                ] {
-                    match results.get(&provider) {
-                        Some(Ok(works)) => {
-                            sink.provider_header(provider);
-                            sink.candidates(works, &index);
-                        }
-                        Some(Err(e)) => provider_failed(sink, provider, e, listed),
-                        None => {}
-                    }
-                }
+                sink.doi(doi, &results, &index);
                 return exit::provider_results(results.values());
             }
 
@@ -683,50 +580,29 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 let query = query.as_deref().unwrap_or_default();
                 pax_core::search_all_logged(query, &options, root, config).await
             };
-            for &provider in pax_core::merge::MERGE_ORDER {
-                match results.get(&provider) {
-                    Some(Ok(page)) => sink.page_header(provider, page),
-                    Some(Err(e)) => sink.provider_error(provider, &e.to_string()),
-                    None => {}
-                }
-            }
-            let language_unknown = |work: &pax_core::CandidateWork| {
-                results
-                    .values()
-                    .flatten()
-                    .any(|page| page.is_language_unknown(work))
-            };
-            sink.merged(
-                &pax_core::merge_pages(&results),
-                &index,
-                &language_unknown,
-                options.abstracts,
-            );
+            sink.search(&results, &index, &log, options.abstracts);
             report_log(sink, log, exit::provider_results(results.values()))
         }
         Command::Refs { seeds, paging } => {
             let options = paging.options();
             note_pacing(sink, seeds.len(), Lists::Citations, config);
-            let pax_core::Logged { results, log, .. } =
+            let logged =
                 pax_core::references_many_logged(&seeds, &options, Path::new("."), config).await;
-            let code = show_citations(sink, &results, Lists::Citations, options.abstracts);
-            report_log(sink, log, code)
+            show_citations(sink, logged, Lists::Citations, options.abstracts)
         }
         Command::CitedBy { seeds, paging } => {
             let options = paging.options();
             note_pacing(sink, seeds.len(), Lists::Citations, config);
-            let pax_core::Logged { results, log, .. } =
+            let logged =
                 pax_core::cited_by_many_logged(&seeds, &options, Path::new("."), config).await;
-            let code = show_citations(sink, &results, Lists::Citations, options.abstracts);
-            report_log(sink, log, code)
+            show_citations(sink, logged, Lists::Citations, options.abstracts)
         }
         Command::Related { seeds, paging } => {
             let options = paging.options();
             note_pacing(sink, seeds.len(), Lists::Related, config);
-            let pax_core::Logged { results, log, .. } =
+            let logged =
                 pax_core::related_many_logged(&seeds, &options, Path::new("."), config).await;
-            let code = show_citations(sink, &results, Lists::Related, options.abstracts);
-            report_log(sink, log, code)
+            show_citations(sink, logged, Lists::Related, options.abstracts)
         }
         Command::Show { reference } => {
             match pax_core::show_reference(&reference, Path::new("."), config).await {

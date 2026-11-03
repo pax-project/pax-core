@@ -1435,3 +1435,73 @@ fn a_json_failure_is_an_error_object_on_stderr_with_the_same_exit_code() {
     assert_eq!(output.status.code(), Some(7));
     assert_eq!(json_error(&output)["error"]["code"], 7);
 }
+
+#[test]
+fn refs_cited_by_and_related_json_report_each_seed() {
+    let dir = library_with_two_seeds("citations-json");
+    for command in ["refs", "cited-by", "related"] {
+        let args = [command, "nosuchkey2000", "hoare1978", "--json"];
+        let text = pax_offline(&dir, &args[..3]);
+        let output = pax_offline(&dir, &args);
+        assert_eq!(output.status.code(), text.status.code(), "pax {command}");
+        assert_eq!(output.status.code(), Some(4), "pax {command}");
+        let json = json(&output);
+        let seeds = json["seeds"].as_array().unwrap();
+        assert_eq!(seeds.len(), 2);
+        assert_eq!(seeds[0]["seed"], "nosuchkey2000");
+        assert!(seeds[0]["error"].is_string());
+        assert_eq!(seeds[1]["seed"], "hoare1978");
+        assert_eq!(seeds[1]["error"], serde_json::Value::Null);
+        assert_eq!(seeds[1]["complete"], false);
+        assert_eq!(
+            seeds[1]["incomplete"],
+            serde_json::json!([
+                { "provider": "openalex", "reason": "unresolved" },
+                { "provider": "semanticscholar", "reason": "unresolved" }
+            ])
+        );
+        assert_eq!(seeds[1]["providers"][0]["provider"], "openalex");
+        assert!(seeds[1]["providers"][0]["error"].is_string());
+        assert_eq!(json["complete"], false);
+        assert_eq!(json["results"], serde_json::json!([]));
+        assert_eq!(json["log"]["logged"], true);
+        // Nothing but JSON on stderr: no text error lines.
+        for line in stderr(&output).lines() {
+            serde_json::from_str::<serde_json::Value>(line).unwrap();
+        }
+    }
+}
+
+#[test]
+fn search_local_json_is_the_matching_papers() {
+    let dir = library("search-local-json");
+    let output = pax(&dir, &["--json", "search", "--local", "clocks"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let json = json(&output);
+    assert_eq!(json["papers"][0]["citation_key"], "lamport1978");
+    let output = pax(&dir, &["--json", "search", "--local", "nothing like it"]);
+    assert_eq!(json_papers(&output), 0);
+}
+
+fn json_papers(output: &Output) -> usize {
+    json(output)["papers"].as_array().unwrap().len()
+}
+
+#[test]
+#[ignore = "slow: offline, the providers retry for about 40s before failing"]
+fn search_json_reports_every_provider_s_failure_with_the_same_exit_code() {
+    let dir = library("search-json");
+    let output = pax_offline(&dir, &["search", "actor model", "--limit", "1", "--json"]);
+    assert_eq!(output.status.code(), Some(6), "{}", stderr(&output));
+    let doc = json(&output);
+    assert_eq!(doc["providers"].as_array().unwrap().len(), 4);
+    assert!(doc["providers"][0]["error"].is_string());
+    assert_eq!(doc["results"], serde_json::json!([]));
+    assert_eq!(doc["log"]["logged"], true);
+
+    let output = pax_offline(&dir, &["search", "--doi", "10.1/x", "--json"]);
+    assert_eq!(output.status.code(), Some(6), "{}", stderr(&output));
+    let doc = json(&output);
+    assert_eq!(doc["doi"], "10.1/x");
+    assert_eq!(doc["providers"][0]["found"], false);
+}
