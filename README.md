@@ -270,6 +270,16 @@ The reference is a DOI or a `search` result. pax looks up the title, and keys th
 }
 ```
 
+`pax list --excluded` lists the excluded papers instead of the declared ones: each entry's alias and key, title, year, stage, criterion, round and reason, so a script can compare them with your per-round screening files without parsing the Nix file. `--year`, `--criterion X3` and `--round R1` narrow the list, and combine; criterion and round match exactly. `--author` and `--tag` don't apply, since an exclusion records neither, and `--criterion` / `--round` need `--excluded`; either mix is an argument error (exit 2).
+
+```
+$ pax list --excluded --round R1
+P18  10.1145/3474085.3475385
+	...
+	2021
+	full-text, criterion X3, round R1: wrong domain
+```
+
 `search`, `refs`, `cited-by` and `related` mark excluded papers `[excluded]`. A row is flagged when any of its records shares a DOI or arXiv id with an entry, so every arXiv version of an excluded paper is flagged, and so is the same paper from any provider. `[in library]` works the same way: a paper you added as a preprint is marked when its published version comes up carrying the same arXiv id.
 
 A paper can't be both included and excluded, so `add` refuses an excluded paper, matched by the same DOI, arXiv id (any version) or `provider:id` key that flags it `[excluded]`, before anything is written:
@@ -423,6 +433,7 @@ Every command exits with a code a script can branch on:
 | Command | Document |
 | --- | --- |
 | `list`, `search --local` | `{"papers": [paper, …]}`, empty when nothing matches or the library is empty. |
+| `list --excluded` | `{"exclusions": [exclusion, …]}`, each as `exclude` gives it; empty when nothing matches or nothing is excluded. |
 | `show` | `{"declared": paper, "excluded": exclusion, "candidate": record}`, exactly one of them not `null`: a provider record also has its `pdf_url` and `abstract`. |
 | `search` | `{"providers": [...], "merge": {...}, "results": [...], "log": {...}}`: each provider's `retrieved`, `total`, `complete`, the filters it applied and its `error`; the merge counts; each merged paper with its `ids`, `providers`, `in_library` / `excluded` and, with `--with-abstracts`, its `abstract`; whether the search was logged. |
 | `search --doi` | `{"doi": …, "providers": [{"provider", "found", "error"}], "results": [...]}`, the records merged as in `search`. |
