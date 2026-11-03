@@ -1976,6 +1976,12 @@ impl PaperEdits {
 /// `name` is the paper's citation key or alias; an excluded paper's alias is
 /// refused with [`PaxError::ExcludedNotDeclared`].
 pub fn edit_paper(name: &str, root: &Path, edits: &PaperEdits) -> Result<(), PaxError> {
+    edit_paper_entry(name, root, edits).map(|_| ())
+}
+
+/// [`edit_paper`], returning the paper as it is after the edit (under its
+/// new citation key, after a rename).
+pub fn edit_paper_entry(name: &str, root: &Path, edits: &PaperEdits) -> Result<Paper, PaxError> {
     if edits.is_empty() {
         return Err(PaxError::NoChangesSpecified);
     }
@@ -2031,8 +2037,9 @@ pub fn edit_paper(name: &str, root: &Path, edits: &PaperEdits) -> Result<(), Pax
     if let Some(alias) = &edits.alias {
         paper.local.alias = (!alias.is_empty()).then(|| alias.clone());
     }
+    let paper = paper.clone();
     library.save(&path)?;
-    Ok(())
+    Ok(paper)
 }
 
 #[cfg(test)]
@@ -2073,6 +2080,23 @@ mod edit_paper_tests {
   };
 }
 "#
+    }
+
+    #[test]
+    fn edit_paper_entry_returns_the_paper_after_the_edit() {
+        let root = scratch_dir("entry");
+        fs::write(nix::papers_path(&root), two_papers_fixture()).unwrap();
+        let edits = PaperEdits::new()
+            .with_rename(Some("turing1937".into()))
+            .with_add_tags(vec!["core".into()])
+            .with_alias(Some("P1".into()));
+        let paper = edit_paper_entry("turing1936", &root, &edits).unwrap();
+        assert_eq!(paper.local.citation_key, "turing1937");
+        assert_eq!(paper.local.tags, ["core"]);
+        assert_eq!(paper.local.alias.as_deref(), Some("P1"));
+        let library = Library::load(&nix::papers_path(&root)).unwrap();
+        assert_eq!(library.find("turing1937"), Some(&paper));
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
