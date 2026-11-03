@@ -1,7 +1,7 @@
-//! Owns how the CLI renders output. Every command handler goes through a
-//! `Sink` instead of calling `println!` directly, so a future alternate
-//! output mode (e.g. JSON, for an external adapter UI) is a new `Sink` impl
-//! rather than a rewrite of every command handler.
+//! Owns how the CLI renders output. Every command handler hands its result
+//! to a `Sink` instead of calling `println!` directly, one method per
+//! command result, so an output mode is a `Sink` impl rather than a rewrite
+//! of every command handler.
 //!
 //! Results go to stdout; errors and warnings go to stderr, so redirecting
 //! stdout (`pax search … > results.txt`) captures the results alone.

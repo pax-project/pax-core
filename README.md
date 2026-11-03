@@ -368,7 +368,7 @@ By label
 | New | Distinct papers no earlier label identified. Summed over every label, it's the records screened. |
 | Duplicates | Records identified minus distinct: duplicates within the label. |
 
-`pax stats --json` prints the same counts as one JSON object, for scripts and agents, the per-label counts always included as `by_label` (`label` is `null` for the unlabelled lines). Providers are keyed by their log tag and sorted, as are the reasons:
+`pax stats --json` (see [JSON output](#json-output)) prints the same counts as one JSON object, the per-label counts always included as `by_label` (`label` is `null` for the unlabelled lines). Providers are keyed by their log tag and sorted, as are the reasons:
 
 ```JSON
 {
@@ -415,6 +415,53 @@ Every command exits with a code a script can branch on:
 | 6 | Every provider failed (network, rate limit, provider error). |
 | 7 | The library is missing, not initialized, or unreadable. A command that needs a library checks for `research/papers.nix` before doing anything else, so `add` fails before any network call, and so do a citation key or alias given to `show`, `refs`, `cited-by` or `related` and `search --local`; a `provider:id` reference and a plain `search` work without one. |
 | 8 | A file to provide again: a paper added with [`fetch --file`](#papers-you-already-have) isn't in this machine's Nix store, and nothing can download it. `fetch` and `open` exit 8 for that paper; `check` and `sync` exit 8 when every problem they found is one of these, and 1 when there's any other. |
+
+### JSON output
+
+`--json`, before or after the command (`pax --json list`, `pax list --json`), makes any command print its result as one JSON document on stdout, for scripts and agents that shouldn't parse the text. The exit codes are the same as without it. stderr becomes one JSON object per line: the failure that ends a command as `{"error": {"code": 4, "message": "…"}}`, `code` being the exit code (an argument error clap rejects included), and anything else, such as a provider note or a search that couldn't be logged, as `{"warning": {"message": "…"}}`, with `"provider"` when one is concerned. On a failure stdout is empty.
+
+| Command | Document |
+| --- | --- |
+| `list`, `search --local` | `{"papers": [paper, …]}`, empty when nothing matches or the library is empty. |
+| `show` | `{"declared": paper, "excluded": exclusion, "candidate": record}`, exactly one of them not `null`: a provider record also has its `pdf_url` and `abstract`. |
+| `search` | `{"providers": [...], "merge": {...}, "results": [...], "log": {...}}`: each provider's `retrieved`, `total`, `complete`, the filters it applied and its `error`; the merge counts; each merged paper with its `ids`, `providers`, `in_library` / `excluded` and, with `--with-abstracts`, its `abstract`; whether the search was logged. |
+| `search --doi` | `{"doi": …, "providers": [{"provider", "found", "error"}], "results": [...]}`, the records merged as in `search`. |
+| `refs`, `cited-by`, `related` | As `search`, with `seeds` in place of `providers`: per seed, its providers, its `incomplete` lists with why, whether it's `complete`, the earlier seed it's the `same_as`, and its `error` when the seed itself is invalid. Each result names the `seeds` that returned it. |
+| `add` | `{"citation_key": …}`, and `log` with `--label`. |
+| `remove`, `edit` | The paper (as it is after the edit). |
+| `exclude`, `unexclude` | The exclusion: `key`, `title`, `reason`, `stage`, `year`, `criterion`, `round`, `alias`. |
+| `export bibtex` | `{"citation_keys": [...], "bibtex": "…"}`. |
+| `fetch` | `{"citation_key", "status": "fetched" \| "already-fetched", "hash", …}`. |
+| `sync` | `{"papers": [...]}`, one `fetch` document per paper; one that failed has a `status` such as `no-source-url`, `fetch-failed` or `file-needed` and a `reason`. |
+| `check` | `{"papers": [{"citation_key", "status", "expected", "actual", "error"}], "checked", "reproducible", "not_fetched", "mismatched", "errored", "missing"}`. |
+| `open` | `{"citation_key", "path"}`, once the viewer started; the viewer's own output goes to stderr. |
+| `init` | `{"path": "./research"}`. |
+| `stats` | The [PRISMA counts](#prisma-counts). |
+
+A paper is `{"citation_key", "alias", "title", "authors", "year", "doi", "venue", "tags", "notes", "fetched", "source_url", "hash"}`:
+
+```JSON
+{
+  "papers": [
+    {
+      "citation_key": "lamport1978",
+      "alias": "P1",
+      "title": "Time, Clocks, and the Ordering of Events in a Distributed System",
+      "authors": ["Leslie Lamport"],
+      "year": 1978,
+      "doi": "10.1145/359545.359563",
+      "venue": null,
+      "tags": ["core"],
+      "notes": null,
+      "fetched": false,
+      "source_url": null,
+      "hash": null
+    }
+  ]
+}
+```
+
+The documents are `pax_core::output` types, so another client of the library can return the same shapes; the `schemars` feature derives their JSON Schema.
 
 ## License
 
