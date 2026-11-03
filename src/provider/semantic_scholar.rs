@@ -1,6 +1,7 @@
+use std::future::Future;
 use std::time::Duration;
 
-use ::semantic_scholar::{Paper, SemanticScholar};
+use ::semantic_scholar::{Paper, PaperSearchResponse};
 use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
 use serde::Deserialize;
@@ -20,10 +21,12 @@ const MAX_PAGE_SIZE: usize = 100;
 const MAX_RETRIEVABLE: u64 = 1000;
 
 pub struct SemanticScholarProvider {
-    client: SemanticScholar,
-    /// For the reference and citation lists, which the `semantic_scholar`
-    /// client can't parse: it requires a `paperId` that unmatched entries
-    /// lack, so one such entry failed the whole page.
+    /// Sends every request, through [`Self::get_json`], so each attempt,
+    /// retries included, waits its turn under [`PACER`]. The
+    /// `semantic_scholar` crate supplies only the response types: its own
+    /// client retries internally, out of the pacer's reach. (Its `Paper`
+    /// also requires a `paperId` that unmatched list entries lack, so the
+    /// lists are parsed leniently, see [`ListEntry`].)
     http: reqwest::Client,
     /// The least time between two requests to Semantic Scholar, kept by
     /// [`PACER`] across every provider value.
@@ -45,11 +48,6 @@ impl SemanticScholarProvider {
     pub const DEFAULT_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
     pub fn new(api_key: Option<&str>) -> Result<Self, ProviderError> {
-        let client = match api_key {
-            Some(key) => SemanticScholar::with_api_key(key),
-            None => SemanticScholar::new(),
-        }
-        .map_err(|e| ProviderError::Request(e.to_string()))?;
         let mut headers = HeaderMap::new();
         if let Some(key) = api_key {
             let key = HeaderValue::from_str(key)
@@ -62,7 +60,6 @@ impl SemanticScholarProvider {
             .build()
             .map_err(|e| ProviderError::Request(e.to_string()))?;
         Ok(SemanticScholarProvider {
-            client,
             http,
             min_interval: Self::DEFAULT_MIN_INTERVAL,
         })
@@ -77,11 +74,6 @@ impl SemanticScholarProvider {
     pub fn with_min_interval(mut self, interval: Duration) -> Self {
         self.min_interval = interval;
         self
-    }
-
-    /// Waits for this request's turn under [`PACER`].
-    async fn pace(&self) {
-        PACER.wait(self.min_interval).await;
     }
 
     /// The papers `paper` cites — its reference list — paged. `paper` is
@@ -116,14 +108,9 @@ impl SemanticScholarProvider {
         options: &SearchOptions,
     ) -> Result<SearchPage, ProviderError> {
         // The list endpoints report no total; the paper's own counts are it.
-        self.pace().await;
         let seed = self
-            .client
-            .get_paper(paper)
-            .fields("paperId,referenceCount,citationCount")
-            .send()
-            .await
-            .map_err(paper_error)?;
+            .get_paper(paper, "paperId,referenceCount,citationCount")
+            .await?;
         let total = match list {
             CitationList::References => seed.reference_count,
             CitationList::Citations => seed.citation_count,
@@ -220,61 +207,128 @@ impl SemanticScholarProvider {
             .with_filters(applied))
     }
 
-    /// GETs `path` under `api` (the Graph or Recommendations API), paced by
-    /// [`PACER`], retrying a rate-limited or failed request with backoff the
-    /// way the `semantic_scholar` client does. The wait before a retry
-    /// (`Retry-After`, or the backoff) holds every other request back too.
+    /// The paper `paper` (anything [`Provider::get`] accepts) with `fields`.
+    /// One Semantic Scholar doesn't have is [`ProviderError::NotFound`].
+    async fn get_paper(&self, paper: &str, fields: &str) -> Result<Paper, ProviderError> {
+        let path = format!("/paper/{paper}");
+        self.get_json(GRAPH_API, &path, &[("fields", fields.to_string())])
+            .await
+    }
+
+    /// GETs `path` under `api` (the Graph or Recommendations API) and parses
+    /// the body as `T`. Every attempt, retries included, waits its turn under
+    /// [`PACER`] (see [`paced_retries`]); a 404 is
+    /// [`ProviderError::NotFound`].
     async fn get_json<T: DeserializeOwned>(
         &self,
         api: &str,
         path: &str,
         query: &[(&str, String)],
     ) -> Result<T, ProviderError> {
-        let url = format!("{api}{path}");
-        let mut backoff = INITIAL_BACKOFF;
-        for attempt in 0..=MAX_RETRIES {
-            self.pace().await;
-            let response = self
-                .http
-                .get(&url)
-                .query(query)
-                .send()
-                .await
-                .map_err(|e| ProviderError::Request(e.to_string()))?;
-            let status = response.status();
-            if status.is_success() {
-                let body = response
-                    .text()
+        let url = &format!("{api}{path}");
+        let http = &self.http;
+        paced_retries(
+            &PACER,
+            self.min_interval,
+            INITIAL_BACKOFF,
+            move || async move {
+                let response = http
+                    .get(url)
+                    .query(query)
+                    .send()
                     .await
-                    .map_err(|e| ProviderError::Request(e.to_string()))?;
-                return serde_json::from_str(&body).map_err(|e| {
-                    ProviderError::Request(format!("unexpected Semantic Scholar response: {e}"))
-                });
-            }
-            if status == StatusCode::NOT_FOUND {
-                return Err(ProviderError::NotFound);
-            }
-            let retryable = status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
-            if retryable && attempt < MAX_RETRIES {
-                let wait = response
+                    .map_err(|e| Failure::Final(ProviderError::Request(e.to_string())))?;
+                let status = response.status();
+                if status.is_success() {
+                    let body = response
+                        .text()
+                        .await
+                        .map_err(|e| Failure::Final(ProviderError::Request(e.to_string())))?;
+                    return serde_json::from_str(&body).map_err(|e| {
+                        Failure::Final(ProviderError::Request(format!(
+                            "unexpected Semantic Scholar response: {e}"
+                        )))
+                    });
+                }
+                let retry_after = response
                     .headers()
                     .get(RETRY_AFTER)
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.parse().ok())
-                    .map_or(backoff, Duration::from_secs);
-                // The next attempt's pace() waits this out, as does any other
+                    .map(Duration::from_secs);
+                let body = response.text().await.unwrap_or_default();
+                Err(failure(status, retry_after, path, &body))
+            },
+        )
+        .await
+    }
+}
+
+/// What an unsuccessful answer (`status`, with `body`) to a request for
+/// `path` means: a 404 is [`ProviderError::NotFound`]; a 429 or a server
+/// error is worth retrying, after `retry_after` if Semantic Scholar sent
+/// one; anything else fails the request.
+fn failure(status: StatusCode, retry_after: Option<Duration>, path: &str, body: &str) -> Failure {
+    if status == StatusCode::NOT_FOUND {
+        return Failure::Final(ProviderError::NotFound);
+    }
+    let excerpt: String = body.chars().take(200).collect();
+    let error = ProviderError::Request(format!(
+        "Semantic Scholar answered {status} for {path}: {excerpt}"
+    ));
+    if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+        Failure::Retryable { error, retry_after }
+    } else {
+        Failure::Final(error)
+    }
+}
+
+/// Why one attempt at a request failed.
+enum Failure {
+    /// Worth trying again (rate-limited, or a server error): after
+    /// `retry_after` if the provider said, else the backoff. `error` is
+    /// what the request fails with once the retries run out.
+    Retryable {
+        error: ProviderError,
+        retry_after: Option<Duration>,
+    },
+    /// Not worth trying again.
+    Final(ProviderError),
+}
+
+/// Runs `attempt` until it succeeds, fails for good, or has been retried
+/// [`MAX_RETRIES`] times. Every attempt, the first and each retry alike,
+/// first waits its turn under `pacer`, `interval` after the request before
+/// it, so a retry can't jump ahead of a run's other requests. The wait
+/// before a retry (`Retry-After`, or a backoff starting at
+/// `initial_backoff` and doubling) is put on `pacer` too, so it holds every
+/// other request back as well.
+async fn paced_retries<T, F, Fut>(
+    pacer: &Paced,
+    interval: Duration,
+    initial_backoff: Duration,
+    mut attempt: F,
+) -> Result<T, ProviderError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, Failure>>,
+{
+    let mut backoff = initial_backoff;
+    let mut retries = 0;
+    loop {
+        pacer.wait(interval).await;
+        match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(Failure::Final(error)) => return Err(error),
+            Err(Failure::Retryable { error, .. }) if retries == MAX_RETRIES => return Err(error),
+            Err(Failure::Retryable { retry_after, .. }) => {
+                // The next attempt's wait() waits this out, as does any other
                 // request to Semantic Scholar meanwhile.
-                PACER.hold_off(wait);
+                pacer.hold_off(retry_after.unwrap_or(backoff));
                 backoff *= 2;
-                continue;
+                retries += 1;
             }
-            let body = response.text().await.unwrap_or_default();
-            let excerpt: String = body.chars().take(200).collect();
-            return Err(ProviderError::Request(format!(
-                "Semantic Scholar answered {status} for {path}: {excerpt}"
-            )));
         }
-        unreachable!("the last attempt always returns")
     }
 }
 
@@ -310,7 +364,14 @@ struct RecommendationsResponse {
     #[serde(default)]
     recommended_papers: Vec<serde_json::Value>,
 }
-const MAX_RETRIES: u32 = 3;
+
+/// How many times a rate-limited or failed request is retried. Semantic
+/// Scholar answers 429 under load even to an API key well under its rate,
+/// and sends no `Retry-After`, so the backoff (doubling from
+/// [`INITIAL_BACKOFF`]) has to outlast a busy spell: five retries wait 31 s
+/// in all. Three (7 s) lost 2 of 20 seeds' reference lists in a live run
+/// with a key.
+const MAX_RETRIES: u32 = 5;
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 
 /// Which of a paper's citation lists to page through.
@@ -400,15 +461,6 @@ fn list_fields(options: &SearchOptions) -> String {
     }
 }
 
-/// Maps an error looking up one paper (a seed, or `get`'s id or DOI): one
-/// Semantic Scholar doesn't have is [`ProviderError::NotFound`].
-fn paper_error(e: ::semantic_scholar::Error) -> ProviderError {
-    match e {
-        ::semantic_scholar::Error::Api { status: 404, .. } => ProviderError::NotFound,
-        e => ProviderError::Request(e.to_string()),
-    }
-}
-
 /// How the reference and citation lists apply `filters`: year and (mapped)
 /// type after retrieval, since those endpoints take no filters; language
 /// not at all, since Semantic Scholar records carry none.
@@ -474,24 +526,21 @@ impl Provider for SemanticScholarProvider {
             Some(MAX_RETRIEVABLE),
             false,
             |offset, limit| {
-                let mut request = self
-                    .client
-                    .search_papers(query)
-                    .offset(offset as u32)
-                    .limit(limit as u32)
-                    .fields(&fields);
+                let mut params = vec![
+                    ("query", query.to_string()),
+                    ("fields", fields.clone()),
+                    ("offset", offset.to_string()),
+                    ("limit", limit.to_string()),
+                ];
                 if let Some(years) = &years {
-                    request = request.year(years);
+                    params.push(("year", years.clone()));
                 }
                 if let Some(publication_type) = publication_type {
-                    request = request.publication_types(publication_type);
+                    params.push(("publicationTypes", publication_type.to_string()));
                 }
                 async move {
-                    self.pace().await;
-                    let result = request
-                        .send()
-                        .await
-                        .map_err(|e| ProviderError::Request(e.to_string()))?;
+                    let result: PaperSearchResponse =
+                        self.get_json(GRAPH_API, "/paper/search", &params).await?;
                     let works = result.data.into_iter().map(CandidateWork::from).collect();
                     Ok(RawPage::new(works, result.total))
                 }
@@ -502,14 +551,9 @@ impl Provider for SemanticScholarProvider {
     }
 
     async fn get(&self, native_id: &str) -> Result<CandidateWork, ProviderError> {
-        self.pace().await;
         let paper = self
-            .client
-            .get_paper(native_id)
-            .fields(&format!("{PAPER_FIELDS},{ABSTRACT_FIELD}"))
-            .send()
-            .await
-            .map_err(paper_error)?;
+            .get_paper(native_id, &format!("{PAPER_FIELDS},{ABSTRACT_FIELD}"))
+            .await?;
         Ok(CandidateWork::from(paper))
     }
 
@@ -590,6 +634,109 @@ impl From<::semantic_scholar::Paper> for CandidateWork {
 mod tests {
     use super::*;
     use ::semantic_scholar::{ExternalIds, OpenAccessPdf, Paper};
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    fn rate_limited() -> Failure {
+        Failure::Retryable {
+            error: ProviderError::Request("Semantic Scholar answered 429".into()),
+            retry_after: None,
+        }
+    }
+
+    /// Runs [`paced_retries`] on its own pacer, every attempt rate-limited
+    /// until the `succeed_on`-th (1-based), and returns the result and when
+    /// each attempt was sent. The backoff is zero, so any spacing between
+    /// attempts comes from the pacer. `on_attempt` runs as each one is sent.
+    async fn attempts(
+        pacer: &Paced,
+        interval: Duration,
+        succeed_on: usize,
+        on_attempt: impl Fn(usize),
+    ) -> (Result<usize, ProviderError>, Vec<Instant>) {
+        let sent = Mutex::new(Vec::new());
+        let result = paced_retries(pacer, interval, Duration::ZERO, || {
+            let n = {
+                let mut sent = sent.lock().unwrap();
+                sent.push(Instant::now());
+                sent.len()
+            };
+            on_attempt(n);
+            async move {
+                if n == succeed_on {
+                    Ok(n)
+                } else {
+                    Err(rate_limited())
+                }
+            }
+        })
+        .await;
+        (result, sent.into_inner().unwrap())
+    }
+
+    #[tokio::test]
+    async fn every_retry_waits_its_turn_with_the_pacer() {
+        let pacer = Paced::new();
+        let interval = Duration::from_millis(40);
+        let (result, sent) = attempts(&pacer, interval, 3, |_| {}).await;
+        assert_eq!(result.unwrap(), 3);
+        assert_eq!(sent.len(), 3);
+        for pair in sent.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= interval,
+                "a retry went out {:?} after the attempt before it",
+                pair[1] - pair[0]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_retry_waits_behind_a_hold_off_from_another_request() {
+        // Another request's Retry-After, set while this one is in flight,
+        // holds this one's retry back too.
+        let pacer = Paced::new();
+        let hold = Duration::from_millis(120);
+        let (result, sent) = attempts(&pacer, Duration::ZERO, 2, |n| {
+            if n == 1 {
+                pacer.hold_off(hold);
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), 2);
+        assert!(sent[1] - sent[0] >= hold);
+    }
+
+    #[tokio::test]
+    async fn the_first_attempt_waits_its_turn_too() {
+        let pacer = Paced::new();
+        let interval = Duration::from_millis(60);
+        let start = Instant::now();
+        pacer.wait(interval).await; // the run's previous request
+        let (result, sent) = attempts(&pacer, interval, 1, |_| {}).await;
+        assert_eq!(result.unwrap(), 1);
+        assert!(sent[0] - start >= interval);
+    }
+
+    #[tokio::test]
+    async fn retries_stop_after_the_last_and_return_its_error() {
+        let pacer = Paced::new();
+        let (result, sent) = attempts(&pacer, Duration::ZERO, usize::MAX, |_| {}).await;
+        assert_eq!(sent.len(), MAX_RETRIES as usize + 1);
+        assert!(matches!(result, Err(ProviderError::Request(m)) if m.contains("429")));
+    }
+
+    #[tokio::test]
+    async fn a_final_failure_is_not_retried() {
+        let pacer = Paced::new();
+        let calls = Mutex::new(0);
+        let result: Result<(), _> = paced_retries(&pacer, Duration::ZERO, Duration::ZERO, || {
+            *calls.lock().unwrap() += 1;
+            async { Err(Failure::Final(ProviderError::NotFound)) }
+        })
+        .await;
+        assert!(matches!(result, Err(ProviderError::NotFound)));
+        assert_eq!(*calls.lock().unwrap(), 1);
+    }
 
     #[test]
     fn language_and_unmapped_types_are_not_applied() {
@@ -724,12 +871,25 @@ mod tests {
 
     #[test]
     fn a_missing_seed_is_not_found() {
-        let missing = paper_error(::semantic_scholar::Error::Api {
-            status: 404,
-            endpoint: "/graph/v1/paper/x".to_string(),
-            message: "Paper not found".to_string(),
-        });
-        assert!(matches!(missing, ProviderError::NotFound));
+        let missing = failure(StatusCode::NOT_FOUND, None, "/paper/x", "Paper not found");
+        assert!(matches!(missing, Failure::Final(ProviderError::NotFound)));
+    }
+
+    #[test]
+    fn rate_limits_and_server_errors_are_retried_and_bad_requests_are_not() {
+        let wait = Some(Duration::from_secs(3));
+        assert!(matches!(
+            failure(StatusCode::TOO_MANY_REQUESTS, wait, "/paper/x", ""),
+            Failure::Retryable { retry_after, .. } if retry_after == wait
+        ));
+        assert!(matches!(
+            failure(StatusCode::BAD_GATEWAY, None, "/paper/x", ""),
+            Failure::Retryable { .. }
+        ));
+        assert!(matches!(
+            failure(StatusCode::BAD_REQUEST, None, "/paper/x", "bad fields"),
+            Failure::Final(ProviderError::Request(m)) if m.contains("400") && m.contains("bad fields")
+        ));
     }
 
     fn paper(title: &str) -> Paper {
