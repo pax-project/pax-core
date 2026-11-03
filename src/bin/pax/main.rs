@@ -215,7 +215,16 @@ enum Command {
         citation_key: String,
     },
     ///Materialize every declared paper that isn't fetched yet
-    Sync,
+    ///
+    ///With --from, papers added from a local file are first restored from a
+    ///backup directory (`pax export pdfs <dir>`): each <citation_key>.pdf
+    ///whose hash is the recorded one is added back to the Nix store; one
+    ///that doesn't match is reported and skipped, never forced.
+    Sync {
+        /// Restore papers added from a local file from this backup directory
+        #[arg(long, value_name = "DIR")]
+        from: Option<PathBuf>,
+    },
     ///Print the review's PRISMA 2020 flow-diagram counts
     ///
     ///Computed from research/search-log.jsonl, research/excluded.nix and
@@ -307,6 +316,16 @@ impl PageArgs {
 enum ExportFormat {
     ///Export as BibTeX
     Bibtex,
+    ///Back up the PDFs added from a local file (`fetch --file`)
+    ///
+    ///Copies each one out of the Nix store as <DIR>/<citation_key>.pdf, and
+    ///writes <DIR>/manifest.json with the hash each file must match. Papers
+    ///with a source URL aren't copied: Nix can download them again. Restore
+    ///with `pax sync --from <DIR>`.
+    Pdfs {
+        /// The backup directory, created if needed
+        dir: PathBuf,
+    },
 }
 
 #[derive(Parser)]
@@ -355,6 +374,15 @@ fn citation_key_of(name: &str) -> String {
             Some(paper.local.citation_key.clone())
         })
         .unwrap_or_else(|| name.to_string())
+}
+
+/// `sync`, restoring local artifacts from `from` when it's given.
+fn sync(from: Option<&Path>) -> Result<Vec<pax_core::SyncReport>, pax_core::PaxError> {
+    let root = Path::new(".");
+    match from {
+        Some(dir) => pax_core::sync_library_from(root, dir),
+        None => pax_core::sync_library(root),
+    }
 }
 
 fn open_in_viewer(sink: &mut impl Sink, path: &Path) -> Code {
@@ -510,7 +538,7 @@ fn needs_library(command: &Command) -> bool {
         | Command::Fetch { .. }
         | Command::Check
         | Command::Open { .. }
-        | Command::Sync
+        | Command::Sync { .. }
         | Command::Stats { .. } => true,
     }
 }
@@ -771,6 +799,21 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             }
             Err(e) => fail(sink, &e),
         },
+        Command::Export {
+            format: ExportFormat::Pdfs { dir },
+        } => match pax_core::export_pdfs(Path::new("."), &dir) {
+            Ok(export) => {
+                sink.exported_pdfs(&export);
+                exit::artifacts(
+                    export
+                        .papers
+                        .iter()
+                        .filter_map(|copy| copy.result.as_ref().err())
+                        .map(|e| exit::code(Failure::Pax(e))),
+                )
+            }
+            Err(e) => fail(sink, &e),
+        },
         Command::Fetch {
             citation_key: name,
             file,
@@ -849,7 +892,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 Err(e) => fail(sink, &e),
             }
         }
-        Command::Sync => match pax_core::sync_library(Path::new(".")) {
+        Command::Sync { from } => match sync(from.as_deref()) {
             Ok(reports) => {
                 sink.synced(&reports);
                 exit::artifacts(reports.iter().filter_map(|report| {
