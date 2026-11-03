@@ -6,6 +6,7 @@ use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
+use super::pacing::Paced;
 use super::{
     AppliedFilter, CandidateId, CandidateWork, DocType, FilterApplication, FilterKind, Filters,
     Limit, Provider, ProviderError, ProviderId, RawPage, SearchOptions, SearchPage, collect_pages,
@@ -24,9 +25,25 @@ pub struct SemanticScholarProvider {
     /// client can't parse: it requires a `paperId` that unmatched entries
     /// lack, so one such entry failed the whole page.
     http: reqwest::Client,
+    /// The least time between two requests to Semantic Scholar, kept by
+    /// [`PACER`] across every provider value.
+    min_interval: Duration,
 }
 
+/// Paces every request to Semantic Scholar in this process, whichever
+/// [`SemanticScholarProvider`] sends it. Its rate limit is per caller (one
+/// IP address, or one API key), not per client value, and the library makes
+/// a fresh provider per seed, so one shared pacer is what keeps a whole
+/// multi-seed run under it.
+static PACER: Paced = Paced::new();
+
 impl SemanticScholarProvider {
+    /// The least time between two requests unless
+    /// [`Self::with_min_interval`] sets another: one request per second,
+    /// the rate Semantic Scholar grants an API key by default and about
+    /// what its shared unauthenticated pool sustains.
+    pub const DEFAULT_MIN_INTERVAL: Duration = Duration::from_secs(1);
+
     pub fn new(api_key: Option<&str>) -> Result<Self, ProviderError> {
         let client = match api_key {
             Some(key) => SemanticScholar::with_api_key(key),
@@ -44,7 +61,27 @@ impl SemanticScholarProvider {
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| ProviderError::Request(e.to_string()))?;
-        Ok(SemanticScholarProvider { client, http })
+        Ok(SemanticScholarProvider {
+            client,
+            http,
+            min_interval: Self::DEFAULT_MIN_INTERVAL,
+        })
+    }
+
+    /// Spaces this provider's requests at least `interval` apart instead of
+    /// [`Self::DEFAULT_MIN_INTERVAL`], e.g. shorter for an API key granted a
+    /// higher rate. Requests are paced across every provider value in the
+    /// process, each waiting its own interval after the one before it. A
+    /// `Retry-After` from Semantic Scholar holds every request back
+    /// regardless.
+    pub fn with_min_interval(mut self, interval: Duration) -> Self {
+        self.min_interval = interval;
+        self
+    }
+
+    /// Waits for this request's turn under [`PACER`].
+    async fn pace(&self) {
+        PACER.wait(self.min_interval).await;
     }
 
     /// The papers `paper` cites — its reference list — paged. `paper` is
@@ -79,6 +116,7 @@ impl SemanticScholarProvider {
         options: &SearchOptions,
     ) -> Result<SearchPage, ProviderError> {
         // The list endpoints report no total; the paper's own counts are it.
+        self.pace().await;
         let seed = self
             .client
             .get_paper(paper)
@@ -182,9 +220,10 @@ impl SemanticScholarProvider {
             .with_filters(applied))
     }
 
-    /// GETs `path` under `api` (the Graph or Recommendations API), retrying a
-    /// rate-limited or failed request with backoff the way the
-    /// `semantic_scholar` client does.
+    /// GETs `path` under `api` (the Graph or Recommendations API), paced by
+    /// [`PACER`], retrying a rate-limited or failed request with backoff the
+    /// way the `semantic_scholar` client does. The wait before a retry
+    /// (`Retry-After`, or the backoff) holds every other request back too.
     async fn get_json<T: DeserializeOwned>(
         &self,
         api: &str,
@@ -194,6 +233,7 @@ impl SemanticScholarProvider {
         let url = format!("{api}{path}");
         let mut backoff = INITIAL_BACKOFF;
         for attempt in 0..=MAX_RETRIES {
+            self.pace().await;
             let response = self
                 .http
                 .get(&url)
@@ -222,7 +262,9 @@ impl SemanticScholarProvider {
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.parse().ok())
                     .map_or(backoff, Duration::from_secs);
-                tokio::time::sleep(wait).await;
+                // The next attempt's pace() waits this out, as does any other
+                // request to Semantic Scholar meanwhile.
+                PACER.hold_off(wait);
                 backoff *= 2;
                 continue;
             }
@@ -445,6 +487,7 @@ impl Provider for SemanticScholarProvider {
                     request = request.publication_types(publication_type);
                 }
                 async move {
+                    self.pace().await;
                     let result = request
                         .send()
                         .await
@@ -459,6 +502,7 @@ impl Provider for SemanticScholarProvider {
     }
 
     async fn get(&self, native_id: &str) -> Result<CandidateWork, ProviderError> {
+        self.pace().await;
         let paper = self
             .client
             .get_paper(native_id)
