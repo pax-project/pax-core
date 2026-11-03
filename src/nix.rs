@@ -52,12 +52,58 @@ pub fn excluded_path(root: &Path) -> PathBuf {
     root.join("research").join("excluded.nix")
 }
 
+/// Where a library's GC roots live: `research/.gcroots/`, one symlink per
+/// local artifact ([`crate::Artifact::is_local`]), named by its citation
+/// key. The roots are machine-specific, so `research/.gitignore` keeps them
+/// out of git.
+pub fn gcroots_dir(root: &Path) -> PathBuf {
+    root.join("research").join(".gcroots")
+}
+
+/// The line in `research/.gitignore` that keeps [`gcroots_dir`] out of git.
+const GCROOTS_IGNORE: &str = ".gcroots/";
+
+fn gitignore_path(root: &Path) -> PathBuf {
+    root.join("research").join(".gitignore")
+}
+
+/// Creates `research/` with a `flake.nix` from the current template, an
+/// empty `papers.nix`, and a `.gitignore` that keeps [`gcroots_dir`] out of
+/// git.
 pub fn init_library(root: &Path) -> Result<(), Error> {
     let research_dir = root.join("research");
     create_dir(&research_dir)?;
     write(research_dir.join("flake.nix"), FLAKE_TEMPLATE)?;
     write(papers_path(root), PAPERS_TEMPLATE)?;
+    write(gitignore_path(root), format!("{GCROOTS_IGNORE}\n"))?;
     Ok(())
+}
+
+/// Adds the [`gcroots_dir`] line to `research/.gitignore` when it's missing,
+/// creating the file if there is none: a library from before GC roots has
+/// no such line.
+fn ignore_gcroots(root: &Path) -> Result<(), Error> {
+    let path = gitignore_path(root);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let ignored = text.lines().any(|line| {
+        matches!(
+            line.trim(),
+            ".gcroots" | ".gcroots/" | "/.gcroots" | "/.gcroots/"
+        )
+    });
+    if ignored {
+        return Ok(());
+    }
+    let separator = if text.is_empty() || text.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    write(path, format!("{text}{separator}{GCROOTS_IGNORE}\n"))
 }
 
 #[derive(Deserialize)]
@@ -144,6 +190,41 @@ pub(crate) fn add_file(file: &Path, name: &str) -> Result<PathBuf, PaxError> {
             .arg(file),
     )
     .map(PathBuf::from)
+}
+
+/// Registers `store_path` as an indirect GC root at
+/// `research/.gcroots/<name>`, replacing any root of that name, so a
+/// garbage collection keeps it while the symlink exists.
+/// `research/.gitignore` gets its `.gcroots/` line first, so the roots never
+/// reach git.
+fn add_gc_root(root: &Path, store_path: &Path, name: &str) -> Result<PathBuf, PaxError> {
+    ignore_gcroots(root)?;
+    let dir = gcroots_dir(root);
+    std::fs::create_dir_all(&dir)?;
+    // `nix-store` records where an indirect root's symlink is, so the path
+    // must be absolute.
+    let link = std::path::absolute(dir.join(name))?;
+    run_local(
+        Command::new("nix-store")
+            .arg("--add-root")
+            .arg(&link)
+            .args(["--indirect", "--realise"])
+            .arg(store_path),
+    )?;
+    Ok(link)
+}
+
+/// [`add_file`], then a GC root for the path it added at
+/// `research/.gcroots/<name>`: how a local artifact enters the store,
+/// protected from garbage collection.
+pub(crate) fn add_local_artifact(
+    root: &Path,
+    file: &Path,
+    name: &str,
+) -> Result<PathBuf, PaxError> {
+    let store_path = add_file(file, name)?;
+    add_gc_root(root, &store_path, name)?;
+    Ok(store_path)
 }
 
 /// Where the artifact named `name` with flat sha256 `hash` lives in the Nix
@@ -265,6 +346,31 @@ mod tests {
                    builtins.mapAttrs mkPaper (import ./papers.nix); }; }";
         write(root.join("research").join("flake.nix"), old).unwrap();
         assert!(!flake_builds_local_artifacts(&root));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_gc_roots_are_kept_out_of_git() {
+        let root = std::env::temp_dir().join(format!("pax-nix-test-ignore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        init_library(&root).unwrap();
+        let gitignore = gitignore_path(&root);
+        let read = || std::fs::read_to_string(&gitignore).unwrap();
+        assert_eq!(read(), ".gcroots/\n");
+        ignore_gcroots(&root).unwrap();
+        assert_eq!(read(), ".gcroots/\n");
+
+        // A library from before GC roots: no .gitignore, or one without the line.
+        std::fs::remove_file(&gitignore).unwrap();
+        ignore_gcroots(&root).unwrap();
+        assert_eq!(read(), ".gcroots/\n");
+        write(&gitignore, "result").unwrap();
+        ignore_gcroots(&root).unwrap();
+        assert_eq!(read(), "result\n.gcroots/\n");
+        write(&gitignore, "/.gcroots\n").unwrap();
+        ignore_gcroots(&root).unwrap();
+        assert_eq!(read(), "/.gcroots\n");
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
