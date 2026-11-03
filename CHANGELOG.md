@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.0](https://github.com/pax-project/pax-core/compare/v3.1.0...v3.2.0) - 2026-11-03
+
+### Features
+
+- *(dblp)* search and look up through the SPARQL endpoint ([#91](https://github.com/pax-project/pax-core/pull/91))
+- *(backup)* protect, back up and restore local artifacts ([#90](https://github.com/pax-project/pax-core/pull/90))
+
+### Fixed
+
+- *(semantic-scholar)* pace every request, retries included ([#93](https://github.com/pax-project/pax-core/pull/93))
+
 ## [3.1.0](https://github.com/pax-project/pax-core/compare/v3.0.0...v3.1.0) - 2026-11-03
 
 ### Features
