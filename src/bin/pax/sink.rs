@@ -7,9 +7,9 @@
 //! stdout (`pax search … > results.txt`) captures the results alone.
 
 use pax_core::{
-    CandidateWork, CheckReport, CheckStatus, Exclusion, FetchOutcome, FilterApplication,
-    IncompleteReason, LabelCounts, LibraryIndex, MergeReport, Paper, ProviderId, SearchPage,
-    SeedMergeReport, Stats,
+    ArtifactCheck, CandidateWork, CheckStatus, Exclusion, FetchOutcome, FilterApplication,
+    IncompleteReason, LabelCounts, LibraryIndex, MergeReport, Paper, PaxError, ProviderId,
+    SearchPage, SeedMergeReport, Stats,
 };
 
 pub trait Sink {
@@ -73,7 +73,7 @@ pub trait Sink {
     fn exclusion(&mut self, exclusion: &Exclusion);
     fn export(&mut self, bibtex: &str);
     fn fetched(&mut self, citation_key: &str, outcome: &FetchOutcome);
-    fn checked(&mut self, reports: &[CheckReport]);
+    fn checked(&mut self, reports: &[ArtifactCheck]);
     /// The PRISMA flow-diagram counts, aligned under the box names.
     fn stats(&mut self, stats: &Stats);
     /// The per-label counts, as a table after the flow-diagram counts.
@@ -330,9 +330,19 @@ impl Sink for TextSink {
         }
     }
 
-    fn checked(&mut self, reports: &[CheckReport]) {
+    fn checked(&mut self, reports: &[ArtifactCheck]) {
         let (mut reproducible, mut not_fetched, mut mismatched, mut errored) = (0, 0, 0, 0);
+        let mut missing = 0;
         for report in reports {
+            if let Some(PaxError::LocalArtifactMissing(_)) = &report.error {
+                missing += 1;
+                out!(
+                    "{}: MISSING — added from a local file that isn't in this Nix store; provide it again with `pax fetch {} --file <path>`",
+                    report.citation_key,
+                    report.citation_key
+                );
+                continue;
+            }
             match &report.status {
                 CheckStatus::NotFetched => {
                     not_fetched += 1;
@@ -355,8 +365,13 @@ impl Sink for TextSink {
                 }
             }
         }
+        let missing = if missing > 0 {
+            format!(", {missing} missing")
+        } else {
+            String::new()
+        };
         out!(
-            "{} checked: {reproducible} reproducible, {not_fetched} not fetched, {mismatched} mismatched, {errored} errored",
+            "{} checked: {reproducible} reproducible, {not_fetched} not fetched, {mismatched} mismatched, {errored} errored{missing}",
             reports.len()
         );
     }
