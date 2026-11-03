@@ -24,6 +24,9 @@ required-features = ["cli"]
 [features]
 default = ["cli"]
 cli = ["dep:clap", "dep:dotenvy", "tokio/macros", "tokio/rt-multi-thread"]
+# Derives `schemars::JsonSchema` on the `output` shapes and `Stats`, for a
+# client that publishes their schema (e.g. an MCP server).
+schemars = ["dep:schemars"]
 
 [dependencies]
 arxiv-tools = "2.0.0"
@@ -38,6 +41,7 @@ papers-openalex = "0.3.1"
 # HTTPS for the Semantic Scholar list requests; default-tls is the TLS
 # backend semantic-scholar-rs already pulls into this same reqwest.
 reqwest = { version = "0.12", default-features = false, features = ["default-tls"] }
+schemars = { version = "1", optional = true }
 semantic-scholar-rs = "0.2.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

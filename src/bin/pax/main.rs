@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
+use pax_core::output::Lists;
 use pax_core::{
     CandidateId, DocType, ExclusionStage, Filters, Limit, ProviderId, SearchOptions, YearRange,
 };
@@ -9,7 +10,7 @@ use pax_core::{
 mod exit;
 mod sink;
 use exit::{Code, Failure};
-use sink::{Sink, TextSink};
+use sink::{JsonSink, Sink, TextSink};
 
 #[derive(Subcommand)]
 enum Command {
@@ -218,9 +219,6 @@ enum Command {
     ///declared yet; "reports sought" is the declared papers plus those
     ///excluded at full text.
     Stats {
-        /// Print the counts as one JSON object, for scripts and agents
-        #[arg(long)]
-        json: bool,
         /// Also print the records identified under each search-log label
         /// (`--label`); `--json` always includes them, as `by_label`
         #[arg(long = "by-label")]
@@ -305,6 +303,11 @@ enum ExportFormat {
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
+    /// Print the result as one JSON document on stdout, and stderr as one
+    /// JSON object per line (a failure as {"error": {"code", "message"}}),
+    /// for scripts and agents. Accepted before or after the command
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -312,20 +315,46 @@ struct Cli {
 /// Reports `failure` and returns the exit code it maps to.
 fn fail<'a>(sink: &mut impl Sink, failure: impl Into<Failure<'a>>) -> Code {
     let failure = failure.into();
-    sink.error(&failure.to_string());
-    exit::code(failure)
+    let code = exit::code(failure);
+    sink.failure(code, &failure.to_string());
+    code
 }
 
-/// The hint `remove` and `unexclude` print when the paper had an alias.
-fn freed(alias: &str) -> String {
-    format!(
-        "Freed alias {alias}; `edit --alias {alias}` or `exclude --alias {alias}` takes it again"
-    )
+/// Whether `--json` is among the arguments, before any `--`: how a
+/// command line clap rejected still gets its error as JSON.
+fn wants_json(args: impl IntoIterator<Item = std::ffi::OsString>) -> bool {
+    args.into_iter()
+        .skip(1)
+        .take_while(|arg| arg != "--")
+        .any(|arg| arg == "--json")
+}
+
+/// The first paragraph of clap's error, without its `error: ` prefix.
+fn usage_message(error: &clap::Error) -> String {
+    let rendered = error.render().to_string();
+    let first = rendered.split("\n\n").next().unwrap_or_default().trim();
+    first.strip_prefix("error: ").unwrap_or(first).to_string()
+}
+
+/// The citation key `name` (a citation key or alias) names in the library,
+/// for reporting; `name` itself when it names no declared paper.
+fn citation_key_of(name: &str) -> String {
+    pax_core::Library::load(&pax_core::nix::papers_path(Path::new(".")))
+        .ok()
+        .and_then(|library| {
+            let paper = library.find(name).or_else(|| library.find_alias(name))?;
+            Some(paper.local.citation_key.clone())
+        })
+        .unwrap_or_else(|| name.to_string())
 }
 
 fn open_in_viewer(sink: &mut impl Sink, path: &Path) -> Code {
     let viewer = std::env::var("PAX_PDF_VIEWER").unwrap_or_else(|_| "xdg-open".to_string());
-    match std::process::Command::new(&viewer).arg(path).status() {
+    let status = std::process::Command::new(&viewer)
+        .arg(path)
+        .stdout(sink.child_stdout())
+        .status();
+    match status {
         Ok(status) if status.success() => Code::Success,
         Ok(status) => fail(
             sink,
@@ -338,42 +367,38 @@ fn open_in_viewer(sink: &mut impl Sink, path: &Path) -> Code {
     }
 }
 
-/// Reports a provider that returned no list. One that has no record of the
-/// seed or DOI has answered, so while another provider returned a list,
-/// that's a note rather than an error.
-fn provider_failed<'a>(
+/// The fewest requests one seed's list takes from Semantic Scholar: the
+/// seed's counts and a page for a citation list, a single request for
+/// recommendations.
+fn semantic_scholar_requests(lists: Lists) -> u32 {
+    match lists {
+        Lists::Related => 1,
+        _ => 2,
+    }
+}
+
+/// The exit code of a `refs` / `cited-by` / `related` lookup, from each
+/// seed's: an invalid seed's own failure, else its lists' (see
+/// [`exit::seeds`]).
+fn citations_code(results: &pax_core::SeedResults) -> Code {
+    exit::seeds(results.seeds.iter().map(|seed| match &seed.results {
+        Ok(lists) => exit::citations(lists),
+        Err(e) => exit::code(Failure::from(e)),
+    }))
+}
+
+/// Prints a `refs` / `cited-by` / `related` lookup and returns its exit
+/// code.
+fn show_citations(
     sink: &mut impl Sink,
-    provider: ProviderId,
-    failure: impl Into<Failure<'a>>,
-    another_listed: bool,
-) {
-    let failure = failure.into();
-    if another_listed && exit::is_answer(failure) {
-        sink.provider_note(provider, &failure.to_string());
-    } else {
-        sink.provider_error(provider, &failure.to_string());
-    }
-}
-
-/// Which kind of per-seed lists [`show_citations`] prints.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Lists {
-    /// `refs` / `cited-by`: citation lists, each with the provider's total.
-    Citations,
-    /// `related`: recommendations, which have no total.
-    Related,
-}
-
-impl Lists {
-    /// The fewest requests one seed's list takes from Semantic Scholar: the
-    /// seed's counts and a page for a citation list, a single request for
-    /// recommendations.
-    fn semantic_scholar_requests(self) -> u32 {
-        match self {
-            Lists::Citations => 2,
-            Lists::Related => 1,
-        }
-    }
+    logged: pax_core::Logged<pax_core::SeedResults>,
+    lists: Lists,
+    abstracts: bool,
+) -> Code {
+    let pax_core::Logged { results, log, .. } = logged;
+    let index = pax_core::LibraryIndex::load(Path::new("."));
+    sink.citations(&results, lists, &index, &log, abstracts);
+    report_log(sink, log, citations_code(&results))
 }
 
 /// How long a run must be expected to wait on Semantic Scholar's pacing
@@ -387,7 +412,7 @@ fn pacing_note(seeds: usize, lists: Lists, has_api_key: bool) -> Option<String> 
     let interval = pax_core::SemanticScholarProvider::DEFAULT_MIN_INTERVAL;
     let requests = u32::try_from(seeds)
         .unwrap_or(u32::MAX)
-        .saturating_mul(lists.semantic_scholar_requests());
+        .saturating_mul(semantic_scholar_requests(lists));
     let wait = interval.saturating_mul(requests.saturating_sub(1));
     if wait < PACING_NOTE_AFTER {
         return None;
@@ -409,91 +434,6 @@ fn note_pacing(sink: &mut impl Sink, seeds: usize, lists: Lists, config: &pax_co
     if let Some(note) = pacing_note(seeds, lists, has_api_key) {
         sink.provider_note(ProviderId::SemanticScholar, &note);
     }
-}
-
-/// Prints each seed's provider counts, marked with why a list is incomplete
-/// if it is, then one list merged across every seed and provider, the way
-/// `search` does. With one seed the output is that seed's alone; with
-/// several, each seed's counts sit under a `seed <seed>:` line and each
-/// merged row names the seeds that returned it. With `abstracts`, each row
-/// is followed by its abstract.
-///
-/// For `related`, only a missing list is marked: a related list never has a
-/// total, so it's never complete, and `truncated` (the limit stopping short
-/// of a total) would say something untrue; its count line already says the
-/// total isn't reported.
-fn show_citations(
-    sink: &mut impl Sink,
-    results: &pax_core::SeedResults,
-    kind: Lists,
-    abstracts: bool,
-) -> Code {
-    let index = pax_core::LibraryIndex::load(Path::new("."));
-    let several = results.seeds.len() > 1;
-    let mut codes = Vec::new();
-    for seed in &results.seeds {
-        // With several seeds, stderr lines name theirs.
-        let of_seed = |message: String| {
-            if several {
-                format!("{message} (seed {})", seed.seed)
-            } else {
-                message
-            }
-        };
-        if several {
-            let same_as = seed.same_as.map(|i| results.seeds[i].seed.as_str());
-            sink.seed_header(&seed.seed, same_as);
-        }
-        let lists = match &seed.results {
-            Ok(lists) => lists,
-            Err(e) => {
-                let failure = Failure::from(e);
-                sink.error(&of_seed(failure.to_string()));
-                codes.push(exit::code(failure));
-                continue;
-            }
-        };
-        for provider in pax_core::CITATION_PROVIDERS {
-            let Some(result) = lists.get(&provider) else {
-                continue;
-            };
-            let reason = pax_core::incomplete_reason(result)
-                .filter(|reason| kind == Lists::Citations || reason.is_missing());
-            sink.citation_header(provider, result.as_ref().ok(), reason);
-            if let Err(e) = result {
-                sink.provider_error(provider, &of_seed(e.to_string()));
-            }
-        }
-        codes.push(exit::citations(lists));
-    }
-    if results.any_listed() {
-        let language_unknown = |work: &pax_core::CandidateWork| {
-            results
-                .seeds
-                .iter()
-                .filter_map(|seed| seed.results.as_ref().ok())
-                .flat_map(|lists| lists.values().flatten())
-                .any(|page| page.is_language_unknown(work))
-        };
-        if several {
-            let seeds: Vec<&str> = results.seeds.iter().map(|s| s.seed.as_str()).collect();
-            sink.merged_seeds(
-                &results.merge(),
-                &seeds,
-                &index,
-                &language_unknown,
-                abstracts,
-            );
-        } else if let Some(Ok(lists)) = results.seeds.first().map(|seed| &seed.results) {
-            sink.merged(
-                &pax_core::merge_pages(lists),
-                &index,
-                &language_unknown,
-                abstracts,
-            );
-        }
-    }
-    exit::seeds(codes)
 }
 
 /// Notes on stderr when a search wasn't logged, and fails a search whose
@@ -518,12 +458,25 @@ fn report_log(sink: &mut impl Sink, log: pax_core::LogOutcome, code: Code) -> Co
 #[tokio::main]
 async fn main() -> ExitCode {
     dotenvy::dotenv().ok();
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        // Help and version aren't errors, and print as usual.
+        Err(e) if e.use_stderr() && wants_json(std::env::args_os()) => {
+            let code = e.exit_code();
+            eprintln!("{}", JsonSink::failure_line(code, &usage_message(&e)));
+            return ExitCode::from(u8::try_from(code).unwrap_or(1));
+        }
+        Err(e) => e.exit(),
+    };
     let config = pax_core::Config {
         semantic_scholar_api_key: std::env::var("SEMANTIC_SCHOLAR_API_KEY").ok(),
         arxiv_contact: std::env::var("ARXIV_CONTACT").ok(),
     };
-    run(cli.command, &mut TextSink, &config).await.into()
+    if cli.json {
+        run(cli.command, &mut JsonSink, &config).await.into()
+    } else {
+        run(cli.command, &mut TextSink, &config).await.into()
+    }
 }
 
 /// Whether `command` reads or writes the library in the current directory.
@@ -573,7 +526,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
     match command {
         Command::Init => match pax_core::init_library(Path::new(".")) {
             Ok(()) => {
-                sink.message("Library created");
+                sink.initialized(Path::new("."));
                 Code::Success
             }
             Err(e) => fail(sink, Failure::Init(&e)),
@@ -624,22 +577,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             let index = pax_core::LibraryIndex::load(Path::new("."));
             if let Some(doi) = &doi {
                 let results = pax_core::search_by_doi(doi, config).await;
-                let listed = results.values().any(Result::is_ok);
-                // arXiv has no DOI lookup.
-                for provider in [
-                    ProviderId::OpenAlex,
-                    ProviderId::Crossref,
-                    ProviderId::SemanticScholar,
-                ] {
-                    match results.get(&provider) {
-                        Some(Ok(works)) => {
-                            sink.provider_header(provider);
-                            sink.candidates(works, &index);
-                        }
-                        Some(Err(e)) => provider_failed(sink, provider, e, listed),
-                        None => {}
-                    }
-                }
+                sink.doi(doi, &results, &index);
                 return exit::provider_results(results.values());
             }
 
@@ -651,59 +589,39 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 let query = query.as_deref().unwrap_or_default();
                 pax_core::search_all_logged(query, &options, root, config).await
             };
-            for &provider in pax_core::merge::MERGE_ORDER {
-                match results.get(&provider) {
-                    Some(Ok(page)) => sink.page_header(provider, page),
-                    Some(Err(e)) => sink.provider_error(provider, &e.to_string()),
-                    None => {}
-                }
-            }
-            let language_unknown = |work: &pax_core::CandidateWork| {
-                results
-                    .values()
-                    .flatten()
-                    .any(|page| page.is_language_unknown(work))
-            };
-            sink.merged(
-                &pax_core::merge_pages(&results),
-                &index,
-                &language_unknown,
-                options.abstracts,
-            );
+            sink.search(&results, &index, &log, options.abstracts);
             report_log(sink, log, exit::provider_results(results.values()))
         }
         Command::Refs { seeds, paging } => {
             let options = paging.options();
             note_pacing(sink, seeds.len(), Lists::Citations, config);
-            let pax_core::Logged { results, log, .. } =
+            let logged =
                 pax_core::references_many_logged(&seeds, &options, Path::new("."), config).await;
-            let code = show_citations(sink, &results, Lists::Citations, options.abstracts);
-            report_log(sink, log, code)
+            show_citations(sink, logged, Lists::Citations, options.abstracts)
         }
         Command::CitedBy { seeds, paging } => {
             let options = paging.options();
             note_pacing(sink, seeds.len(), Lists::Citations, config);
-            let pax_core::Logged { results, log, .. } =
+            let logged =
                 pax_core::cited_by_many_logged(&seeds, &options, Path::new("."), config).await;
-            let code = show_citations(sink, &results, Lists::Citations, options.abstracts);
-            report_log(sink, log, code)
+            show_citations(sink, logged, Lists::Citations, options.abstracts)
         }
         Command::Related { seeds, paging } => {
             let options = paging.options();
             note_pacing(sink, seeds.len(), Lists::Related, config);
-            let pax_core::Logged { results, log, .. } =
+            let logged =
                 pax_core::related_many_logged(&seeds, &options, Path::new("."), config).await;
-            let code = show_citations(sink, &results, Lists::Related, options.abstracts);
-            report_log(sink, log, code)
+            show_citations(sink, logged, Lists::Related, options.abstracts)
         }
         Command::Show { reference } => {
             match pax_core::show_reference(&reference, Path::new("."), config).await {
-                Ok(pax_core::ShowResult::Declared(paper)) => sink.paper(&paper),
-                Ok(pax_core::ShowResult::Excluded(exclusion)) => sink.exclusion(&exclusion),
-                Ok(pax_core::ShowResult::Candidate(work)) => sink.candidate(&work),
-                Err(e) => return fail(sink, &e),
+                Ok(shown) => {
+                    let index = pax_core::LibraryIndex::load(Path::new("."));
+                    sink.show(&shown, &index);
+                    Code::Success
+                }
+                Err(e) => fail(sink, &e),
             }
-            Code::Success
         }
         Command::Add { reference, label } => {
             let id: CandidateId = match reference.parse() {
@@ -712,14 +630,14 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             };
             let Some(label) = label else {
                 match pax_core::add_candidate(&id, Path::new("."), config).await {
-                    Ok(paper_ref) => sink.message(&format!("Added {}", paper_ref.0)),
+                    Ok(paper_ref) => sink.added(&paper_ref, None),
                     Err(e) => return fail(sink, &e),
                 }
                 return Code::Success;
             };
             match pax_core::add_candidate_logged(&id, &label, Path::new("."), config).await {
                 Ok(logged) => {
-                    sink.message(&format!("Added {}", logged.results.0));
+                    sink.added(&logged.results, Some(&logged.log));
                     report_log(sink, logged.log, Code::Success)
                 }
                 Err(e) => fail(sink, &e),
@@ -731,27 +649,14 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 Ok(library) => library,
                 Err(e) => return fail(sink, &e),
             };
-            if library.papers().is_empty() {
-                sink.message("Library is empty");
-            } else {
-                let filter = pax_core::ListFilter { author, year, tag };
-                let papers = pax_core::filter_papers(library.papers(), &filter);
-                if papers.is_empty() {
-                    sink.message("No papers match the given filters");
-                } else {
-                    sink.papers(&papers);
-                }
-            }
+            let filter = pax_core::ListFilter { author, year, tag };
+            let papers = pax_core::filter_papers(library.papers(), &filter);
+            sink.list(&papers, library.papers().is_empty());
             Code::Success
         }
         Command::Remove { citation_key } => {
             match pax_core::remove_paper_entry(&citation_key, Path::new(".")) {
-                Ok(paper) => {
-                    sink.message(&format!("Removed {}", paper.local.citation_key));
-                    if let Some(alias) = &paper.local.alias {
-                        sink.message(&freed(alias));
-                    }
-                }
+                Ok(paper) => sink.removed(&paper),
                 Err(e) => return fail(sink, &e),
             }
             Code::Success
@@ -775,25 +680,13 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 .with_alias(alias);
             match pax_core::exclude_paper_with(&reference, &options, Path::new("."), config).await {
                 Ok(exclusion) => {
-                    let mut decision = exclusion.stage.to_string();
-                    if let Some(criterion) = &exclusion.criterion {
-                        decision.push_str(&format!(", criterion {criterion}"));
-                    }
-                    if let Some(round) = &exclusion.round {
-                        decision.push_str(&format!(", round {round}"));
-                    }
-                    if let Some(alias) = &exclusion.alias {
-                        decision.push_str(&format!(", alias {alias}"));
-                    }
-                    sink.message(&format!(
-                        "Excluded {} ({decision}): {}",
-                        exclusion.key, exclusion.title
-                    ));
+                    sink.excluded(&exclusion);
                     Code::Success
                 }
                 Err(e @ pax_core::PaxError::ExclusionTitleUnresolved(..)) => {
-                    sink.error(&format!("{e} with --title"));
-                    exit::code(Failure::Pax(&e))
+                    let code = exit::code(Failure::Pax(&e));
+                    sink.failure(code, &format!("{e} with --title"));
+                    code
                 }
                 Err(e) => fail(sink, &e),
             }
@@ -801,13 +694,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
         Command::Unexclude { reference } => {
             match pax_core::unexclude_paper(&reference, Path::new("."), config).await {
                 Ok(exclusion) => {
-                    sink.message(&format!(
-                        "Unexcluded {} ({}, {:?}): {}",
-                        exclusion.key, exclusion.stage, exclusion.reason, exclusion.title
-                    ));
-                    if let Some(alias) = &exclusion.alias {
-                        sink.message(&freed(alias));
-                    }
+                    sink.unexcluded(&exclusion);
                     Code::Success
                 }
                 Err(e) => fail(sink, &e),
@@ -838,8 +725,8 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 .with_doi(doi)
                 .with_source_url(source_url)
                 .with_alias(alias);
-            match pax_core::edit_paper(&citation_key, Path::new("."), &edits) {
-                Ok(()) => sink.message(&format!("Updated {citation_key}")),
+            match pax_core::edit_paper_entry(&citation_key, Path::new("."), &edits) {
+                Ok(paper) => sink.edited(&citation_key, &paper),
                 Err(e) => return fail(sink, &e),
             }
             Code::Success
@@ -848,23 +735,24 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             format: ExportFormat::Bibtex,
         } => match pax_core::Library::load(&pax_core::nix::papers_path(Path::new("."))) {
             Ok(library) => {
-                sink.export(&pax_core::bibtex::render(library.papers()));
+                sink.export(library.papers());
                 Code::Success
             }
             Err(e) => fail(sink, &e),
         },
         Command::Fetch {
-            citation_key,
+            citation_key: name,
             file,
             force,
         } => {
             let root = Path::new(".");
+            let citation_key = citation_key_of(&name);
             let outcome = match &file {
-                Some(file) => pax_core::fetch_file(&citation_key, file, force, root),
-                None => pax_core::fetch_paper(&citation_key, root),
+                Some(file) => pax_core::fetch_file(&name, file, force, root),
+                None => pax_core::fetch_paper(&name, root),
             };
             match outcome {
-                Ok(outcome) => sink.fetched(&citation_key, &outcome),
+                Ok(outcome) => sink.fetched(&name, &citation_key, &outcome),
                 Err(e) => return fail(sink, &e),
             }
             if file.is_some() && !pax_core::nix::flake_builds_local_artifacts(root) {
@@ -878,10 +766,6 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             Code::Success
         }
         Command::Check => match pax_core::check_artifacts(Path::new(".")) {
-            Ok(checks) if checks.is_empty() => {
-                sink.message("Library is empty");
-                Code::Success
-            }
             Ok(checks) => {
                 sink.checked(&checks);
                 exit::artifacts(checks.iter().filter_map(|check| {
@@ -909,14 +793,23 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 other => other,
             };
             match resolved {
-                Ok(pax_core::ResolvedArtifact::Path(path)) => open_in_viewer(sink, &path),
+                Ok(pax_core::ResolvedArtifact::Path(path)) => {
+                    let code = open_in_viewer(sink, &path);
+                    if code == Code::Success {
+                        sink.opened(&citation_key_of(&citation_key), &path);
+                    }
+                    code
+                }
                 Ok(pax_core::ResolvedArtifact::NoSourceUrl) => {
-                    sink.error(&format!(
+                    let message = format!(
                         "{citation_key:?} has no PDF source recorded — the provider found no \
                          open-access copy when it was added, so there's nothing to fetch; add a \
                          copy you have with `pax fetch {citation_key} --file <path>`"
-                    ));
-                    exit::code(Failure::Pax(&pax_core::PaxError::NoSourceUrl(citation_key)))
+                    );
+                    let error = pax_core::PaxError::NoSourceUrl(citation_key);
+                    let code = exit::code(Failure::Pax(&error));
+                    sink.failure(code, &message);
+                    code
                 }
                 Ok(pax_core::ResolvedArtifact::NotFetched) => fail(
                     sink,
@@ -926,17 +819,8 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             }
         }
         Command::Sync => match pax_core::sync_library(Path::new(".")) {
-            Ok(reports) if reports.is_empty() => {
-                sink.message("Library is empty");
-                Code::Success
-            }
             Ok(reports) => {
-                for report in &reports {
-                    match &report.result {
-                        Ok(outcome) => sink.fetched(&report.citation_key, outcome),
-                        Err(e) => sink.error(&format!("{}: {e}", report.citation_key)),
-                    }
-                }
+                sink.synced(&reports);
                 exit::artifacts(reports.iter().filter_map(|report| {
                     report
                         .result
@@ -947,16 +831,9 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             }
             Err(e) => fail(sink, &e),
         },
-        Command::Stats { json, by_label } => match pax_core::stats(Path::new(".")) {
+        Command::Stats { by_label } => match pax_core::stats(Path::new(".")) {
             Ok(stats) => {
-                if json {
-                    sink.stats_json(&stats);
-                } else {
-                    sink.stats(&stats);
-                    if by_label {
-                        sink.stats_by_label(&stats);
-                    }
-                }
+                sink.stats(&stats, by_label);
                 Code::Success
             }
             Err(e) => fail(sink, &e),

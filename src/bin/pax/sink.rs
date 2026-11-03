@@ -1,85 +1,104 @@
-//! Owns how the CLI renders output. Every command handler goes through a
-//! `Sink` instead of calling `println!` directly, so a future alternate
-//! output mode (e.g. JSON, for an external adapter UI) is a new `Sink` impl
-//! rather than a rewrite of every command handler.
+//! Owns how the CLI renders output. Every command handler hands its result
+//! to a `Sink` instead of calling `println!` directly, one method per
+//! command result, so an output mode is a `Sink` impl rather than a rewrite
+//! of every command handler.
 //!
 //! Results go to stdout; errors and warnings go to stderr, so redirecting
 //! stdout (`pax search … > results.txt`) captures the results alone.
+//!
+//! Two sinks: [`TextSink`], for people, and [`JsonSink`] (`--json`), which
+//! prints each command's result as one JSON document, a
+//! [`pax_core::output`] shape, and writes stderr as one JSON object per
+//! line: `{"error": {"code", "message"}}` for the failure that ends a
+//! command, `{"warning": {"message"}}` (with `provider` when one is
+//! concerned) for anything else.
 
+use std::collections::HashMap;
+use std::path::Path;
+use std::process::Stdio;
+
+use pax_core::output;
 use pax_core::{
     ArtifactCheck, CandidateWork, CheckStatus, Exclusion, FetchOutcome, FilterApplication,
-    IncompleteReason, LabelCounts, LibraryIndex, MergeReport, Paper, PaxError, ProviderId,
-    SearchPage, SeedMergeReport, Stats,
+    IncompleteReason, LabelCounts, LibraryIndex, LogOutcome, MergeReport, Paper, PaperRef,
+    PaxError, ProviderError, ProviderId, SearchPage, SeedMergeReport, SeedResults, ShowResult,
+    Stats, SyncReport,
 };
+use serde::Serialize;
+
+use crate::exit::{self, Code, Failure};
+
+/// A search's results, per provider.
+pub type SearchResults = HashMap<ProviderId, Result<SearchPage, ProviderError>>;
+
+/// `search --doi`'s records, per provider.
+pub type DoiResults = HashMap<ProviderId, Result<Vec<CandidateWork>, ProviderError>>;
 
 pub trait Sink {
-    fn message(&mut self, message: &str);
-    fn error(&mut self, message: &str);
+    /// Why the command failed, exiting with `code`.
+    fn failure(&mut self, code: Code, message: &str);
     /// A note about the results that isn't itself a result, e.g. a filter
     /// a provider couldn't apply.
     fn warning(&mut self, message: &str);
-    /// A provider that failed while the others may still have answered.
-    fn provider_error(&mut self, provider: ProviderId, message: &str);
-    /// A provider that has no record of the seed or DOI asked about, while
-    /// another provider answered: an answer, not a failure.
+    /// A note about a provider, e.g. that it has no record of the seed or
+    /// DOI asked about while another answered, or how long pacing it takes.
     fn provider_note(&mut self, provider: ProviderId, message: &str);
-    fn provider_header(&mut self, provider: ProviderId);
-    fn page_header(&mut self, provider: ProviderId, page: &SearchPage);
-    /// One citation provider's count, as [`Sink::page_header`], marked with
-    /// why the list is incomplete, if it is. `page` is `None` when the
-    /// provider returned no list.
-    fn citation_header(
+    /// A search's per-provider results, merged across providers and flagged
+    /// against `index`; with `abstracts`, each paper's abstract.
+    fn search(
         &mut self,
-        provider: ProviderId,
-        page: Option<&SearchPage>,
-        reason: Option<IncompleteReason>,
-    );
-    /// Results, each marked if it's in the library or excluded.
-    fn candidates(&mut self, candidates: &[CandidateWork], index: &LibraryIndex);
-    /// Search or citation results merged across providers. A row is marked
-    /// in library or excluded if any of its records is. `language_unknown` says
-    /// whether a record's language couldn't be checked by the filter; a
-    /// merged row is marked only if that holds for every record in it. With
-    /// `abstracts` set, each row's abstract ([`MergedWork::abstract_text`])
-    /// follows it.
-    ///
-    /// [`MergedWork::abstract_text`]: pax_core::MergedWork::abstract_text
-    fn merged(
-        &mut self,
-        report: &MergeReport,
+        results: &SearchResults,
         index: &LibraryIndex,
-        language_unknown: &dyn Fn(&CandidateWork) -> bool,
+        log: &LogOutcome,
         abstracts: bool,
     );
-    /// The line a seed's counts sit under in a multi-seed `refs` /
-    /// `cited-by` / `related`; `same_as` is the earlier seed it's the same
-    /// paper as.
-    fn seed_header(&mut self, seed: &str, same_as: Option<&str>);
-    /// Citation results merged across several seeds, as [`Sink::merged`],
-    /// each row also naming the seeds that returned it; `seeds` are their
-    /// names by index.
-    fn merged_seeds(
+    /// `search --doi`'s records of `doi`, per provider.
+    fn doi(&mut self, doi: &str, results: &DoiResults, index: &LibraryIndex);
+    /// A `refs`, `cited-by` or `related` lookup over one or more seeds.
+    fn citations(
         &mut self,
-        report: &SeedMergeReport,
-        seeds: &[&str],
+        results: &SeedResults,
+        lists: output::Lists,
         index: &LibraryIndex,
-        language_unknown: &dyn Fn(&CandidateWork) -> bool,
+        log: &LogOutcome,
         abstracts: bool,
     );
-    fn candidate(&mut self, candidate: &CandidateWork);
+    /// What `show` found: a declared paper, an excluded paper's record (given
+    /// its alias), or a provider's record, flagged against `index`.
+    fn show(&mut self, shown: &ShowResult, index: &LibraryIndex);
+    /// `search --local`'s matches.
     fn papers(&mut self, papers: &[Paper]);
-    fn paper(&mut self, paper: &Paper);
-    /// An excluded paper's record, for `show` given its alias.
-    fn exclusion(&mut self, exclusion: &Exclusion);
-    fn export(&mut self, bibtex: &str);
-    fn fetched(&mut self, citation_key: &str, outcome: &FetchOutcome);
+    /// `list`'s papers, those matching its filters; `library_empty` says
+    /// whether the library has none at all.
+    fn list(&mut self, papers: &[Paper], library_empty: bool);
+    /// A library created at `root`.
+    fn initialized(&mut self, root: &Path);
+    /// A paper added as `key`; `log`, when the add was logged under a label.
+    fn added(&mut self, key: &PaperRef, log: Option<&LogOutcome>);
+    /// The paper `remove` removed.
+    fn removed(&mut self, paper: &Paper);
+    /// The exclusion `exclude` recorded.
+    fn excluded(&mut self, exclusion: &Exclusion);
+    /// The exclusion `unexclude` removed.
+    fn unexcluded(&mut self, exclusion: &Exclusion);
+    /// The paper `edit` edited, as `name` named it, as it is now.
+    fn edited(&mut self, name: &str, paper: &Paper);
+    /// `papers`, exported as BibTeX.
+    fn export(&mut self, papers: &[Paper]);
+    /// A paper fetched by `fetch`, as `name` named it; `citation_key` is the
+    /// citation key that names.
+    fn fetched(&mut self, name: &str, citation_key: &str, outcome: &FetchOutcome);
+    /// `check`'s report on every declared paper.
     fn checked(&mut self, reports: &[ArtifactCheck]);
-    /// The PRISMA flow-diagram counts, aligned under the box names.
-    fn stats(&mut self, stats: &Stats);
-    /// The per-label counts, as a table after the flow-diagram counts.
-    fn stats_by_label(&mut self, stats: &Stats);
-    /// The PRISMA flow-diagram counts as one JSON object.
-    fn stats_json(&mut self, stats: &Stats);
+    /// `sync`'s fetch of every declared paper.
+    fn synced(&mut self, reports: &[SyncReport]);
+    /// A declared paper's PDF, at `path`, opened in the viewer.
+    fn opened(&mut self, citation_key: &str, path: &Path);
+    /// Where a child process's stdout (the PDF viewer's) goes.
+    fn child_stdout(&self) -> Stdio;
+    /// The PRISMA flow-diagram counts; with `by_label`, also the per-label
+    /// counts (which the JSON always has).
+    fn stats(&mut self, stats: &Stats, by_label: bool);
 }
 
 /// `println!` that ends the process quietly with exit 0 when stdout's reader
@@ -99,25 +118,34 @@ macro_rules! out {
 
 pub struct TextSink;
 
-impl Sink for TextSink {
+/// The pieces [`TextSink`]'s output is built from.
+impl TextSink {
+    /// A line of results or confirmation.
     fn message(&mut self, message: &str) {
         out!("{message}");
     }
 
+    /// An error, ending the command or not (one seed or paper among
+    /// several failing).
     fn error(&mut self, message: &str) {
         eprintln!("Error: {message}");
     }
 
-    fn warning(&mut self, message: &str) {
-        eprintln!("Warning: {message}");
-    }
-
+    /// A provider that failed while the others may still have answered.
     fn provider_error(&mut self, provider: ProviderId, message: &str) {
         eprintln!("Error: {provider}: {message}");
     }
 
-    fn provider_note(&mut self, provider: ProviderId, message: &str) {
-        eprintln!("Note: {provider}: {message}");
+    /// Reports a provider that returned no record for a DOI. One that has no
+    /// record of it has answered, so while another provider returned one,
+    /// that's a note rather than an error.
+    fn provider_failed(&mut self, provider: ProviderId, error: &ProviderError, another: bool) {
+        let failure = Failure::Provider(error);
+        if another && exit::is_answer(failure) {
+            self.provider_note(provider, &failure.to_string());
+        } else {
+            self.provider_error(provider, &failure.to_string());
+        }
     }
 
     fn provider_header(&mut self, provider: ProviderId) {
@@ -213,27 +241,155 @@ impl Sink for TextSink {
             }
         }
     }
+}
 
-    fn candidate(&mut self, candidate: &CandidateWork) {
-        out!("Title:      {}", candidate.title);
-        out!("Authors:    {}", candidate.authors.join(", "));
-        out!("Published:  {}", candidate.publish_date);
-        out!(
-            "DOI:        {}",
-            candidate.doi.as_deref().unwrap_or("(no doi)")
-        );
-        out!(
-            "Venue:      {}",
-            candidate.venue.as_deref().unwrap_or("(no venue)")
-        );
-        out!(
-            "PDF source: {}",
-            candidate.pdf_url.as_deref().unwrap_or("(none found)")
-        );
-        if let Some(abstract_text) = &candidate.abstract_text {
-            out!("Abstract:   {abstract_text}");
+impl Sink for TextSink {
+    fn failure(&mut self, _code: Code, message: &str) {
+        self.error(message);
+    }
+
+    fn warning(&mut self, message: &str) {
+        eprintln!("Warning: {message}");
+    }
+
+    fn provider_note(&mut self, provider: ProviderId, message: &str) {
+        eprintln!("Note: {provider}: {message}");
+    }
+
+    fn search(
+        &mut self,
+        results: &SearchResults,
+        index: &LibraryIndex,
+        _log: &LogOutcome,
+        abstracts: bool,
+    ) {
+        for &provider in pax_core::merge::MERGE_ORDER {
+            match results.get(&provider) {
+                Some(Ok(page)) => self.page_header(provider, page),
+                Some(Err(e)) => self.provider_error(provider, &e.to_string()),
+                None => {}
+            }
         }
-        out!("Reference:  {}", candidate.id);
+        let language_unknown = |work: &CandidateWork| {
+            results
+                .values()
+                .flatten()
+                .any(|page| page.is_language_unknown(work))
+        };
+        self.merged(
+            &pax_core::merge_pages(results),
+            index,
+            &language_unknown,
+            abstracts,
+        );
+    }
+
+    fn doi(&mut self, _doi: &str, results: &DoiResults, index: &LibraryIndex) {
+        let listed = results.values().any(Result::is_ok);
+        // arXiv and dblp have no DOI lookup.
+        for provider in [
+            ProviderId::OpenAlex,
+            ProviderId::Crossref,
+            ProviderId::SemanticScholar,
+        ] {
+            match results.get(&provider) {
+                Some(Ok(works)) => {
+                    self.provider_header(provider);
+                    self.candidates(works, index);
+                }
+                Some(Err(e)) => self.provider_failed(provider, e, listed),
+                None => {}
+            }
+        }
+    }
+
+    /// Each seed's provider counts, marked with why a list is incomplete if
+    /// it is, then one list merged across every seed and provider, the way
+    /// `search` prints it. With one seed the output is that seed's alone;
+    /// with several, each seed's counts sit under a `seed <seed>:` line and
+    /// each merged row names the seeds that returned it.
+    ///
+    /// For related works, only a missing list is marked: a related list
+    /// never has a total, so it's never complete, and `truncated` (the limit
+    /// stopping short of a total) would say something untrue; its count line
+    /// already says the total isn't reported.
+    fn citations(
+        &mut self,
+        results: &SeedResults,
+        lists: output::Lists,
+        index: &LibraryIndex,
+        _log: &LogOutcome,
+        abstracts: bool,
+    ) {
+        let several = results.seeds.len() > 1;
+        for seed in &results.seeds {
+            // With several seeds, stderr lines name theirs.
+            let of_seed = |message: String| {
+                if several {
+                    format!("{message} (seed {})", seed.seed)
+                } else {
+                    message
+                }
+            };
+            if several {
+                let same_as = seed.same_as.map(|i| results.seeds[i].seed.as_str());
+                self.seed_header(&seed.seed, same_as);
+            }
+            let by_provider = match &seed.results {
+                Ok(by_provider) => by_provider,
+                Err(e) => {
+                    self.error(&of_seed(e.to_string()));
+                    continue;
+                }
+            };
+            for provider in pax_core::CITATION_PROVIDERS {
+                let Some(result) = by_provider.get(&provider) else {
+                    continue;
+                };
+                let reason = pax_core::incomplete_reason(result)
+                    .filter(|reason| lists == output::Lists::Citations || reason.is_missing());
+                self.citation_header(provider, result.as_ref().ok(), reason);
+                if let Err(e) = result {
+                    self.provider_error(provider, &of_seed(e.to_string()));
+                }
+            }
+        }
+        if !results.any_listed() {
+            return;
+        }
+        let language_unknown = |work: &CandidateWork| {
+            results
+                .seeds
+                .iter()
+                .filter_map(|seed| seed.results.as_ref().ok())
+                .flat_map(|lists| lists.values().flatten())
+                .any(|page| page.is_language_unknown(work))
+        };
+        if several {
+            let seeds: Vec<&str> = results.seeds.iter().map(|s| s.seed.as_str()).collect();
+            self.merged_seeds(
+                &results.merge(),
+                &seeds,
+                index,
+                &language_unknown,
+                abstracts,
+            );
+        } else if let Some(Ok(by_provider)) = results.seeds.first().map(|seed| &seed.results) {
+            self.merged(
+                &pax_core::merge_pages(by_provider),
+                index,
+                &language_unknown,
+                abstracts,
+            );
+        }
+    }
+
+    fn show(&mut self, shown: &ShowResult, _index: &LibraryIndex) {
+        match shown {
+            ShowResult::Declared(paper) => print_paper(paper),
+            ShowResult::Excluded(exclusion) => print_exclusion(exclusion),
+            ShowResult::Candidate(work) => print_candidate(work),
+        }
     }
 
     fn papers(&mut self, papers: &[Paper]) {
@@ -252,74 +408,88 @@ impl Sink for TextSink {
         }
     }
 
-    fn paper(&mut self, paper: &Paper) {
-        out!("Title:        {}", paper.identity.title);
-        out!("Authors:      {}", paper.identity.authors.join(", "));
-        if let Some(year) = paper.identity.year {
-            out!("Year:         {}", year);
-        }
-        out!(
-            "DOI:          {}",
-            paper.identity.doi.as_deref().unwrap_or("(no doi)")
-        );
-        out!(
-            "Venue:        {}",
-            paper.identity.venue.as_deref().unwrap_or("(no venue)")
-        );
-        out!("Citation key: {}", paper.local.citation_key);
+    fn initialized(&mut self, _root: &Path) {
+        self.message("Library created");
+    }
+
+    fn added(&mut self, key: &PaperRef, _log: Option<&LogOutcome>) {
+        self.message(&format!("Added {}", key.0));
+    }
+
+    fn removed(&mut self, paper: &Paper) {
+        self.message(&format!("Removed {}", paper.local.citation_key));
         if let Some(alias) = &paper.local.alias {
-            out!("Alias:        {alias}");
-        }
-        out!(
-            "PDF source:   {}",
-            paper
-                .artifact
-                .source_url
-                .as_deref()
-                .unwrap_or("(not resolved)")
-        );
-        out!(
-            "Artifact:     {}",
-            if paper.artifact.hash.is_some() {
-                "Fetched"
-            } else {
-                "Not fetched"
-            }
-        );
-        if !paper.local.tags.is_empty() {
-            out!("Tags:         {}", paper.local.tags.join(", "));
-        }
-        if let Some(notes) = &paper.local.notes {
-            out!("Notes:        {}", notes);
+            self.message(&freed(alias));
         }
     }
 
-    fn exclusion(&mut self, exclusion: &Exclusion) {
-        out!("Excluded:     {}", exclusion.key);
-        out!("Title:        {}", exclusion.title);
-        if let Some(year) = exclusion.year {
-            out!("Year:         {year}");
-        }
-        out!("Stage:        {}", exclusion.stage);
-        out!("Reason:       {}", exclusion.reason);
+    fn excluded(&mut self, exclusion: &Exclusion) {
+        let mut decision = exclusion.stage.to_string();
         if let Some(criterion) = &exclusion.criterion {
-            out!("Criterion:    {criterion}");
+            decision.push_str(&format!(", criterion {criterion}"));
         }
         if let Some(round) = &exclusion.round {
-            out!("Round:        {round}");
+            decision.push_str(&format!(", round {round}"));
         }
         if let Some(alias) = &exclusion.alias {
-            out!("Alias:        {alias}");
+            decision.push_str(&format!(", alias {alias}"));
+        }
+        self.message(&format!(
+            "Excluded {} ({decision}): {}",
+            exclusion.key, exclusion.title
+        ));
+    }
+
+    fn unexcluded(&mut self, exclusion: &Exclusion) {
+        self.message(&format!(
+            "Unexcluded {} ({}, {:?}): {}",
+            exclusion.key, exclusion.stage, exclusion.reason, exclusion.title
+        ));
+        if let Some(alias) = &exclusion.alias {
+            self.message(&freed(alias));
         }
     }
 
-    fn export(&mut self, bibtex: &str) {
+    fn edited(&mut self, name: &str, _paper: &Paper) {
+        self.message(&format!("Updated {name}"));
+    }
+
+    fn list(&mut self, papers: &[Paper], library_empty: bool) {
+        if library_empty {
+            self.message("Library is empty");
+        } else if papers.is_empty() {
+            self.message("No papers match the given filters");
+        } else {
+            self.papers(papers);
+        }
+    }
+
+    fn export(&mut self, papers: &[Paper]) {
+        let bibtex = pax_core::bibtex::render(papers);
         if !bibtex.is_empty() {
             out!("{bibtex}");
         }
     }
 
-    fn fetched(&mut self, citation_key: &str, outcome: &FetchOutcome) {
+    fn synced(&mut self, reports: &[SyncReport]) {
+        if reports.is_empty() {
+            self.message("Library is empty");
+        }
+        for report in reports {
+            match &report.result {
+                Ok(outcome) => self.fetched(&report.citation_key, &report.citation_key, outcome),
+                Err(e) => self.error(&format!("{}: {e}", report.citation_key)),
+            }
+        }
+    }
+
+    fn opened(&mut self, _citation_key: &str, _path: &Path) {}
+
+    fn child_stdout(&self) -> Stdio {
+        Stdio::inherit()
+    }
+
+    fn fetched(&mut self, citation_key: &str, _key: &str, outcome: &FetchOutcome) {
         match outcome {
             FetchOutcome::AlreadyFetched { hash } => {
                 out!("Already fetched {citation_key} ({hash})");
@@ -331,6 +501,10 @@ impl Sink for TextSink {
     }
 
     fn checked(&mut self, reports: &[ArtifactCheck]) {
+        if reports.is_empty() {
+            self.message("Library is empty");
+            return;
+        }
         let (mut reproducible, mut not_fetched, mut mismatched, mut errored) = (0, 0, 0, 0);
         let mut missing = 0;
         for report in reports {
@@ -376,7 +550,7 @@ impl Sink for TextSink {
         );
     }
 
-    fn stats(&mut self, stats: &Stats) {
+    fn stats(&mut self, stats: &Stats, by_label: bool) {
         for line in stats_lines(stats) {
             out!("{line}");
         }
@@ -392,24 +566,106 @@ impl Sink for TextSink {
                 stats.decided_outside_log
             ));
         }
-    }
-
-    fn stats_by_label(&mut self, stats: &Stats) {
-        if stats.by_label.is_empty() {
-            return;
-        }
-        out!();
-        out!("By label");
-        for line in label_lines(&stats.by_label) {
-            out!("{line}");
+        if by_label && !stats.by_label.is_empty() {
+            out!();
+            out!("By label");
+            for line in label_lines(&stats.by_label) {
+                out!("{line}");
+            }
         }
     }
+}
 
-    fn stats_json(&mut self, stats: &Stats) {
-        out!(
-            "{}",
-            serde_json::to_string_pretty(stats).expect("Stats serializes")
-        );
+/// The hint `remove` and `unexclude` print when the paper had an alias.
+fn freed(alias: &str) -> String {
+    format!(
+        "Freed alias {alias}; `edit --alias {alias}` or `exclude --alias {alias}` takes it again"
+    )
+}
+
+/// A provider's record, for `show`.
+fn print_candidate(candidate: &CandidateWork) {
+    out!("Title:      {}", candidate.title);
+    out!("Authors:    {}", candidate.authors.join(", "));
+    out!("Published:  {}", candidate.publish_date);
+    out!(
+        "DOI:        {}",
+        candidate.doi.as_deref().unwrap_or("(no doi)")
+    );
+    out!(
+        "Venue:      {}",
+        candidate.venue.as_deref().unwrap_or("(no venue)")
+    );
+    out!(
+        "PDF source: {}",
+        candidate.pdf_url.as_deref().unwrap_or("(none found)")
+    );
+    if let Some(abstract_text) = &candidate.abstract_text {
+        out!("Abstract:   {abstract_text}");
+    }
+    out!("Reference:  {}", candidate.id);
+}
+
+/// A declared paper, for `show`.
+fn print_paper(paper: &Paper) {
+    out!("Title:        {}", paper.identity.title);
+    out!("Authors:      {}", paper.identity.authors.join(", "));
+    if let Some(year) = paper.identity.year {
+        out!("Year:         {}", year);
+    }
+    out!(
+        "DOI:          {}",
+        paper.identity.doi.as_deref().unwrap_or("(no doi)")
+    );
+    out!(
+        "Venue:        {}",
+        paper.identity.venue.as_deref().unwrap_or("(no venue)")
+    );
+    out!("Citation key: {}", paper.local.citation_key);
+    if let Some(alias) = &paper.local.alias {
+        out!("Alias:        {alias}");
+    }
+    out!(
+        "PDF source:   {}",
+        paper
+            .artifact
+            .source_url
+            .as_deref()
+            .unwrap_or("(not resolved)")
+    );
+    out!(
+        "Artifact:     {}",
+        if paper.artifact.hash.is_some() {
+            "Fetched"
+        } else {
+            "Not fetched"
+        }
+    );
+    if !paper.local.tags.is_empty() {
+        out!("Tags:         {}", paper.local.tags.join(", "));
+    }
+    if let Some(notes) = &paper.local.notes {
+        out!("Notes:        {}", notes);
+    }
+}
+
+/// An excluded paper's record, for `show` given its alias.
+fn print_exclusion(exclusion: &Exclusion) {
+    out!("Excluded:     {}", exclusion.key);
+    out!("Title:        {}", exclusion.title);
+    if let Some(year) = exclusion.year {
+        out!("Year:         {year}");
+    }
+    out!("Stage:        {}", exclusion.stage);
+    out!("Reason:       {}", exclusion.reason);
+    if let Some(criterion) = &exclusion.criterion {
+        out!("Criterion:    {criterion}");
+    }
+    if let Some(round) = &exclusion.round {
+        out!("Round:        {round}");
+    }
+    if let Some(alias) = &exclusion.alias {
+        out!("Alias:        {alias}");
     }
 }
 
@@ -757,6 +1013,139 @@ fn stats_lines(stats: &Stats) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// `--json`: each command's result as one pretty-printed JSON document on
+/// stdout, and stderr as one compact JSON object per line.
+pub struct JsonSink;
+
+impl JsonSink {
+    /// Prints `value` as the command's one JSON document.
+    fn document(&mut self, value: &impl Serialize) {
+        out!(
+            "{}",
+            serde_json::to_string_pretty(value).expect("output shapes serialize")
+        );
+    }
+
+    /// The failure that ends a command, as `{"error": {"code", "message"}}`.
+    pub fn failure_line(code: i32, message: &str) -> String {
+        serde_json::json!({ "error": { "code": code, "message": message } }).to_string()
+    }
+
+    fn warning_line(&mut self, provider: Option<ProviderId>, message: &str) {
+        let mut warning = serde_json::json!({ "message": message });
+        if let Some(provider) = provider {
+            warning["provider"] = provider.to_string().into();
+        }
+        eprintln!("{}", serde_json::json!({ "warning": warning }));
+    }
+}
+
+impl Sink for JsonSink {
+    fn failure(&mut self, code: Code, message: &str) {
+        eprintln!("{}", JsonSink::failure_line(code as i32, message));
+    }
+
+    fn warning(&mut self, message: &str) {
+        self.warning_line(None, message);
+    }
+
+    fn provider_note(&mut self, provider: ProviderId, message: &str) {
+        self.warning_line(Some(provider), message);
+    }
+
+    fn search(
+        &mut self,
+        results: &SearchResults,
+        index: &LibraryIndex,
+        log: &LogOutcome,
+        abstracts: bool,
+    ) {
+        self.document(&output::SearchResults::new(results, index, log, abstracts));
+    }
+
+    fn doi(&mut self, doi: &str, results: &DoiResults, index: &LibraryIndex) {
+        self.document(&output::DoiRecords::new(doi, results, index));
+    }
+
+    fn citations(
+        &mut self,
+        results: &SeedResults,
+        lists: output::Lists,
+        index: &LibraryIndex,
+        log: &LogOutcome,
+        abstracts: bool,
+    ) {
+        self.document(&output::CitationResults::new(
+            results, index, log, lists, abstracts,
+        ));
+    }
+
+    fn show(&mut self, shown: &ShowResult, index: &LibraryIndex) {
+        self.document(&output::Shown::new(shown, index));
+    }
+
+    fn papers(&mut self, papers: &[Paper]) {
+        self.document(&output::PaperList::new(papers));
+    }
+
+    fn list(&mut self, papers: &[Paper], _library_empty: bool) {
+        self.document(&output::PaperList::new(papers));
+    }
+
+    fn initialized(&mut self, root: &Path) {
+        self.document(&output::Initialized::new(root));
+    }
+
+    fn added(&mut self, key: &PaperRef, log: Option<&LogOutcome>) {
+        self.document(&output::Added::new(key, log));
+    }
+
+    fn removed(&mut self, paper: &Paper) {
+        self.document(&output::DeclaredPaper::from(paper));
+    }
+
+    fn excluded(&mut self, exclusion: &Exclusion) {
+        self.document(&output::Excluded::from(exclusion));
+    }
+
+    fn unexcluded(&mut self, exclusion: &Exclusion) {
+        self.document(&output::Excluded::from(exclusion));
+    }
+
+    fn edited(&mut self, _name: &str, paper: &Paper) {
+        self.document(&output::DeclaredPaper::from(paper));
+    }
+
+    fn export(&mut self, papers: &[Paper]) {
+        self.document(&output::Exported::new(papers));
+    }
+
+    fn fetched(&mut self, _name: &str, citation_key: &str, outcome: &FetchOutcome) {
+        self.document(&output::FetchResult::new(citation_key, outcome));
+    }
+
+    fn checked(&mut self, reports: &[ArtifactCheck]) {
+        self.document(&output::CheckResults::new(reports));
+    }
+
+    fn synced(&mut self, reports: &[SyncReport]) {
+        self.document(&output::SyncResults::new(reports));
+    }
+
+    fn opened(&mut self, citation_key: &str, path: &Path) {
+        self.document(&output::Opened::new(citation_key, path));
+    }
+
+    fn child_stdout(&self) -> Stdio {
+        // Kept off stdout, which holds the one document.
+        std::io::stderr().into()
+    }
+
+    fn stats(&mut self, stats: &Stats, _by_label: bool) {
+        self.document(stats);
+    }
 }
 
 #[cfg(test)]
