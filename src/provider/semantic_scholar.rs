@@ -364,7 +364,14 @@ struct RecommendationsResponse {
     #[serde(default)]
     recommended_papers: Vec<serde_json::Value>,
 }
-const MAX_RETRIES: u32 = 3;
+
+/// How many times a rate-limited or failed request is retried. Semantic
+/// Scholar answers 429 under load even to an API key well under its rate,
+/// and sends no `Retry-After`, so the backoff (doubling from
+/// [`INITIAL_BACKOFF`]) has to outlast a busy spell: five retries wait 31 s
+/// in all. Three (7 s) lost 2 of 20 seeds' reference lists in a live run
+/// with a key.
+const MAX_RETRIES: u32 = 5;
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 
 /// Which of a paper's citation lists to page through.
