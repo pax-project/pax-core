@@ -1,5 +1,6 @@
 mod arxiv;
 mod crossref;
+mod dblp;
 mod filter;
 mod openalex;
 mod pacing;
@@ -7,6 +8,7 @@ mod semantic_scholar;
 
 pub use arxiv::ArxivProvider;
 pub use crossref::CrossrefProvider;
+pub use dblp::DblpProvider;
 pub use filter::{
     AppliedFilter, DocType, FilterApplication, FilterKind, Filters, UnknownDocType, YearRange,
     YearRangeParseError,
@@ -27,6 +29,16 @@ use thiserror::Error;
 /// exactly why `search`'s results can look sparser than the library actually
 /// has to offer.
 pub(crate) const SEARCH_RESULT_LIMIT: usize = 50;
+
+/// The providers a search asks when [`SearchOptions::providers`] names none:
+/// the general-purpose ones. [`ProviderId::Dblp`] covers computer science
+/// only, so a search asks it only when it's named.
+pub const DEFAULT_SEARCH_PROVIDERS: &[ProviderId] = &[
+    ProviderId::OpenAlex,
+    ProviderId::Crossref,
+    ProviderId::SemanticScholar,
+    ProviderId::ArXiv,
+];
 
 /// How many results a paged search should retrieve from each provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +67,12 @@ pub struct SearchOptions {
     /// then request it. OpenAlex, Crossref and arXiv return abstracts either way.
     /// Off by default, since abstracts make responses several times larger.
     pub abstracts: bool,
+    /// The providers a search asks, in any order; empty (the default) means
+    /// [`DEFAULT_SEARCH_PROVIDERS`]. Naming a provider outside that set, such
+    /// as [`ProviderId::Dblp`], is how it joins a search. Only searches read
+    /// it: the citation and related-works functions always ask their own
+    /// providers ([`crate::CITATION_PROVIDERS`]).
+    pub providers: Vec<ProviderId>,
 }
 
 impl Default for SearchOptions {
@@ -66,6 +84,7 @@ impl Default for SearchOptions {
             filters: Filters::default(),
             label: None,
             abstracts: false,
+            providers: Vec::new(),
         }
     }
 }
@@ -91,6 +110,29 @@ impl SearchOptions {
     pub fn with_abstracts(mut self, abstracts: bool) -> Self {
         self.abstracts = abstracts;
         self
+    }
+
+    /// See [`SearchOptions::providers`].
+    pub fn with_providers(mut self, providers: impl IntoIterator<Item = ProviderId>) -> Self {
+        self.providers = providers.into_iter().collect();
+        self
+    }
+
+    /// The providers a search asks, in [`crate::merge::MERGE_ORDER`]: the ones
+    /// named in [`SearchOptions::providers`], or [`DEFAULT_SEARCH_PROVIDERS`]
+    /// when none are.
+    pub fn search_providers(&self) -> Vec<ProviderId> {
+        crate::merge::MERGE_ORDER
+            .iter()
+            .copied()
+            .filter(|provider| {
+                if self.providers.is_empty() {
+                    DEFAULT_SEARCH_PROVIDERS.contains(provider)
+                } else {
+                    self.providers.contains(provider)
+                }
+            })
+            .collect()
     }
 }
 
@@ -275,6 +317,9 @@ pub enum ProviderId {
     Crossref,
     SemanticScholar,
     ArXiv,
+    /// dblp, the computer science bibliography: search and lookup by dblp key
+    /// (e.g. `dblp:conf/icse/Smith20`). It has no citation graph.
+    Dblp,
 }
 
 impl ProviderId {
@@ -284,6 +329,7 @@ impl ProviderId {
             ProviderId::Crossref => "crossref",
             ProviderId::SemanticScholar => "semanticscholar",
             ProviderId::ArXiv => "arxiv",
+            ProviderId::Dblp => "dblp",
         }
     }
 }
@@ -307,6 +353,7 @@ impl FromStr for ProviderId {
             "crossref" => Ok(ProviderId::Crossref),
             "semanticscholar" => Ok(ProviderId::SemanticScholar),
             "arxiv" => Ok(ProviderId::ArXiv),
+            "dblp" => Ok(ProviderId::Dblp),
             other => Err(UnknownProviderTag(other.to_string())),
         }
     }
@@ -639,6 +686,42 @@ mod tests {
         };
         assert_eq!(id.to_string(), "openalex:W123");
         assert_eq!("openalex:W123".parse::<CandidateId>().unwrap(), id);
+    }
+
+    #[test]
+    fn a_dblp_key_is_a_candidate_id_slashes_and_all() {
+        let id: CandidateId = "dblp:conf/icse/Smith20".parse().unwrap();
+        assert_eq!(id.provider, ProviderId::Dblp);
+        assert_eq!(id.native_id, "conf/icse/Smith20");
+        assert_eq!(id.to_string(), "dblp:conf/icse/Smith20");
+    }
+
+    #[test]
+    fn a_search_asks_the_default_providers_unless_others_are_named() {
+        assert_eq!(
+            SearchOptions::default().search_providers(),
+            DEFAULT_SEARCH_PROVIDERS
+        );
+        assert!(!DEFAULT_SEARCH_PROVIDERS.contains(&ProviderId::Dblp));
+        let named = SearchOptions::default().with_providers([
+            ProviderId::Dblp,
+            ProviderId::OpenAlex,
+            ProviderId::Dblp,
+        ]);
+        // In merge order, each once.
+        assert_eq!(
+            named.search_providers(),
+            [ProviderId::OpenAlex, ProviderId::Dblp]
+        );
+    }
+
+    #[test]
+    fn every_provider_has_a_place_in_the_merge_order() {
+        for tag in ["openalex", "crossref", "semanticscholar", "arxiv", "dblp"] {
+            let provider: ProviderId = tag.parse().unwrap();
+            assert_eq!(provider.to_string(), tag);
+            assert!(crate::merge::MERGE_ORDER.contains(&provider), "{tag}");
+        }
     }
 
     #[test]

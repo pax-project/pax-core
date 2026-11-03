@@ -46,10 +46,10 @@ pub use nix::init_library;
 use paper::year_from_publish_date;
 pub use paper::{Artifact, Identity, Local, Paper, PaperRef};
 pub use provider::{
-    AppliedFilter, ArxivProvider, CandidateId, CandidateWork, CrossrefProvider, DocType,
-    FilterApplication, FilterKind, Filters, Limit, OpenAlexProvider, Provider, ProviderError,
-    ProviderId, SearchOptions, SearchPage, SemanticScholarProvider, UnknownDocType, YearRange,
-    YearRangeParseError,
+    AppliedFilter, ArxivProvider, CandidateId, CandidateWork, CrossrefProvider,
+    DEFAULT_SEARCH_PROVIDERS, DblpProvider, DocType, FilterApplication, FilterKind, Filters, Limit,
+    OpenAlexProvider, Provider, ProviderError, ProviderId, SearchOptions, SearchPage,
+    SemanticScholarProvider, UnknownDocType, YearRange, YearRangeParseError,
 };
 pub use search_log::{
     LogOutcome, Logged, SearchCommand, SearchLog, SearchLogEntry, add_candidate_logged,
@@ -92,7 +92,8 @@ pub async fn search_by_author(
     works_only(search_by_author_paged(author, &SearchOptions::default(), config).await)
 }
 
-/// Searches every configured provider, paging each up to `options.limit`,
+/// Searches the providers `options` names ([`SearchOptions::search_providers`]:
+/// by default every general-purpose one), paging each up to `options.limit`,
 /// and aggregates results by provider. A failing provider doesn't fail the
 /// whole search — its error is reported alongside whatever providers did
 /// succeed, so callers (e.g. the CLI) can decide how to surface it. Each
@@ -103,48 +104,7 @@ pub async fn search_all_paged(
     options: &SearchOptions,
     config: &Config,
 ) -> HashMap<ProviderId, Result<SearchPage, ProviderError>> {
-    let mut results = HashMap::new();
-
-    let openalex = OpenAlexProvider::new();
-    results.insert(
-        ProviderId::OpenAlex,
-        openalex.search_page(query, options).await,
-    );
-
-    match CrossrefProvider::new() {
-        Ok(crossref) => {
-            results.insert(
-                ProviderId::Crossref,
-                crossref.search_page(query, options).await,
-            );
-        }
-        Err(e) => {
-            results.insert(ProviderId::Crossref, Err(e));
-        }
-    }
-
-    match SemanticScholarProvider::new(config.semantic_scholar_api_key.as_deref()) {
-        Ok(semantic_scholar) => {
-            results.insert(
-                ProviderId::SemanticScholar,
-                semantic_scholar.search_page(query, options).await,
-            );
-        }
-        Err(e) => {
-            results.insert(ProviderId::SemanticScholar, Err(e));
-        }
-    }
-
-    match ArxivProvider::new(config.arxiv_contact.as_deref()) {
-        Ok(arxiv) => {
-            results.insert(ProviderId::ArXiv, arxiv.search_page(query, options).await);
-        }
-        Err(e) => {
-            results.insert(ProviderId::ArXiv, Err(e));
-        }
-    }
-
-    results
+    search_each(query, SearchField::Text, options, config).await
 }
 
 /// Same shape as [`search_all_paged`], but scoped to an author name, the way
@@ -154,53 +114,64 @@ pub async fn search_by_author_paged(
     options: &SearchOptions,
     config: &Config,
 ) -> HashMap<ProviderId, Result<SearchPage, ProviderError>> {
+    search_each(author, SearchField::Author, options, config).await
+}
+
+/// What a search's input is matched against.
+#[derive(Clone, Copy)]
+enum SearchField {
+    Text,
+    Author,
+}
+
+/// Asks each of `options`' search providers in turn, one after another.
+async fn search_each(
+    input: &str,
+    field: SearchField,
+    options: &SearchOptions,
+    config: &Config,
+) -> HashMap<ProviderId, Result<SearchPage, ProviderError>> {
     let mut results = HashMap::new();
-
-    let openalex = OpenAlexProvider::new();
-    results.insert(
-        ProviderId::OpenAlex,
-        openalex.search_by_author_page(author, options).await,
-    );
-
-    match CrossrefProvider::new() {
-        Ok(crossref) => {
-            results.insert(
-                ProviderId::Crossref,
-                crossref.search_by_author_page(author, options).await,
-            );
-        }
-        Err(e) => {
-            results.insert(ProviderId::Crossref, Err(e));
-        }
+    for provider in options.search_providers() {
+        let page = search_one(provider, input, field, options, config).await;
+        results.insert(provider, page);
     }
-
-    match SemanticScholarProvider::new(config.semantic_scholar_api_key.as_deref()) {
-        Ok(semantic_scholar) => {
-            results.insert(
-                ProviderId::SemanticScholar,
-                semantic_scholar
-                    .search_by_author_page(author, options)
-                    .await,
-            );
-        }
-        Err(e) => {
-            results.insert(ProviderId::SemanticScholar, Err(e));
-        }
-    }
-
-    match ArxivProvider::new(config.arxiv_contact.as_deref()) {
-        Ok(arxiv) => {
-            results.insert(
-                ProviderId::ArXiv,
-                arxiv.search_by_author_page(author, options).await,
-            );
-        }
-        Err(e) => {
-            results.insert(ProviderId::ArXiv, Err(e));
-        }
-    }
-
     results
+}
+
+/// One provider's page for a search.
+async fn search_one(
+    provider: ProviderId,
+    input: &str,
+    field: SearchField,
+    options: &SearchOptions,
+    config: &Config,
+) -> Result<SearchPage, ProviderError> {
+    async fn page<P: Provider>(
+        provider: P,
+        input: &str,
+        field: SearchField,
+        options: &SearchOptions,
+    ) -> Result<SearchPage, ProviderError> {
+        match field {
+            SearchField::Text => provider.search_page(input, options).await,
+            SearchField::Author => provider.search_by_author_page(input, options).await,
+        }
+    }
+    match provider {
+        ProviderId::OpenAlex => page(OpenAlexProvider::new(), input, field, options).await,
+        ProviderId::Crossref => page(CrossrefProvider::new()?, input, field, options).await,
+        ProviderId::SemanticScholar => {
+            let provider =
+                SemanticScholarProvider::new(config.semantic_scholar_api_key.as_deref())?;
+            page(provider, input, field, options).await
+        }
+        ProviderId::ArXiv => {
+            let provider = ArxivProvider::new(config.arxiv_contact.as_deref())?;
+            page(provider, input, field, options).await
+        }
+        ProviderId::Dblp => page(DblpProvider::new()?, input, field, options).await,
+    }
 }
 
 /// Drops the paging counts, for the unpaged `search_*` functions.
@@ -279,6 +250,7 @@ pub async fn resolve_candidate(
                 .get(&id.native_id)
                 .await
         }
+        ProviderId::Dblp => DblpProvider::new()?.get(&id.native_id).await,
     }
 }
 
@@ -287,7 +259,7 @@ pub async fn resolve_candidate(
 /// resolved record's open PDF link; when it has none but has a DOI, the
 /// other providers are asked for that DOI ([`search_by_doi`]) and one of
 /// their PDF links is used instead: an arXiv-hosted PDF if any provider has
-/// one, otherwise the first PDF link in [`merge::PROVIDER_ORDER`] (see
+/// one, otherwise the first PDF link in [`merge::MERGE_ORDER`] (see
 /// [`first_pdf_url`]). Errors in that fallback don't fail the
 /// add — they just leave `source_url` unset. `hash` stays unset: fetching
 /// bytes and computing a Nix hash is `fetch`'s job, not `add`'s (lazy
@@ -551,14 +523,14 @@ mod refuse_declared_tests {
 /// other than `skip` (the one `add` already resolved against). An
 /// arXiv-hosted PDF ([`is_arxiv_pdf`]) is preferred, since other providers'
 /// links are sometimes landing pages rather than PDFs; otherwise the first
-/// PDF link wins. Both passes take providers in [`merge::PROVIDER_ORDER`].
+/// PDF link wins. Both passes take providers in [`merge::MERGE_ORDER`].
 /// Failed providers are skipped.
 fn first_pdf_url(
     results: &HashMap<ProviderId, Result<Vec<CandidateWork>, ProviderError>>,
     skip: ProviderId,
 ) -> Option<String> {
     let pdf_urls = || {
-        merge::PROVIDER_ORDER
+        merge::MERGE_ORDER
             .iter()
             .filter(|provider| **provider != skip)
             .filter_map(|provider| results.get(provider)?.as_ref().ok())

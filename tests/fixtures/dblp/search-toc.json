@@ -1,0 +1,128 @@
+{
+"result":{
+"query":":facetid:toc:db\"/\"journals\"/\"dke\"/\"dke44\".\"bht",
+"status":{
+"@code":"200",
+"text":"OK"
+},
+"time":{
+"@unit":"msecs",
+"text":"140.41"
+},
+"completions":{
+"@total":"1",
+"@computed":"1",
+"@sent":"1",
+"c":{
+"@sc":"16",
+"@dc":"16",
+"@oc":"16",
+"@id":"17615726",
+"text":":facetid:toc:db/journals/dke/dke44.bht"
+}
+},
+"hits":{
+"@total":"16",
+"@computed":"16",
+"@sent":"16",
+"@first":"0",
+"hit":[{
+"@score":"1",
+"@id":"4437475",
+"info":{"authors":{"author":{"@pid":"b/ZohraBellahsene","text":"Zohra Bellahsene"}},"title":"Data integration over the Web.","venue":"Data Knowl. Eng.","volume":"44","number":"3","pages":"265-266","year":"2003","type":"Journal Articles","key":"journals/dke/Bellahsene03","url":"https://dblp.org/rec/journals/dke/Bellahsene03"},
+"url":"URL#4437475"
+},
+{
+"@score":"1",
+"@id":"4437476",
+"info":{"authors":{"author":[{"@pid":"b/CBettini","text":"Claudio Bettini"},{"@pid":"68/27","text":"Angelo Montanari"}]},"title":"Temporal representation and reasoning.","venue":"Data Knowl. Eng.","volume":"44","number":"2","pages":"139-141","year":"2003","type":"Journal Articles","key":"journals/dke/BettiniM03","url":"https://dblp.org/rec/journals/dke/BettiniM03"},
+"url":"URL#4437476"
+},
+{
+"@score":"1",
+"@id":"4437479",
+"info":{"authors":{"author":[{"@pid":"b/BenediktBollig","text":"Benedikt Bollig"},{"@pid":"l/MartinLeucker","text":"Martin Leucker"}]},"title":"Deciding LTL over Mazurkiewicz traces.","venue":"Data Knowl. Eng.","volume":"44","number":"2","pages":"219-238","year":"2003","type":"Journal Articles","key":"journals/dke/BolligL03","url":"https://dblp.org/rec/journals/dke/BolligL03"},
+"url":"URL#4437479"
+},
+{
+"@score":"1",
+"@id":"4437480",
+"info":{"authors":{"author":[{"@pid":"58/1195","text":"Ivan T. Bowman"},{"@pid":"t/DavidToman","text":"David Toman"}]},"title":"Optimizing temporal queries - efficient handling of duplicates.","venue":"Data Knowl. Eng.","volume":"44","number":"2","pages":"143-164","year":"2003","type":"Journal Articles","key":"journals/dke/BowmanT03","url":"https://dblp.org/rec/journals/dke/BowmanT03"},
+"url":"URL#4437480"
+},
+{
+"@score":"1",
+"@id":"4437481",
+"info":{"authors":{"author":[{"@pid":"37/6727","text":"Luca Chittaro"},{"@pid":"c/CarloCombi","text":"Carlo Combi"}]},"title":"Visualizing queries on databases of temporal histories - new metaphors and their evaluation.","venue":"Data Knowl. Eng.","volume":"44","number":"2","pages":"239-264","year":"2003","type":"Journal Articles","key":"journals/dke/ChittaroC03","url":"https://dblp.org/rec/journals/dke/ChittaroC03"},
+"url":"URL#4437481"
+},
+{
+"@score":"1",
+"@id":"4437486",
+"info":{"authors":{"author":[{"@pid":"32/723","text":"Manoranjan Dash"},{"@pid":"92/309-1","text":"Huan Liu 0001"},{"@pid":"s/PeterScheuermann","text":"Peter Scheuermann"},{"@pid":"t/KianLeeTan","text":"Kian-Lee Tan"}]},"title":"Fast hierarchical clustering and its validation.","venue":"Data Knowl. Eng.","volume":"44","number":"1","pages":"109-138","year":"2003","type":"Journal Articles","key":"journals/dke/DashLST03","url":"https://dblp.org/rec/journals/dke/DashLST03"},
+"url":"URL#4437486"
+},
+{
+"@score":"1",
+"@id":"4437487",
+"info":{"authors":{"author":[{"@pid":"05/611","text":"Claude Delobel"},{"@pid":"15/3158","text":"Chantal Reynaud"},{"@pid":"r/MCRousset","text":"Marie-Christine Rousset"},{"@pid":"39/3118","text":"Jean-Pierre Sirot"},{"@pid":"36/4600","text":"Dan Vodislav"}]},"title":"Semantic integration in Xyleme - a uniform tree-based approach.","venue":"Data Knowl. Eng.","volume":"44","number":"3","pages":"267-298","year":"2003","type":"Journal Articles","key":"journals/dke/DelobelRRSV03","url":"https://dblp.org/rec/journals/dke/DelobelRRSV03"},
+"url":"URL#4437487"
+},
+{
+"@score":"1",
+"@id":"4437496",
+"info":{"authors":{"author":[{"@pid":"b/FernandoBerzal","text":"Fernando Berzal Galiano"},{"@pid":"c/JuanCCubero","text":"Juan C. Cubero"},{"@pid":"08/4502","text":"Fernando Cuenca"},{"@pid":"40/5465","text":"María J. Martín-Bautista"}]},"title":"On the quest for easy-to-understand splitting rules.","venue":"Data Knowl. Eng.","volume":"44","number":"1","pages":"31-48","year":"2003","type":"Journal Articles","key":"journals/dke/GalianoCCM03","url":"https://dblp.org/rec/journals/dke/GalianoCCM03"},
+"url":"URL#4437496"
+},
+{
+"@score":"1",
+"@id":"4437501",
+"info":{"authors":{"author":[{"@pid":"84/178","text":"Mikael R. Jensen"},{"@pid":"30/5772","text":"Thomas H. Møller"},{"@pid":"p/TorbenBachPedersen","text":"Torben Bach Pedersen"}]},"title":"Converting XML DTDs to UML diagrams for conceptual data integration.","venue":"Data Knowl. Eng.","volume":"44","number":"3","pages":"323-346","year":"2003","type":"Journal Articles","key":"journals/dke/JensenMP03","url":"https://dblp.org/rec/journals/dke/JensenMP03"},
+"url":"URL#4437501"
+},
+{
+"@score":"1",
+"@id":"4437505",
+"info":{"authors":{"author":{"@pid":"l/ZLacroix","text":"Zoé Lacroix"}},"title":"Web data retrieval and extraction.","venue":"Data Knowl. Eng.","volume":"44","number":"3","pages":"347-367","year":"2003","type":"Journal Articles","key":"journals/dke/Lacroix03","url":"https://dblp.org/rec/journals/dke/Lacroix03"},
+"url":"URL#4437505"
+},
+{
+"@score":"1",
+"@id":"4437507",
+"info":{"authors":{"author":[{"@pid":"15/2506","text":"Yingjiu Li"},{"@pid":"76/1374","text":"Peng Ning"},{"@pid":"w/XiaoyangSeanWang","text":"Xiaoyang Sean Wang"},{"@pid":"j/SushilJajodia","text":"Sushil Jajodia"}]},"title":"Discovering calendar-based temporal association rules.","venue":"Data Knowl. Eng.","volume":"44","number":"2","pages":"193-218","year":"2003","type":"Journal Articles","key":"journals/dke/LiNWJ03","url":"https://dblp.org/rec/journals/dke/LiNWJ03"},
+"url":"URL#4437507"
+},
+{
+"@score":"1",
+"@id":"4437514",
+"info":{"authors":{"author":[{"@pid":"p/YPapakonstantinou","text":"Yannis Papakonstantinou"},{"@pid":"43/3643","text":"Vinayak R. Borkar"},{"@pid":"28/5677","text":"Maxim Orgiyan"},{"@pid":"12/648","text":"Konstantinos Stathatos"},{"@pid":"13/5237","text":"Lucian Suta"},{"@pid":"v/VVassalos","text":"Vasilis Vassalos"},{"@pid":"23/6881","text":"Pavel Velikhov"}]},"title":"XML queries and algebra in the Enosys integration platform.","venue":"Data Knowl. Eng.","volume":"44","number":"3","pages":"299-322","year":"2003","type":"Journal Articles","key":"journals/dke/PapakonstantinouBOSSVV03","url":"https://dblp.org/rec/journals/dke/PapakonstantinouBOSSVV03"},
+"url":"URL#4437514"
+},
+{
+"@score":"1",
+"@id":"4437519",
+"info":{"authors":{"author":{"@pid":"s/MarkusSchneider1","text":"Markus Schneider 0001"}},"title":"Design and implementation of finite resolution crisp and fuzzy spatial objects.","venue":"Data Knowl. Eng.","volume":"44","number":"1","pages":"81-108","year":"2003","type":"Journal Articles","key":"journals/dke/Schneider03","url":"https://dblp.org/rec/journals/dke/Schneider03"},
+"url":"URL#4437519"
+},
+{
+"@score":"1",
+"@id":"4437521",
+"info":{"authors":{"author":[{"@pid":"53/2617","text":"Janne Skyt"},{"@pid":"j/ChristianSJensen","text":"Christian S. Jensen"},{"@pid":"03/5097","text":"Leo Mark"}]},"title":"A foundation for vacuuming temporal databases.","venue":"Data Knowl. Eng.","volume":"44","number":"1","pages":"1-29","year":"2003","type":"Journal Articles","key":"journals/dke/SkytJM03","url":"https://dblp.org/rec/journals/dke/SkytJM03"},
+"url":"URL#4437521"
+},
+{
+"@score":"1",
+"@id":"4437523",
+"info":{"authors":{"author":[{"@pid":"v/AthenaVakali","text":"Athena Vakali"},{"@pid":"t/EvimariaTerzi","text":"Evimaria Terzi"},{"@pid":"b/ElisaBertino","text":"Elisa Bertino"},{"@pid":"e/AKElmagarmid","text":"Ahmed K. Elmagarmid"}]},"title":"Hierarchical data placement for navigational multimedia applications.","venue":"Data Knowl. Eng.","volume":"44","number":"1","pages":"49-80","year":"2003","type":"Journal Articles","key":"journals/dke/VakaliTBE03","url":"https://dblp.org/rec/journals/dke/VakaliTBE03"},
+"url":"URL#4437523"
+},
+{
+"@score":"1",
+"@id":"4437526",
+"info":{"authors":{"author":[{"@pid":"w/JefWijsen","text":"Jef Wijsen"},{"@pid":"25/6265","text":"Alexis Bès"}]},"title":"On query optimization in a temporal SPC algebra.","venue":"Data Knowl. Eng.","volume":"44","number":"2","pages":"165-192","year":"2003","type":"Journal Articles","key":"journals/dke/WijsenB03","url":"https://dblp.org/rec/journals/dke/WijsenB03"},
+"url":"URL#4437526"
+}
+]
+}
+}
+}

@@ -75,6 +75,15 @@ pax export bibtex
 
 `pax search` queries OpenAlex, Crossref, Semantic Scholar, and arXiv, reports how much of each provider's result set it retrieved (`retrieved 50 of 1284`; `--limit N` or `--all` for more), and merges records that are the same paper into one row listing every provider's reference (`merged: 112 → 97 (15 duplicates, 2 unmatched)`). Records count as the same paper when they share a DOI or arXiv id, or an exact title and year without conflicting DOIs. Each merged row shows the published version when there is one (a record with a venue, or a DOI that isn't an arXiv DOI) rather than a preprint, then the most complete record, so its reference is the one to cite and `pax add`.
 
+`--provider` asks only the providers named, repeated for several: `openalex`, `crossref`, `semanticscholar`, `arxiv` or `dblp`. [dblp](https://dblp.org), the computer science bibliography, isn't asked by default, since it covers computer science only; name it to search it, alone or beside the others:
+
+```Bash
+pax search "actor model" --provider dblp
+pax search "actor model" --provider openalex --provider dblp
+```
+
+dblp results page and report totals like the others, merge with them by DOI, arXiv id or title and year, and are logged as their own `dblp` database in the [search log](#search-log) and [PRISMA counts](#prisma-counts). Its references are dblp keys (`dblp:conf/icse/Smith20`), which `pax add` and `pax show` take. dblp has no abstracts and no citation graph, so `refs`, `cited-by` and `related` don't ask it; a `dblp:` seed is looked up in the other providers by its DOI. Its search can't search by author alone, so `--author` searches dblp by full text. dblp sometimes answers automated clients with a bot check instead of results; pax reports that as dblp's error, and the other providers still answer.
+
 `pax add <result>` declares a search result in `research/papers.nix`, recording its open PDF link as `source_url` for `pax fetch`. If the resolved record has no PDF but has a DOI, `add` looks the DOI up in the other providers and takes a PDF link from them: an arXiv-hosted PDF if any provider has one, otherwise the first PDF link it finds (OpenAlex, then Crossref, then Semantic Scholar). If none has one, or the lookup fails, `source_url` stays unset and can be set later with `pax edit`. A paper already in the library, by DOI or by arXiv id in any version, isn't added again: `add` refuses it and names its citation key. Nor is a paper you've [excluded](#excluding-papers): `add` names the exclusion's key, stage and reason, and `pax unexclude` reverses it.
 
 `pax add <result> --label <source>` also records the add in the [search log](#search-log), for a paper you didn't find by a logged search: one you already knew, say from a list of seed papers (`pax add crossref:10.1145/359545.359563 --label seeds`). `pax stats` then counts it as identified from that source, under [other sources](#prisma-counts), rather than as decided outside the log. The label names the source and changes nothing about what is added. Without `--label`, `add` logs nothing; a refused or failed add logs nothing either. If the log can't be written, the paper is still added, with a warning on stderr, and `add` exits 1.
@@ -93,11 +102,11 @@ pax search "actor model" --year 2015-2020 --type conference-paper --lang en
 
 Each provider applies a filter in its own query where its API supports it, so its reported total already reflects it. Where it can't, but its records carry the field, pax filters after retrieval — the output says so, because the provider's total then counts records the filter dropped. Where a provider has no such data at all, the output says the filter wasn't applied there.
 
-| Filter | OpenAlex | Crossref | Semantic Scholar | arXiv |
-| --- | --- | --- | --- | --- |
-| year | server | server | server | server (submission date) |
-| type | server | server (no `review` type: not applied) | server (no `preprint`/`thesis` type: not applied) | every record is a preprint; any other type matches nothing |
-| language | server | after retrieval (records with no language are kept, marked `[language unknown]`) | not applied (no language data) | not applied (no language data) |
+| Filter | OpenAlex | Crossref | Semantic Scholar | arXiv | dblp |
+| --- | --- | --- | --- | --- | --- |
+| year | server | server | server | server (submission date) | server for a range of up to 30 years, else after retrieval |
+| type | server | server (no `review` type: not applied) | server (no `preprint`/`thesis` type: not applied) | every record is a preprint; any other type matches nothing | after retrieval (books and theses share one type, and there's no `review` type: not applied for those) |
+| language | server | after retrieval (records with no language are kept, marked `[language unknown]`) | not applied (no language data) | not applied (no language data) | not applied (no language data) |
 
 Crossref records often carry no language (proceedings papers never do), so its language filter can't check them. Rather than silently dropping every conference paper, pax keeps them, marks each such row `[language unknown]`, and says under Crossref's count how many it kept that way.
 
@@ -176,7 +185,7 @@ pax search "actor model" --with-abstracts
 pax cited-by vaswani2017 --year 2023- --with-abstracts
 ```
 
-Each row's abstract is wrapped, labelled `Abstract:`, and is the first one any of its records has, taking providers in the order OpenAlex, Crossref, Semantic Scholar, arXiv; a row none of them has one for says `(no abstract)`. OpenAlex, Crossref and arXiv return abstracts anyway; Semantic Scholar only sends them when asked, so `--with-abstracts` adds them to its requests, which makes its responses several times larger (mind its unauthenticated rate limit). Crossref's abstracts come as JATS XML; pax strips the markup to plain text, in `pax show` too. Without the flag, requests and output are as before.
+Each row's abstract is wrapped, labelled `Abstract:`, and is the first one any of its records has, taking providers in the order OpenAlex, Crossref, Semantic Scholar, arXiv (dblp has none); a row none of them has one for says `(no abstract)`. OpenAlex, Crossref and arXiv return abstracts anyway; Semantic Scholar only sends them when asked, so `--with-abstracts` adds them to its requests, which makes its responses several times larger (mind its unauthenticated rate limit). Crossref's abstracts come as JATS XML; pax strips the markup to plain text, in `pax show` too. Without the flag, requests and output are as before.
 
 ### Search log
 
@@ -199,7 +208,7 @@ Each line is one JSON object for one provider's part in one command, so a comman
 | `query` | The query, or the author name for `search-author`. Only on `search` / `search-author`. |
 | `seed` | The paper as given: a `provider:id` reference, a citation key or an alias. Only on `refs` / `cited-by` / `related`. |
 | `reference` | The `provider:id` reference added. Only on `manual`. |
-| `provider` | `openalex`, `crossref`, `semanticscholar` or `arxiv`. |
+| `provider` | `openalex`, `crossref`, `semanticscholar`, `arxiv` or `dblp`. |
 | `date` | When the command ran, ISO 8601 in UTC to the second. Every line of one command has the same date. |
 | `run` | An opaque id shared by every line one command wrote, and by no other command's. It ties together the lines of a `refs` / `cited-by` / `related` run over several seeds. Lines written before pax recorded it don't have it. |
 | `label` | The `--label` given, e.g. `R2-backward`; the same on every line of one command. Absent without one. |

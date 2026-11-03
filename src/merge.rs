@@ -9,6 +9,22 @@ use crate::provider::{CandidateId, CandidateWork, ProviderId, SearchPage};
 
 /// Provider order used when merging per-provider results: the order results
 /// are reported in, and the tie-break for which record represents a group.
+/// Every provider is in it, so a slice: a new provider extends it without
+/// changing its type.
+pub const MERGE_ORDER: &[ProviderId] = &[
+    ProviderId::OpenAlex,
+    ProviderId::Crossref,
+    ProviderId::SemanticScholar,
+    ProviderId::ArXiv,
+    ProviderId::Dblp,
+];
+
+/// The first four providers of [`MERGE_ORDER`], from before dblp was added;
+/// its array type fixes its length, so it can't grow with new providers.
+#[deprecated(
+    since = "3.1.0",
+    note = "lacks dblp; use `MERGE_ORDER`, which lists every provider"
+)]
 pub const PROVIDER_ORDER: [ProviderId; 4] = [
     ProviderId::OpenAlex,
     ProviderId::Crossref,
@@ -27,7 +43,7 @@ pub struct MergedWork {
     /// users cite. Within the same class the most complete record wins (most
     /// of DOI, PDF link, abstract, venue, authors, date, title present), then
     /// the earlier record — with [`merge_pages`], the earlier provider in
-    /// [`PROVIDER_ORDER`]. Kept exactly as its provider returned it, so its
+    /// [`MERGE_ORDER`]. Kept exactly as its provider returned it, so its
     /// `id` still resolves with `show`/`add`.
     pub work: CandidateWork,
     /// The other records merged into this one, in input order.
@@ -61,15 +77,15 @@ impl MergedWork {
     }
 
     /// The group's abstract: the first non-empty one among its records,
-    /// taking providers in [`PROVIDER_ORDER`] (and records of one provider
+    /// taking providers in [`MERGE_ORDER`] (and records of one provider
     /// representative first) — not necessarily the representative's own,
     /// which may have none.
     pub fn abstract_text(&self) -> Option<&str> {
         let rank = |work: &CandidateWork| {
-            PROVIDER_ORDER
+            MERGE_ORDER
                 .iter()
                 .position(|provider| *provider == work.id.provider)
-                .unwrap_or(PROVIDER_ORDER.len())
+                .unwrap_or(MERGE_ORDER.len())
         };
         let mut records: Vec<&CandidateWork> = self.records().collect();
         records.sort_by_key(|work| rank(work));
@@ -141,11 +157,11 @@ pub(crate) fn merge_indexed(
 /// Merges the successful pages of a paged search (e.g.
 /// [`crate::search_all_paged`]) or of a citation lookup
 /// ([`crate::references`], [`crate::cited_by`]), taking providers in
-/// [`PROVIDER_ORDER`]. Failed providers contribute nothing; their errors stay
+/// [`MERGE_ORDER`]. Failed providers contribute nothing; their errors stay
 /// in `results` for the caller to report.
 pub fn merge_pages<E>(results: &HashMap<ProviderId, Result<SearchPage, E>>) -> MergeReport {
     merge_works(
-        PROVIDER_ORDER
+        MERGE_ORDER
             .iter()
             .filter_map(|provider| results.get(provider)?.as_ref().ok())
             .flat_map(|page| page.works.iter().cloned()),
