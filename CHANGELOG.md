@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0](https://github.com/pax-project/pax-core/compare/v3.0.0...v3.1.0) - 2026-11-03
+
+### Features
+
+- *(list)* list excluded papers with --excluded ([#86](https://github.com/pax-project/pax-core/pull/86))
+- *(cli)* --json output for every pax command ([#85](https://github.com/pax-project/pax-core/pull/85))
+- *(dblp)* dblp provider for search and add by dblp key ([#84](https://github.com/pax-project/pax-core/pull/84))
+- *(semantic-scholar)* pace requests across a whole run ([#82](https://github.com/pax-project/pax-core/pull/82))
+- *(fetch)* materialize a declared paper's artifact from a local file ([#83](https://github.com/pax-project/pax-core/pull/83))
+- *(add)* log papers added with --label as a PRISMA other-methods source ([#81](https://github.com/pax-project/pax-core/pull/81))
+
+### Fixed
+
+- *(cli)* exit 0 quietly when stdout's reader closes the pipe ([#79](https://github.com/pax-project/pax-core/pull/79))
+
 ## [3.0.0](https://github.com/pax-project/pax-core/compare/v2.4.0...v3.0.0) - 2026-11-02
 
 ### Features
