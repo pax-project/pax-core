@@ -48,3 +48,7 @@ serde_json = "1"
 thiserror = "2.0.20"
 # The library needs only the timer, to back off when Semantic Scholar rate-limits.
 tokio = { version = "1", features = ["time"] }
+
+[dev-dependencies]
+# A runtime with a timer, for the tests that wait on a real pacer.
+tokio = { version = "1", features = ["macros", "rt", "time"] }
