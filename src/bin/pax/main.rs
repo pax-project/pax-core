@@ -336,13 +336,6 @@ fn usage_message(error: &clap::Error) -> String {
     first.strip_prefix("error: ").unwrap_or(first).to_string()
 }
 
-/// The hint `remove` and `unexclude` print when the paper had an alias.
-fn freed(alias: &str) -> String {
-    format!(
-        "Freed alias {alias}; `edit --alias {alias}` or `exclude --alias {alias}` takes it again"
-    )
-}
-
 fn open_in_viewer(sink: &mut impl Sink, path: &Path) -> Code {
     let viewer = std::env::var("PAX_PDF_VIEWER").unwrap_or_else(|_| "xdg-open".to_string());
     match std::process::Command::new(&viewer).arg(path).status() {
@@ -517,7 +510,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
     match command {
         Command::Init => match pax_core::init_library(Path::new(".")) {
             Ok(()) => {
-                sink.message("Library created");
+                sink.initialized(Path::new("."));
                 Code::Success
             }
             Err(e) => fail(sink, Failure::Init(&e)),
@@ -621,14 +614,14 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             };
             let Some(label) = label else {
                 match pax_core::add_candidate(&id, Path::new("."), config).await {
-                    Ok(paper_ref) => sink.message(&format!("Added {}", paper_ref.0)),
+                    Ok(paper_ref) => sink.added(&paper_ref, None),
                     Err(e) => return fail(sink, &e),
                 }
                 return Code::Success;
             };
             match pax_core::add_candidate_logged(&id, &label, Path::new("."), config).await {
                 Ok(logged) => {
-                    sink.message(&format!("Added {}", logged.results.0));
+                    sink.added(&logged.results, Some(&logged.log));
                     report_log(sink, logged.log, Code::Success)
                 }
                 Err(e) => fail(sink, &e),
@@ -647,12 +640,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
         }
         Command::Remove { citation_key } => {
             match pax_core::remove_paper_entry(&citation_key, Path::new(".")) {
-                Ok(paper) => {
-                    sink.message(&format!("Removed {}", paper.local.citation_key));
-                    if let Some(alias) = &paper.local.alias {
-                        sink.message(&freed(alias));
-                    }
-                }
+                Ok(paper) => sink.removed(&paper),
                 Err(e) => return fail(sink, &e),
             }
             Code::Success
@@ -676,20 +664,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 .with_alias(alias);
             match pax_core::exclude_paper_with(&reference, &options, Path::new("."), config).await {
                 Ok(exclusion) => {
-                    let mut decision = exclusion.stage.to_string();
-                    if let Some(criterion) = &exclusion.criterion {
-                        decision.push_str(&format!(", criterion {criterion}"));
-                    }
-                    if let Some(round) = &exclusion.round {
-                        decision.push_str(&format!(", round {round}"));
-                    }
-                    if let Some(alias) = &exclusion.alias {
-                        decision.push_str(&format!(", alias {alias}"));
-                    }
-                    sink.message(&format!(
-                        "Excluded {} ({decision}): {}",
-                        exclusion.key, exclusion.title
-                    ));
+                    sink.excluded(&exclusion);
                     Code::Success
                 }
                 Err(e @ pax_core::PaxError::ExclusionTitleUnresolved(..)) => {
@@ -703,13 +678,7 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
         Command::Unexclude { reference } => {
             match pax_core::unexclude_paper(&reference, Path::new("."), config).await {
                 Ok(exclusion) => {
-                    sink.message(&format!(
-                        "Unexcluded {} ({}, {:?}): {}",
-                        exclusion.key, exclusion.stage, exclusion.reason, exclusion.title
-                    ));
-                    if let Some(alias) = &exclusion.alias {
-                        sink.message(&freed(alias));
-                    }
+                    sink.unexcluded(&exclusion);
                     Code::Success
                 }
                 Err(e) => fail(sink, &e),
@@ -740,8 +709,8 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 .with_doi(doi)
                 .with_source_url(source_url)
                 .with_alias(alias);
-            match pax_core::edit_paper(&citation_key, Path::new("."), &edits) {
-                Ok(()) => sink.message(&format!("Updated {citation_key}")),
+            match pax_core::edit_paper_entry(&citation_key, Path::new("."), &edits) {
+                Ok(paper) => sink.edited(&citation_key, &paper),
                 Err(e) => return fail(sink, &e),
             }
             Code::Success

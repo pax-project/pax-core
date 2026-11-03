@@ -1505,3 +1505,111 @@ fn search_json_reports_every_provider_s_failure_with_the_same_exit_code() {
     assert_eq!(doc["doi"], "10.1/x");
     assert_eq!(doc["providers"][0]["found"], false);
 }
+
+#[test]
+fn init_json_names_the_library() {
+    let dir = scratch("init-json");
+    let output = pax(&dir, &["init", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(json(&output), serde_json::json!({ "path": "./research" }));
+    let output = pax(&dir, &["init", "--json"]);
+    assert_eq!(output.status.code(), Some(5));
+    assert_eq!(json_error(&output)["error"]["code"], 5);
+}
+
+#[test]
+fn edit_and_remove_json_are_the_paper() {
+    let dir = library("edit-json");
+    let output = pax(
+        &dir,
+        &[
+            "--json",
+            "edit",
+            "lamport1978",
+            "--rename",
+            "lamport78",
+            "--alias",
+            "P1",
+            "--add-tag",
+            "core",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let paper = json(&output);
+    assert_eq!(paper["citation_key"], "lamport78");
+    assert_eq!(paper["alias"], "P1");
+    assert_eq!(paper["tags"], serde_json::json!(["core"]));
+
+    let output = pax(&dir, &["--json", "edit", "P1"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(json_error(&output)["error"]["code"], 2);
+
+    let output = pax(&dir, &["--json", "remove", "P1"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).is_empty());
+    let paper = json(&output);
+    assert_eq!(paper["citation_key"], "lamport78");
+    assert_eq!(paper["alias"], "P1");
+}
+
+#[test]
+fn exclude_and_unexclude_json_are_the_exclusion() {
+    let dir = library("exclude-json");
+    let args = [
+        "exclude",
+        "10.1000/report",
+        "--reason",
+        "not empirical",
+        "--stage",
+        "full-text",
+        "--title",
+        "A report",
+        "--year",
+        "2019",
+        "--criterion",
+        "X3",
+        "--alias",
+        "P9",
+        "--json",
+    ];
+    let output = pax_offline(&dir, &args);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let expected = serde_json::json!({
+        "key": "10.1000/report",
+        "title": "A report",
+        "reason": "not empirical",
+        "stage": "full-text",
+        "year": 2019,
+        "criterion": "X3",
+        "round": null,
+        "alias": "P9"
+    });
+    assert_eq!(json(&output), expected);
+
+    let output = pax_offline(&dir, &["unexclude", "P9", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(json(&output), expected);
+
+    let output = pax_offline(&dir, &["unexclude", "P9", "--json"]);
+    assert_eq!(output.status.code(), Some(4));
+    assert_eq!(json_error(&output)["error"]["code"], 4);
+}
+
+#[test]
+fn a_refused_add_json_is_an_error_object() {
+    let dir = library("add-json");
+    let output = pax_offline(&dir, &["--json", "add", "crossref:10.1145/359545.359563"]);
+    assert_eq!(output.status.code(), Some(5));
+    assert!(stdout(&output).is_empty());
+    let error = json_error(&output);
+    assert_eq!(error["error"]["code"], 5);
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("lamport1978")
+    );
+    let output = pax_offline(&dir, &["--json", "add", "not-a-reference"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(json_error(&output)["error"]["code"], 2);
+}

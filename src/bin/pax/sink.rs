@@ -14,12 +14,14 @@
 //! concerned) for anything else.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use pax_core::output;
 use pax_core::{
     ArtifactCheck, CandidateWork, CheckStatus, Exclusion, FetchOutcome, FilterApplication,
-    IncompleteReason, LabelCounts, LibraryIndex, LogOutcome, MergeReport, Paper, PaxError,
-    ProviderError, ProviderId, SearchPage, SeedMergeReport, SeedResults, ShowResult, Stats,
+    IncompleteReason, LabelCounts, LibraryIndex, LogOutcome, MergeReport, Paper, PaperRef,
+    PaxError, ProviderError, ProviderId, SearchPage, SeedMergeReport, SeedResults, ShowResult,
+    Stats,
 };
 use serde::Serialize;
 
@@ -72,6 +74,18 @@ pub trait Sink {
     /// `list`'s papers, those matching its filters; `library_empty` says
     /// whether the library has none at all.
     fn list(&mut self, papers: &[Paper], library_empty: bool);
+    /// A library created at `root`.
+    fn initialized(&mut self, root: &Path);
+    /// A paper added as `key`; `log`, when the add was logged under a label.
+    fn added(&mut self, key: &PaperRef, log: Option<&LogOutcome>);
+    /// The paper `remove` removed.
+    fn removed(&mut self, paper: &Paper);
+    /// The exclusion `exclude` recorded.
+    fn excluded(&mut self, exclusion: &Exclusion);
+    /// The exclusion `unexclude` removed.
+    fn unexcluded(&mut self, exclusion: &Exclusion);
+    /// The paper `edit` edited, as `name` named it, as it is now.
+    fn edited(&mut self, name: &str, paper: &Paper);
     fn export(&mut self, bibtex: &str);
     fn fetched(&mut self, citation_key: &str, outcome: &FetchOutcome);
     fn checked(&mut self, reports: &[ArtifactCheck]);
@@ -384,6 +398,52 @@ impl Sink for TextSink {
         }
     }
 
+    fn initialized(&mut self, _root: &Path) {
+        self.message("Library created");
+    }
+
+    fn added(&mut self, key: &PaperRef, _log: Option<&LogOutcome>) {
+        self.message(&format!("Added {}", key.0));
+    }
+
+    fn removed(&mut self, paper: &Paper) {
+        self.message(&format!("Removed {}", paper.local.citation_key));
+        if let Some(alias) = &paper.local.alias {
+            self.message(&freed(alias));
+        }
+    }
+
+    fn excluded(&mut self, exclusion: &Exclusion) {
+        let mut decision = exclusion.stage.to_string();
+        if let Some(criterion) = &exclusion.criterion {
+            decision.push_str(&format!(", criterion {criterion}"));
+        }
+        if let Some(round) = &exclusion.round {
+            decision.push_str(&format!(", round {round}"));
+        }
+        if let Some(alias) = &exclusion.alias {
+            decision.push_str(&format!(", alias {alias}"));
+        }
+        self.message(&format!(
+            "Excluded {} ({decision}): {}",
+            exclusion.key, exclusion.title
+        ));
+    }
+
+    fn unexcluded(&mut self, exclusion: &Exclusion) {
+        self.message(&format!(
+            "Unexcluded {} ({}, {:?}): {}",
+            exclusion.key, exclusion.stage, exclusion.reason, exclusion.title
+        ));
+        if let Some(alias) = &exclusion.alias {
+            self.message(&freed(alias));
+        }
+    }
+
+    fn edited(&mut self, name: &str, _paper: &Paper) {
+        self.message(&format!("Updated {name}"));
+    }
+
     fn list(&mut self, papers: &[Paper], library_empty: bool) {
         if library_empty {
             self.message("Library is empty");
@@ -481,6 +541,13 @@ impl Sink for TextSink {
             }
         }
     }
+}
+
+/// The hint `remove` and `unexclude` print when the paper had an alias.
+fn freed(alias: &str) -> String {
+    format!(
+        "Freed alias {alias}; `edit --alias {alias}` or `exclude --alias {alias}` takes it again"
+    )
 }
 
 /// A provider's record, for `show`.
@@ -1000,6 +1067,30 @@ impl Sink for JsonSink {
 
     fn list(&mut self, papers: &[Paper], _library_empty: bool) {
         self.document(&output::PaperList::new(papers));
+    }
+
+    fn initialized(&mut self, root: &Path) {
+        self.document(&output::Initialized::new(root));
+    }
+
+    fn added(&mut self, key: &PaperRef, log: Option<&LogOutcome>) {
+        self.document(&output::Added::new(key, log));
+    }
+
+    fn removed(&mut self, paper: &Paper) {
+        self.document(&output::DeclaredPaper::from(paper));
+    }
+
+    fn excluded(&mut self, exclusion: &Exclusion) {
+        self.document(&output::Excluded::from(exclusion));
+    }
+
+    fn unexcluded(&mut self, exclusion: &Exclusion) {
+        self.document(&output::Excluded::from(exclusion));
+    }
+
+    fn edited(&mut self, _name: &str, paper: &Paper) {
+        self.document(&output::DeclaredPaper::from(paper));
     }
 
     fn export(&mut self, bibtex: &str) {
