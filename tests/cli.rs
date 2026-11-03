@@ -1140,3 +1140,172 @@ fn provider_is_a_usage_error_outside_query_and_author_searches() {
         stderr(&output)
     );
 }
+
+/// Records `hash` on `papers.nix`'s one paper, `lamport1978`, which has no
+/// `source_url`: a local artifact, as `fetch --file` leaves it.
+fn record_hash(dir: &std::path::Path, hash: &str) {
+    let papers = dir.join("research").join("papers.nix");
+    let text = fs::read_to_string(&papers).unwrap();
+    fs::write(
+        &papers,
+        text.replace("hash = null;", &format!("hash = {hash:?};")),
+    )
+    .unwrap();
+}
+
+/// A valid SRI sha256 hash no file in a Nix store has.
+const ABSENT_HASH: &str = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+#[test]
+fn fetch_force_needs_file() {
+    let dir = library("fetch-force");
+    let output = pax_offline(&dir, &["fetch", "lamport1978", "--force"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("--file"), "{}", stderr(&output));
+}
+
+#[test]
+fn fetch_file_refuses_a_path_that_isnt_a_file_with_2() {
+    let dir = library("fetch-file-missing");
+    for path in ["no-such.pdf", "research"] {
+        let output = pax_offline(&dir, &["fetch", "lamport1978", "--file", path]);
+        assert_eq!(output.status.code(), Some(2), "{path}");
+        assert!(
+            stderr(&output).contains("is not a file"),
+            "{}",
+            stderr(&output)
+        );
+    }
+    let papers = fs::read_to_string(dir.join("research").join("papers.nix")).unwrap();
+    assert!(papers.contains("hash = null;"), "{papers}");
+}
+
+#[test]
+fn fetch_file_needs_a_declared_paper() {
+    let dir = library("fetch-file-unknown");
+    fs::write(dir.join("paper.pdf"), "%PDF").unwrap();
+    let output = pax_offline(&dir, &["fetch", "nosuchkey", "--file", "paper.pdf"]);
+    assert_eq!(output.status.code(), Some(4));
+}
+
+#[test]
+fn stats_counts_a_local_artifact_as_included() {
+    let dir = library("stats-local");
+    record_hash(&dir, ABSENT_HASH);
+    let output = pax(&dir, &["stats", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains(r#""not_retrieved": 0"#), "{out}");
+    assert!(out.contains(r#""included": 1"#), "{out}");
+}
+
+#[test]
+fn fetch_without_a_source_suggests_fetch_file() {
+    let dir = library("fetch-no-source");
+    let output = pax_offline(&dir, &["fetch", "lamport1978"]);
+    assert_eq!(output.status.code(), Some(5));
+    assert!(
+        stderr(&output).contains("pax fetch lamport1978 --file <path>"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+#[ignore = "needs nix"]
+fn fetch_file_stores_the_file_and_records_its_hash() {
+    let dir = library("fetch-file");
+    // Unique bytes, so the store path is this run's own.
+    let content = format!(
+        "%PDF-1.4 pax fetch --file test {:?}",
+        std::time::SystemTime::now()
+    );
+    fs::write(dir.join("paper.pdf"), &content).unwrap();
+    fs::write(dir.join("other.pdf"), format!("{content} (another file)")).unwrap();
+
+    let output = pax(&dir, &["fetch", "lamport1978", "--file", "paper.pdf"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout(&output).starts_with("Fetched lamport1978 (sha256-"));
+    // `pax init` wrote the current flake, which builds local artifacts.
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+    let papers = fs::read_to_string(dir.join("research").join("papers.nix")).unwrap();
+    assert!(papers.contains("source_url = null;"), "{papers}");
+    assert!(papers.contains("hash = \"sha256-"), "{papers}");
+
+    let output = pax(&dir, &["stats", "--json"]);
+    assert!(stdout(&output).contains(r#""included": 1"#));
+    let output = pax(&dir, &["check"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stdout(&output));
+    assert!(stdout(&output).contains("lamport1978: reproducible"));
+    let output = pax(&dir, &["sync"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout(&output).contains("Already fetched lamport1978"));
+
+    // `open` finds it in the store without the flake, so a flake from
+    // before `fetch --file` opens it too.
+    fs::write(
+        dir.join("research").join("flake.nix"),
+        "{ outputs = { self, nixpkgs }: { }; }\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_pax"))
+        .args(["open", "lamport1978"])
+        .current_dir(&dir)
+        .env("PAX_PDF_VIEWER", "cat")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), content);
+
+    // The same file again is fine, with a warning that this flake can't
+    // build it.
+    let output = pax(&dir, &["fetch", "lamport1978", "--file", "paper.pdf"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("research/flake.nix predates `fetch --file`"),
+        "{}",
+        stderr(&output)
+    );
+
+    // A different file is refused until --force.
+    let papers = dir.join("research").join("papers.nix");
+    let before = fs::read_to_string(&papers).unwrap();
+    let output = pax(&dir, &["fetch", "lamport1978", "--file", "other.pdf"]);
+    assert_eq!(output.status.code(), Some(5));
+    assert!(stderr(&output).contains("--force"), "{}", stderr(&output));
+    assert_eq!(fs::read_to_string(&papers).unwrap(), before);
+    let output = pax(
+        &dir,
+        &["fetch", "lamport1978", "--file", "other.pdf", "--force"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_ne!(fs::read_to_string(&papers).unwrap(), before);
+}
+
+#[test]
+#[ignore = "needs nix"]
+fn a_local_artifact_missing_from_the_store_exits_8() {
+    let dir = library("local-missing");
+    record_hash(&dir, ABSENT_HASH);
+    let hint = "pax fetch lamport1978 --file <path>";
+
+    let output = pax(&dir, &["check"]);
+    assert_eq!(output.status.code(), Some(8), "{}", stdout(&output));
+    assert!(stdout(&output).contains("lamport1978: MISSING"));
+    assert!(stdout(&output).contains(hint));
+    assert!(stdout(&output).contains("1 missing"));
+
+    for args in [
+        &["sync"][..],
+        &["fetch", "lamport1978"],
+        &["open", "lamport1978"],
+    ] {
+        let output = pax(&dir, args);
+        assert_eq!(output.status.code(), Some(8), "{args:?}");
+        assert!(
+            stderr(&output).contains(hint),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+    }
+}

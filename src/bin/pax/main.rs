@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
@@ -183,9 +183,19 @@ enum Command {
         format: ExportFormat,
     },
     ///Materialize a declared paper's artifact through Nix
+    ///
+    ///With --file, from a PDF you already have (e.g. a paywalled paper
+    ///downloaded through a university login): the file is added to the Nix
+    ///store and its hash recorded, as a download's would be.
     Fetch {
         /// The paper's citation key or alias, e.g. turing1936 or P17
         citation_key: String,
+        /// Add this file as the paper's artifact instead of downloading it
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// With --file, replace an already-recorded hash the file doesn't match
+        #[arg(long, requires = "file")]
+        force: bool,
     },
     ///Verify declared artifacts still reproduce, without materializing them
     Check,
@@ -201,8 +211,9 @@ enum Command {
     ///Computed from research/search-log.jsonl, research/excluded.nix and
     ///research/papers.nix; a missing log or excluded.nix counts as empty.
     ///Duplicates are counted across the whole log by identity key. "Reports
-    ///not retrieved" is the declared papers with no source_url or no hash
-    ///(what `check` reports as not fetched), decided without the network.
+    ///not retrieved" is the declared papers with no hash (what `check`
+    ///reports as not fetched), decided without the network; one added with
+    ///`fetch --file` has a hash, so it's included.
     ///"Records awaiting screening" is the logged papers neither excluded nor
     ///declared yet; "reports sought" is the declared papers plus those
     ///excluded at full text.
@@ -792,27 +803,49 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             }
             Err(e) => fail(sink, &e),
         },
-        Command::Fetch { citation_key } => {
-            match pax_core::fetch_paper(&citation_key, Path::new(".")) {
+        Command::Fetch {
+            citation_key,
+            file,
+            force,
+        } => {
+            let root = Path::new(".");
+            let outcome = match &file {
+                Some(file) => pax_core::fetch_file(&citation_key, file, force, root),
+                None => pax_core::fetch_paper(&citation_key, root),
+            };
+            match outcome {
                 Ok(outcome) => sink.fetched(&citation_key, &outcome),
                 Err(e) => return fail(sink, &e),
             }
+            if file.is_some() && !pax_core::nix::flake_builds_local_artifacts(root) {
+                sink.warning(
+                    "research/flake.nix predates `fetch --file`, so `nix build` can't build a \
+                     paper added from a local file (pax open still opens it); replace it with \
+                     the current template, \
+                     https://github.com/pax-project/pax-core/blob/main/templates/flake.nix.template",
+                );
+            }
             Code::Success
         }
-        Command::Check => match pax_core::check_library(Path::new(".")) {
-            Ok(reports) if reports.is_empty() => {
+        Command::Check => match pax_core::check_artifacts(Path::new(".")) {
+            Ok(checks) if checks.is_empty() => {
                 sink.message("Library is empty");
                 Code::Success
             }
-            Ok(reports) => {
-                let failed = reports.iter().any(|r| {
-                    matches!(
-                        r.status,
-                        pax_core::CheckStatus::Mismatch { .. } | pax_core::CheckStatus::Error(_)
-                    )
-                });
-                sink.checked(&reports);
-                if failed { Code::Failure } else { Code::Success }
+            Ok(checks) => {
+                sink.checked(&checks);
+                exit::artifacts(checks.iter().filter_map(|check| {
+                    match &check.status {
+                        pax_core::CheckStatus::Mismatch { .. } => Some(Code::Failure),
+                        pax_core::CheckStatus::Error(_) => Some(
+                            check
+                                .error
+                                .as_ref()
+                                .map_or(Code::Failure, |e| exit::code(Failure::Pax(e))),
+                        ),
+                        _ => None,
+                    }
+                }))
             }
             Err(e) => fail(sink, &e),
         },
@@ -830,7 +863,8 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 Ok(pax_core::ResolvedArtifact::NoSourceUrl) => {
                     sink.error(&format!(
                         "{citation_key:?} has no PDF source recorded — the provider found no \
-                         open-access copy when it was added, so there's nothing to fetch"
+                         open-access copy when it was added, so there's nothing to fetch; add a \
+                         copy you have with `pax fetch {citation_key} --file <path>`"
                     ));
                     exit::code(Failure::Pax(&pax_core::PaxError::NoSourceUrl(citation_key)))
                 }
@@ -847,14 +881,19 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
                 Code::Success
             }
             Ok(reports) => {
-                let failed = reports.iter().any(|r| r.result.is_err());
                 for report in &reports {
                     match &report.result {
                         Ok(outcome) => sink.fetched(&report.citation_key, outcome),
                         Err(e) => sink.error(&format!("{}: {e}", report.citation_key)),
                     }
                 }
-                if failed { Code::Failure } else { Code::Success }
+                exit::artifacts(reports.iter().filter_map(|report| {
+                    report
+                        .result
+                        .as_ref()
+                        .err()
+                        .map(|e| exit::code(Failure::Pax(e)))
+                }))
             }
             Err(e) => fail(sink, &e),
         },

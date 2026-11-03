@@ -20,6 +20,16 @@ pub struct Artifact {
     pub hash: Option<String>,
 }
 
+impl Artifact {
+    /// Whether this artifact was added from a file the user already had
+    /// ([`crate::fetch_file`]): a `hash` and no `source_url`. Nothing can
+    /// download it again, so it exists only where that file was added to the
+    /// Nix store.
+    pub fn is_local(&self) -> bool {
+        self.source_url.is_none() && self.hash.is_some()
+    }
+}
+
 /// How the user organizes a declared paper. Non-exhaustive, so fields can be
 /// added without breaking callers: build one with [`Local::new`] and the
 /// `with_*` methods, or [`Local::default`].
@@ -194,6 +204,18 @@ mod tests {
         let mut artifact = original.clone();
         apply_artifact_edits(&mut artifact, None);
         assert_eq!(artifact, original);
+    }
+
+    #[test]
+    fn an_artifact_is_local_when_it_has_a_hash_and_no_source_url() {
+        let artifact = |source_url: Option<&str>, hash: Option<&str>| Artifact {
+            source_url: source_url.map(str::to_string),
+            hash: hash.map(str::to_string),
+        };
+        assert!(artifact(None, Some("sha256-x")).is_local());
+        assert!(!artifact(Some("https://e.org/p.pdf"), Some("sha256-x")).is_local());
+        assert!(!artifact(Some("https://e.org/p.pdf"), None).is_local());
+        assert!(!artifact(None, None).is_local());
     }
 
     #[test]

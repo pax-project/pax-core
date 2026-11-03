@@ -230,6 +230,20 @@ The project is designed to be:
 - Unix-friendly
 - lazy
 
+## Papers you already have
+
+A paper behind a paywall has no URL `pax fetch` can download, even when you have the PDF through a university login. Give pax the file instead:
+
+```Bash
+pax fetch doe2020 --file ~/Downloads/doe2020.pdf
+```
+
+The file is added to the Nix store, and its hash recorded in `papers.nix` as a download's would be, so the paper counts as included in [`pax stats`](#prisma-counts) and `pax open` opens it. A paper with no `source_url` keeps none: its artifact exists only where you added the file. If a hash is already recorded and the file's differs, `fetch --file` refuses it (exit 5) and changes nothing; `--force` replaces the hash.
+
+On another machine, or after the file is garbage-collected from the store, nothing can download it again. `pax check`, `pax sync`, `pax fetch` and `pax open` then say so for that paper, `provide it again with pax fetch doe2020 --file <path>`, and exit 8 (`check` and `sync` exit 8 only when that's every problem they found). Giving the same file again restores it.
+
+`nix build research#doe2020` builds such a paper from the store, or fails with the same instruction, with a `research/flake.nix` written by this version's `pax init`. A flake from an earlier version passes every paper to `fetchurl`, which can't evaluate one without a URL: `fetch --file` warns when your flake is one of those. pax itself doesn't need the flake for these papers, so `pax open` works either way; to make `nix build` work, replace `research/flake.nix` with the current [template](templates/flake.nix.template).
+
 ## Excluding papers
 
 Papers you've screened and decided against go in `research/excluded.nix`, next to `papers.nix`:
@@ -323,11 +337,11 @@ Included
 | Records excluded | `excluded.nix` entries with `stage = "screening"`. |
 | Records awaiting screening | Records screened that have no decision yet: neither excluded nor declared. Not a PRISMA box: it's how far screening has got, and 0 once every paper has a decision. A decision is matched to the record it was made on by identity key, by the same rules: a declared paper by its DOI, arXiv id or title+year, an exclusion by its key's DOI or arXiv id, or by its title and year when it records one. |
 | Reports sought for retrieval | The papers that passed screening: those declared in `papers.nix`, plus those excluded at full text (a declared paper can't be excluded, so a full-text exclusion passed screening first). Papers still awaiting screening aren't counted, so the count is right mid-round. |
-| Reports not retrieved | Declared papers with no `source_url` or no `hash` — what `pax check` reports as not fetched. Decided from `papers.nix` alone, without the network, so a recorded source that has since gone away isn't counted; `pax check` finds those. |
+| Reports not retrieved | Declared papers with no `hash` — what `pax check` reports as not fetched. A paper added with [`fetch --file`](#papers-you-already-have) has one, so it's retrieved. Decided from `papers.nix` alone, without the network, so a recorded source that has since gone away isn't counted; `pax check` finds those. |
 | Reports assessed for eligibility | Reports sought minus reports not retrieved. |
 | Reports excluded | `excluded.nix` entries with `stage = "full-text"`, then a count per `reason` (exact text, sorted). |
 | …by criterion | Under both excluded boxes, a count per `criterion` (exact text, sorted, `no criterion` last). Listed only once some exclusion records a criterion; `--json` always has it. |
-| Studies included in review | The papers declared in `papers.nix` that have a fetchable artifact. A declared paper without one counts only as not retrieved, never as both. |
+| Studies included in review | The papers declared in `papers.nix` that have an artifact (a `hash`), downloaded or added from a file. A declared paper without one counts only as not retrieved, never as both. |
 
 Records from [`pax related`](#related-works) are counted in their own box, not with citation searching. PRISMA 2020 puts both under identification via other methods, and asks for each such source to be reported separately. A provider's recommendation isn't a citation edge, so counting it as citation searching would overstate what reference lists and forward citations found. In the diagram, report the box as its own "other methods" source (e.g. "related-works recommendations (OpenAlex, Semantic Scholar)"). Records found by both are still one paper when duplicates are removed, since that count runs across the whole log.
 
@@ -392,12 +406,13 @@ Every command exits with a code a script can branch on:
 | --- | --- |
 | 0 | Success. |
 | 1 | Any other failure, e.g. `nix` failing to fetch or build; also `check` or `sync` finding problems in the library, or a `search`, `refs`, `cited-by` or `related` that succeeded but couldn't write the [search log](#search-log). |
-| 2 | Wrong arguments: an unknown command or flag, a malformed `provider:id`, citation key or alias, or flags that can't be combined. |
+| 2 | Wrong arguments: an unknown command or flag, a malformed `provider:id`, citation key or alias, a `fetch --file` path that isn't a file, or flags that can't be combined. |
 | 3 | Partial: in `search`, `refs`, `cited-by` or `related`, at least one provider failed (network, rate limit, provider error) while others answered, so the results are incomplete. In `refs`, `cited-by` and `related` that includes a list withheld by the provider or a provider that can't look the seed up, since its list is still missing; a list cut short by `--limit` isn't (see [Citation graph](#citation-graph)). In `search --doi`, a provider that has no record of the DOI isn't a failure: it answered, so when the others returned results `pax` exits 0 and notes it on stderr. |
 | 4 | Not found: a reference, seed, citation key or alias doesn't resolve, e.g. no provider has a record of the `refs` / `cited-by` / `related` seed (with several seeds, of any of them) or the `search --doi` DOI, or `unexclude` names a paper that isn't excluded. |
-| 5 | Refused: the library rejected the operation, e.g. adding or excluding a paper already declared, adding an excluded paper, renaming to a citation key in use, giving a paper an alias or citation key another paper has, giving `fetch` / `open` / `edit` / `remove` an excluded paper's alias, fetching a paper with no PDF source, or `init` where a library exists. |
+| 5 | Refused: the library rejected the operation, e.g. adding or excluding a paper already declared, adding an excluded paper, renaming to a citation key in use, giving a paper an alias or citation key another paper has, giving `fetch` / `open` / `edit` / `remove` an excluded paper's alias, fetching a paper with no PDF source, a `fetch --file` whose hash differs from the recorded one without `--force`, or `init` where a library exists. |
 | 6 | Every provider failed (network, rate limit, provider error). |
 | 7 | The library is missing, not initialized, or unreadable. A command that needs a library checks for `research/papers.nix` before doing anything else, so `add` fails before any network call, and so do a citation key or alias given to `show`, `refs`, `cited-by` or `related` and `search --local`; a `provider:id` reference and a plain `search` work without one. |
+| 8 | A file to provide again: a paper added with [`fetch --file`](#papers-you-already-have) isn't in this machine's Nix store, and nothing can download it. `fetch` and `open` exit 8 for that paper; `check` and `sync` exit 8 when every problem they found is one of these, and 1 when there's any other. |
 
 ## License
 

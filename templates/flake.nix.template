@@ -7,8 +7,25 @@
 
       papers = import ./papers.nix;
 
+      # A paper with a hash but no source_url was added from a file the user
+      # already had (`pax fetch <key> --file <path>`): there's nothing to
+      # download, so Nix can only find it in the store. requireFile marks
+      # its output unfree; the empty meta lets nixpkgs evaluate it anyway.
+      mkLocalPaper = name: paper:
+        (pkgs.requireFile {
+          name = name;
+          hash = paper.hash;
+          message = ''
+            ${name} was added from a local file, which isn't in this Nix store.
+            Provide the file again with:
+              pax fetch ${name} --file <path>
+          '';
+        }).overrideAttrs { meta = { }; };
+
       mkPaper = name: paper:
-        pkgs.fetchurl {
+        if (paper.source_url or null) == null && (paper.hash or null) != null
+        then mkLocalPaper name paper
+        else pkgs.fetchurl {
           name = name;
           url = paper.source_url;
           hash = paper.hash;

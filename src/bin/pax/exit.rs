@@ -27,6 +27,10 @@ pub enum Code {
     ProvidersFailed = 6,
     /// The library is missing, not initialized, or unreadable.
     NoLibrary = 7,
+    /// A paper added from a local file (`fetch --file`) isn't in this
+    /// machine's Nix store, and nothing can download it: the user has to
+    /// provide the file again.
+    FileNeeded = 8,
 }
 
 impl From<Code> for std::process::ExitCode {
@@ -99,7 +103,8 @@ pub fn code(failure: Failure<'_>) -> Code {
             | PaxError::InvalidCitationKey(_)
             | PaxError::InvalidAlias(_)
             | PaxError::NoChangesSpecified
-            | PaxError::MissingExclusionReason => Code::Usage,
+            | PaxError::MissingExclusionReason
+            | PaxError::NotAFile(_) => Code::Usage,
             PaxError::NotFound(_)
             | PaxError::NoSuchPaper(_)
             | PaxError::NotExcluded(_)
@@ -110,7 +115,9 @@ pub fn code(failure: Failure<'_>) -> Code {
             | PaxError::NameTaken { .. }
             | PaxError::AlreadyDeclared { .. }
             | PaxError::AlreadyExcluded { .. }
-            | PaxError::NoSourceUrl(_) => Code::Refused,
+            | PaxError::NoSourceUrl(_)
+            | PaxError::HashMismatch { .. } => Code::Refused,
+            PaxError::LocalArtifactMissing(_) => Code::FileNeeded,
             PaxError::Fetch(_) | PaxError::Build(_) | PaxError::Upload(_) => Code::Failure,
             // A variant added later, until it is mapped here.
             _ => Code::Failure,
@@ -225,6 +232,20 @@ pub fn seeds(codes: impl IntoIterator<Item = Code>) -> Code {
         Code::Usage
     } else {
         Code::Partial
+    }
+}
+
+/// The exit code of `check` or `sync`, from the code of each paper with a
+/// problem: success with none, [`Code::FileNeeded`] when every problem is a
+/// local file to provide again, and a failure otherwise.
+pub fn artifacts(problems: impl IntoIterator<Item = Code>) -> Code {
+    let mut problems = problems.into_iter().peekable();
+    if problems.peek().is_none() {
+        Code::Success
+    } else if problems.all(|code| code == Code::FileNeeded) {
+        Code::FileNeeded
+    } else {
+        Code::Failure
     }
 }
 
@@ -567,6 +588,34 @@ mod tests {
         assert_eq!(seeds([Code::NotFound, Code::NotFound]), Code::NotFound);
         assert_eq!(seeds([Code::NotFound]), Code::NotFound);
         assert_eq!(seeds([Code::Usage, Code::NotFound]), Code::Usage);
+    }
+
+    #[test]
+    fn a_local_file_to_provide_again_is_file_needed() {
+        assert_eq!(
+            pax(PaxError::LocalArtifactMissing("doe2020".into())),
+            Code::FileNeeded
+        );
+        assert_eq!(
+            pax(PaxError::HashMismatch {
+                citation_key: "doe2020".into(),
+                recorded: "sha256-a".into(),
+                actual: "sha256-b".into(),
+            }),
+            Code::Refused
+        );
+        assert_eq!(pax(PaxError::NotAFile("x.pdf".into())), Code::Usage);
+    }
+
+    #[test]
+    fn check_or_sync_is_file_needed_only_when_every_problem_is_a_missing_file() {
+        assert_eq!(artifacts([]), Code::Success);
+        assert_eq!(
+            artifacts([Code::FileNeeded, Code::FileNeeded]),
+            Code::FileNeeded
+        );
+        assert_eq!(artifacts([Code::FileNeeded, Code::Failure]), Code::Failure);
+        assert_eq!(artifacts([Code::Refused]), Code::Failure);
     }
 
     #[test]
