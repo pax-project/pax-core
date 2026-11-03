@@ -1160,7 +1160,6 @@ dependencies = [
  "crossref-async",
  "dotenvy",
  "papers-openalex",
- "quick-xml",
  "reqwest 0.12.28",
  "schemars",
  "semantic-scholar-rs",
