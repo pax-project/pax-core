@@ -2632,9 +2632,13 @@ pub fn fetch_paper(name: &str, root: &Path) -> Result<FetchOutcome, PaxError> {
 /// Materializes a declared paper's artifact from `file`, a copy the user
 /// already has (e.g. a paywalled PDF downloaded through a university login,
 /// which no URL fetch can reach): adds it to the Nix store and records its
-/// hash, as [`fetch_paper`] records a downloaded one. `source_url` is left
-/// as it is, so a paper without one becomes a local artifact
-/// ([`Artifact::is_local`]), and one with one keeps it as its source.
+/// hash, as [`fetch_paper`] records a downloaded one. The paper becomes a
+/// local artifact ([`Artifact::is_local`]): a recorded `source_url` is
+/// cleared, since a paper someone had to supply by hand is one that URL
+/// didn't serve (typically a publisher's paywall, answering 403). Kept, it
+/// would make `research/flake.nix` try that URL on another machine, and
+/// `export pdfs` would skip the paper as downloadable. [`fetch_file_report`]
+/// also returns the cleared URL.
 ///
 /// A file whose hash differs from one already recorded is refused with
 /// [`PaxError::HashMismatch`] before anything is written, unless `force`, in
@@ -2656,6 +2660,25 @@ pub fn fetch_file(
     force: bool,
     root: &Path,
 ) -> Result<FetchOutcome, PaxError> {
+    fetch_file_report(name, file, force, root).map(|fetch| fetch.outcome)
+}
+
+/// What [`fetch_file_report`] did: [`fetch_file`]'s outcome, and the
+/// `source_url` it cleared, if the paper had one.
+#[non_exhaustive]
+pub struct LocalFetch {
+    pub outcome: FetchOutcome,
+    pub cleared_source_url: Option<String>,
+}
+
+/// [`fetch_file`], also returning the `source_url` it cleared, so a caller
+/// can say the paper's URL was dropped.
+pub fn fetch_file_report(
+    name: &str,
+    file: &Path,
+    force: bool,
+    root: &Path,
+) -> Result<LocalFetch, PaxError> {
     let path = nix::papers_path(root);
     let mut library = Library::load(&path)?;
     let citation_key = names::declared_key(name, &library, root)?;
@@ -2679,11 +2702,15 @@ pub fn fetch_file(
     }
 
     nix::add_local_artifact(root, file, citation_key)?;
-    if paper.artifact.hash.as_ref() != Some(&hash) {
+    let cleared_source_url = paper.artifact.source_url.take();
+    if paper.artifact.hash.as_ref() != Some(&hash) || cleared_source_url.is_some() {
         paper.artifact.hash = Some(hash.clone());
         library.save(&path)?;
     }
-    Ok(FetchOutcome::Fetched { hash })
+    Ok(LocalFetch {
+        outcome: FetchOutcome::Fetched { hash },
+        cleared_source_url,
+    })
 }
 
 pub struct SyncReport {

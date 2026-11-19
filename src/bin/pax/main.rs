@@ -850,13 +850,23 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
         } => {
             let root = Path::new(".");
             let citation_key = citation_key_of(&name);
-            let outcome = match &file {
-                Some(file) => pax_core::fetch_file(&name, file, force, root),
-                None => pax_core::fetch_paper(&name, root),
+            let (outcome, cleared_source_url) = match &file {
+                Some(file) => match pax_core::fetch_file_report(&name, file, force, root) {
+                    Ok(fetch) => (Ok(fetch.outcome), fetch.cleared_source_url),
+                    Err(e) => (Err(e), None),
+                },
+                None => (pax_core::fetch_paper(&name, root), None),
             };
             match outcome {
                 Ok(outcome) => sink.fetched(&name, &citation_key, &outcome),
                 Err(e) => return fail(sink, &e),
+            }
+            if let Some(url) = cleared_source_url {
+                sink.warning(&format!(
+                    "cleared {citation_key}'s source_url ({url}): a paper added from a local \
+                     file is backed up by `pax export pdfs` and restored with `pax sync --from`, \
+                     never downloaded from that URL"
+                ));
             }
             if file.is_some() && !pax_core::nix::flake_builds_local_artifacts(root) {
                 sink.warning(
