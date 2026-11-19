@@ -2171,3 +2171,48 @@ fn check_sync_fetch_and_open_json_without_the_network() {
         assert_eq!(json(&output)["papers"], serde_json::json!([]), "{command}");
     }
 }
+
+#[test]
+#[ignore = "needs nix"]
+fn a_local_file_replaces_a_paywalled_source_url_and_is_backed_up() {
+    let dir = library("paywalled");
+    // `add` recorded a publisher's PDF link that answers 403 without a login.
+    let papers = dir.join("research").join("papers.nix");
+    let text = fs::read_to_string(&papers).unwrap();
+    fs::write(
+        &papers,
+        text.replace(
+            "source_url = null;",
+            "source_url = \"https://dl.acm.org/doi/pdf/10.1145/359545.359563\";",
+        ),
+    )
+    .unwrap();
+    let content = format!(
+        "%PDF-1.4 pax paywalled test {:?}",
+        std::time::SystemTime::now()
+    );
+    fs::write(dir.join("paper.pdf"), &content).unwrap();
+
+    let output = pax(&dir, &["fetch", "lamport1978", "--file", "paper.pdf"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("cleared lamport1978's source_url"),
+        "{}",
+        stderr(&output)
+    );
+    let text = fs::read_to_string(&papers).unwrap();
+    assert!(text.contains("source_url = null;"), "{text}");
+    assert!(!text.contains("dl.acm.org"), "{text}");
+
+    // A local artifact now, so `export pdfs` backs it up.
+    let output = pax(&dir, &["export", "pdfs", "backup"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        fs::read_to_string(dir.join("backup").join("lamport1978.pdf")).unwrap(),
+        content
+    );
+
+    let store_path = gc_root(&dir, "lamport1978");
+    fs::remove_dir_all(dir.join("research").join(".gcroots")).unwrap();
+    assert!(nix_store_delete(&store_path));
+}

@@ -303,11 +303,14 @@ impl From<papers_openalex::Work> for CandidateWork {
             doi: value.doi,
             // Only a location's `pdf_url` is a PDF; `open_access.oa_url` is
             // often a repository landing page, which `fetch` would hash as
-            // the paper.
+            // the paper. And only an open-access location's: a publisher's
+            // (dl.acm.org/doi/pdf/…) needs a login and answers 403, so the
+            // paper couldn't be fetched from it on any machine.
             pdf_url: value
                 .best_oa_location
                 .into_iter()
                 .chain(value.locations.into_iter().flatten())
+                .filter(|loc| loc.is_oa == Some(true))
                 .find_map(|loc| loc.pdf_url),
             venue: value
                 .primary_location
@@ -398,6 +401,25 @@ mod tests {
             CandidateWork::from(work).pdf_url.as_deref(),
             Some("https://arxiv.org/pdf/1703.06870")
         );
+    }
+
+    #[test]
+    fn a_paywalled_publisher_pdf_is_no_pdf() {
+        // OpenAlex lists the ACM Digital Library's PDF link on a closed
+        // location; fetching it answers 403 without a login.
+        let work: papers_openalex::Work = serde_json::from_str(
+            r#"{
+                "id": "https://openalex.org/W4",
+                "open_access": {"is_oa": false},
+                "locations": [{
+                    "is_oa": false,
+                    "landing_page_url": "https://doi.org/10.1145/224056.224075",
+                    "pdf_url": "https://dl.acm.org/doi/pdf/10.1145/224056.224075"
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(CandidateWork::from(work).pdf_url, None);
     }
 
     #[test]
