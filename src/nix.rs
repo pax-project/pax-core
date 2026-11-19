@@ -67,15 +67,29 @@ fn gitignore_path(root: &Path) -> PathBuf {
     root.join("research").join(".gitignore")
 }
 
+/// Where `pax export pdfs` writes, and `pax sync --from` restores from,
+/// when no directory is given: `research/.pdfs/`, next to the papers it
+/// belongs to. `research/.gitignore` keeps it out of git. It's on the same
+/// disk as the Nix store, so a real backup is a copy of it elsewhere.
+pub fn pdfs_dir(root: &Path) -> PathBuf {
+    root.join("research").join(".pdfs")
+}
+
+/// The line in `research/.gitignore` that keeps [`pdfs_dir`] out of git.
+const PDFS_IGNORE: &str = ".pdfs/";
+
 /// Creates `research/` with a `flake.nix` from the current template, an
-/// empty `papers.nix`, and a `.gitignore` that keeps [`gcroots_dir`] out of
-/// git.
+/// empty `papers.nix`, and a `.gitignore` that keeps [`gcroots_dir`] and
+/// [`pdfs_dir`] out of git.
 pub fn init_library(root: &Path) -> Result<(), Error> {
     let research_dir = root.join("research");
     create_dir(&research_dir)?;
     write(research_dir.join("flake.nix"), FLAKE_TEMPLATE)?;
     write(papers_path(root), PAPERS_TEMPLATE)?;
-    write(gitignore_path(root), format!("{GCROOTS_IGNORE}\n"))?;
+    write(
+        gitignore_path(root),
+        format!("{GCROOTS_IGNORE}\n{PDFS_IGNORE}\n"),
+    )?;
     Ok(())
 }
 
@@ -83,17 +97,30 @@ pub fn init_library(root: &Path) -> Result<(), Error> {
 /// creating the file if there is none: a library from before GC roots has
 /// no such line.
 fn ignore_gcroots(root: &Path) -> Result<(), Error> {
+    ensure_ignored(root, GCROOTS_IGNORE)
+}
+
+/// Adds the [`pdfs_dir`] line to `research/.gitignore` when it's missing,
+/// creating the file if there is none: a library from before the default
+/// backup directory has no such line.
+pub(crate) fn ignore_pdfs(root: &Path) -> Result<(), Error> {
+    ensure_ignored(root, PDFS_IGNORE)
+}
+
+/// Appends `entry` (`name/`) to `research/.gitignore` unless a line already
+/// ignores it as `name`, `name/`, `/name` or `/name/`.
+fn ensure_ignored(root: &Path, entry: &str) -> Result<(), Error> {
     let path = gitignore_path(root);
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e),
     };
+    let name = entry.trim_end_matches('/');
     let ignored = text.lines().any(|line| {
-        matches!(
-            line.trim(),
-            ".gcroots" | ".gcroots/" | "/.gcroots" | "/.gcroots/"
-        )
+        let line = line.trim();
+        let line = line.strip_prefix('/').unwrap_or(line);
+        line.strip_suffix('/').unwrap_or(line) == name
     });
     if ignored {
         return Ok(());
@@ -103,7 +130,36 @@ fn ignore_gcroots(root: &Path) -> Result<(), Error> {
     } else {
         "\n"
     };
-    write(path, format!("{text}{separator}{GCROOTS_IGNORE}\n"))
+    write(path, format!("{text}{separator}{entry}\n"))
+}
+
+/// Whether git would stage `dir` along with the rest of `research/`: `dir`
+/// is inside `research/`, `research/` is in a git repository, and
+/// `git check-ignore` doesn't report `dir` ignored. Every build stages
+/// `research/` with `git add -A` ([`build_package`]), so the files in such a
+/// directory get committed with the library.
+///
+/// `false` when `dir` is outside `research/` or doesn't exist, or when git
+/// isn't available or `research/` isn't in a repository.
+pub fn staged_by_git(root: &Path, dir: &Path) -> bool {
+    let (Ok(research), Ok(dir)) = (root.join("research").canonicalize(), dir.canonicalize()) else {
+        return false;
+    };
+    if !dir.starts_with(&research) {
+        return false;
+    }
+    // Exit 0: ignored; 1: not ignored; 128: not a repository, or another
+    // error. The trailing slash lets a `name/` pattern match the directory.
+    let output = run_with_timeout(
+        Command::new("git")
+            .arg("-C")
+            .arg(&research)
+            .args(["check-ignore", "-q", "--"])
+            .arg(format!("{}/", dir.display())),
+        GIT_ADD_TIMEOUT,
+        PaxError::Build,
+    );
+    matches!(output, Ok(output) if output.status.code() == Some(1))
 }
 
 #[derive(Deserialize)]
@@ -357,9 +413,10 @@ mod tests {
         init_library(&root).unwrap();
         let gitignore = gitignore_path(&root);
         let read = || std::fs::read_to_string(&gitignore).unwrap();
-        assert_eq!(read(), ".gcroots/\n");
+        assert_eq!(read(), ".gcroots/\n.pdfs/\n");
         ignore_gcroots(&root).unwrap();
-        assert_eq!(read(), ".gcroots/\n");
+        ignore_pdfs(&root).unwrap();
+        assert_eq!(read(), ".gcroots/\n.pdfs/\n");
 
         // A library from before GC roots: no .gitignore, or one without the line.
         std::fs::remove_file(&gitignore).unwrap();
@@ -371,6 +428,41 @@ mod tests {
         write(&gitignore, "/.gcroots\n").unwrap();
         ignore_gcroots(&root).unwrap();
         assert_eq!(read(), "/.gcroots\n");
+
+        // The same for the default backup directory.
+        ignore_pdfs(&root).unwrap();
+        assert_eq!(read(), "/.gcroots\n.pdfs/\n");
+        for line in [".pdfs", "/.pdfs/", "  .pdfs/  "] {
+            write(&gitignore, format!("{line}\n")).unwrap();
+            ignore_pdfs(&root).unwrap();
+            assert_eq!(read(), format!("{line}\n"));
+        }
+        // A similar name isn't the same line.
+        write(&gitignore, ".pdfs-old/\n").unwrap();
+        ignore_pdfs(&root).unwrap();
+        assert_eq!(read(), ".pdfs-old/\n.pdfs/\n");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_default_backup_dir_is_under_research() {
+        assert_eq!(
+            pdfs_dir(Path::new("lib")),
+            Path::new("lib").join("research").join(".pdfs")
+        );
+    }
+
+    #[test]
+    fn a_directory_outside_research_or_missing_is_never_staged() {
+        let root = std::env::temp_dir().join(format!("pax-nix-test-staged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        init_library(&root).unwrap();
+        assert!(!staged_by_git(&root, &root.join("outside")));
+        assert!(!staged_by_git(
+            &root,
+            &root.join("research").join("missing")
+        ));
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -46,6 +46,18 @@ pub struct PdfExport {
     pub manifest: PathBuf,
     /// Every local artifact, in library order.
     pub papers: Vec<PdfCopy>,
+    /// Whether git would stage `dir` with the rest of `research/`
+    /// ([`nix::staged_by_git`]): it's inside `research/` and not ignored,
+    /// so the PDFs would be committed with the library. Clients should warn.
+    pub staged_by_git: bool,
+}
+
+/// The backup directory `export pdfs` and `sync --from` use when given
+/// none: `research/.pdfs/` ([`nix::pdfs_dir`]), which `research/.gitignore`
+/// keeps out of git. It's on the same disk as the Nix store, so a real
+/// backup is a copy of it somewhere else.
+pub fn default_backup_dir(root: &Path) -> PathBuf {
+    nix::pdfs_dir(root)
 }
 
 /// Copies every local artifact in the library at `root` out of the Nix
@@ -57,12 +69,19 @@ pub struct PdfExport {
 /// ([`PaxError::LocalArtifactMissing`]) and left out of the manifest, as is
 /// one whose copy fails; neither stops the rest. Papers with a `source_url`
 /// aren't exported: Nix can download them again.
+///
+/// `research/.gitignore` first gets a `.pdfs/` line when it lacks one
+/// (creating the file if needed), so [`default_backup_dir`] stays out of
+/// git. Any other `dir` inside `research/` that git doesn't ignore is still
+/// written, with [`PdfExport::staged_by_git`] set.
 pub fn export_pdfs(root: &Path, dir: &Path) -> Result<PdfExport, PaxError> {
     let library = Library::load(&nix::papers_path(root))?;
+    nix::ignore_pdfs(root)?;
     std::fs::create_dir_all(dir).map_err(|source| PaxError::Backup {
         path: dir.to_path_buf(),
         source,
     })?;
+    let staged_by_git = nix::staged_by_git(root, dir);
     let mut manifest = BTreeMap::new();
     let mut papers = Vec::new();
     for paper in library.papers() {
@@ -96,6 +115,7 @@ pub fn export_pdfs(root: &Path, dir: &Path) -> Result<PdfExport, PaxError> {
         dir: dir.to_path_buf(),
         manifest: manifest_path,
         papers,
+        staged_by_git,
     })
 }
 
