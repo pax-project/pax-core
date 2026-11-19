@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.3.0](https://github.com/pax-project/pax-core/compare/v3.2.0...v3.3.0) - 2026-11-19
+
+### Features
+
+- *(backup)* default export pdfs and sync --from to a gitignored research/.pdfs/ ([#95](https://github.com/pax-project/pax-core/pull/95))
+
+### Fixed
+
+- *(flake)* set mainProgram, name the pax package and add an overlay ([#96](https://github.com/pax-project/pax-core/pull/96))
+
 ## [3.2.0](https://github.com/pax-project/pax-core/compare/v3.1.0...v3.2.0) - 2026-11-03
 
 ### Features
