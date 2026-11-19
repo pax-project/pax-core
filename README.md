@@ -244,19 +244,19 @@ pax fetch doe2020 --file ~/Downloads/doe2020.pdf
 
 The file is added to the Nix store, and its hash recorded in `papers.nix` as a download's would be, so the paper counts as included in [`pax stats`](#prisma-counts) and `pax open` opens it. A paper with no `source_url` keeps none: its artifact exists only where you added the file. If a hash is already recorded and the file's differs, `fetch --file` refuses it (exit 5) and changes nothing; `--force` replaces the hash.
 
-`fetch --file` also registers a Nix garbage-collector root for the file at `research/.gcroots/doe2020`, so `nix-collect-garbage` keeps it. The roots belong to this machine, so `research/.gitignore` lists `.gcroots/`: `pax init` writes it, and `fetch --file` adds the line to an existing library's `.gitignore` when it's missing. Deleting a root (or the library) leaves the file for the next garbage collection to remove.
+`fetch --file` also registers a Nix garbage-collector root for the file at `research/.gcroots/doe2020`, so `nix-collect-garbage` keeps it. The roots belong to this machine, so `research/.gitignore` lists `.gcroots/` (beside `.pdfs/`, the [backup directory](#backing-them-up)): `pax init` writes it, and `fetch --file` adds the line to an existing library's `.gitignore` when it's missing. Deleting a root (or the library) leaves the file for the next garbage collection to remove.
 
 The limitation remains that the Nix store is the only copy pax keeps: on another machine, or on this one if the store is wiped, nothing can download the file again. `pax check`, `pax sync`, `pax fetch` and `pax open` then say so for that paper, `provide it again with pax fetch doe2020 --file <path>`, and exit 8 (`check` and `sync` exit 8 only when that's every problem they found). Giving the same file again restores it.
 
 ### Backing them up
 
-Keep a copy of these PDFs somewhere other than the store, for example a private drive or the backup your review protocol names:
+Copy these PDFs out of the store:
 
 ```Bash
-pax export pdfs ~/backup/review-pdfs
+pax export pdfs
 ```
 
-`export pdfs` copies every paper added from a local file out of the Nix store as `<dir>/<citation_key>.pdf`, creating the directory if needed and replacing earlier copies, and writes `<dir>/manifest.json`, mapping each exported citation key to the hash its file must match:
+`export pdfs [<dir>]` copies every paper added from a local file out of the Nix store as `<dir>/<citation_key>.pdf`, creating the directory if needed and replacing earlier copies, and writes `<dir>/manifest.json`, mapping each exported citation key to the hash its file must match:
 
 ```JSON
 {
@@ -264,18 +264,30 @@ pax export pdfs ~/backup/review-pdfs
 }
 ```
 
-Papers with a `source_url` aren't copied: Nix can download them again. A paper that's already missing from the store is reported, left out of the manifest, and makes `export pdfs` exit 8.
+With no directory, `<dir>` is `research/.pdfs/`, next to the papers it belongs to. `research/.gitignore` lists `.pdfs/`, so git never sees the PDFs: `pax init` writes the line, and `export pdfs` adds it to an existing library's `.gitignore` when it's missing. These are often paywalled PDFs, which a library repository you push would otherwise publish, and a committed PDF stays in the repository's history.
 
-To restore, on another machine or after the store lost the files:
+`research/.pdfs/` is on the same disk as the Nix store, so losing that disk loses both. For a real backup, copy it off the machine (an external drive, a synced folder, or the backup your review protocol names), or export straight there:
 
 ```Bash
-pax sync --from ~/backup/review-pdfs
+pax export pdfs ~/backup/review-pdfs
+```
+
+A directory inside `research/` that git doesn't ignore still works, but `export pdfs` warns about it: pax stages `research/` for git (`git add -A`) before every build, so those PDFs would be committed with the library. A directory outside `research/` or an ignored one gets no warning, and neither does a library that isn't in a git repository.
+
+Papers with a `source_url` aren't copied: Nix can download them again. A paper that's already missing from the store is reported, left out of the manifest, and makes `export pdfs` exit 8.
+
+To restore, on another machine or after the store lost the files, put the backup back at `research/.pdfs/` and run:
+
+```Bash
+pax sync --from
 pax check
 ```
 
+or name the directory, as in `pax sync --from ~/backup/review-pdfs`. `sync` without `--from` doesn't read any backup.
+
 `sync --from` is `sync` that first looks in the directory: each paper added from a local file whose `<citation_key>.pdf` is there is added back to the store, with its garbage-collector root, when the file's hash is the one recorded in `papers.nix`. A file whose hash differs is reported and skipped; the recorded hash never changes (to replace it, use `fetch --file --force`). Papers with no file in the directory are synced as usual, so one still missing is reported and, when that's the only problem, `sync` exits 8. `check` then exits 0 once every paper is back. The hashes `sync --from` checks are those in `papers.nix`; the manifest documents the backup, and isn't needed to restore it.
 
-A library from before garbage-collector roots has none for its files: `pax export pdfs <dir>` followed by `pax sync --from <dir>` adds them.
+A library from before garbage-collector roots has none for its files: `pax export pdfs` followed by `pax sync --from` adds them.
 
 `nix build research#doe2020` builds such a paper from the store, or fails with the same instruction, with a `research/flake.nix` written by this version's `pax init`. A flake from an earlier version passes every paper to `fetchurl`, which can't evaluate one without a URL: `fetch --file` warns when your flake is one of those. pax itself doesn't need the flake for these papers, so `pax open` works either way; to make `nix build` work, replace `research/flake.nix` with the current [template](templates/flake.nix.template).
 
@@ -451,7 +463,7 @@ Every command exits with a code a script can branch on:
 | --- | --- |
 | 0 | Success. |
 | 1 | Any other failure, e.g. `nix` failing to fetch or build; also `check` or `sync` finding problems in the library, or a `search`, `refs`, `cited-by` or `related` that succeeded but couldn't write the [search log](#search-log). |
-| 2 | Wrong arguments: an unknown command or flag, a malformed `provider:id`, citation key or alias, a `fetch --file` path that isn't a file, a `sync --from` path that isn't a directory, or flags that can't be combined. |
+| 2 | Wrong arguments: an unknown command or flag, a malformed `provider:id`, citation key or alias, a `fetch --file` path that isn't a file, a `sync --from` path that isn't a directory (`research/.pdfs/` when none is named), or flags that can't be combined. |
 | 3 | Partial: in `search`, `refs`, `cited-by` or `related`, at least one provider failed (network, rate limit, provider error) while others answered, so the results are incomplete. In `refs`, `cited-by` and `related` that includes a list withheld by the provider or a provider that can't look the seed up, since its list is still missing; a list cut short by `--limit` isn't (see [Citation graph](#citation-graph)). In `search --doi`, a provider that has no record of the DOI isn't a failure: it answered, so when the others returned results `pax` exits 0 and notes it on stderr. |
 | 4 | Not found: a reference, seed, citation key or alias doesn't resolve, e.g. no provider has a record of the `refs` / `cited-by` / `related` seed (with several seeds, of any of them) or the `search --doi` DOI, or `unexclude` names a paper that isn't excluded. |
 | 5 | Refused: the library rejected the operation, e.g. adding or excluding a paper already declared, adding an excluded paper, renaming to a citation key in use, giving a paper an alias or citation key another paper has, giving `fetch` / `open` / `edit` / `remove` an excluded paper's alias, fetching a paper with no PDF source, a `fetch --file` whose hash differs from the recorded one without `--force`, or `init` where a library exists. |
