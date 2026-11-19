@@ -217,12 +217,19 @@ enum Command {
     ///Materialize every declared paper that isn't fetched yet
     ///
     ///With --from, papers added from a local file are first restored from a
-    ///backup directory (`pax export pdfs <dir>`): each <citation_key>.pdf
-    ///whose hash is the recorded one is added back to the Nix store; one
-    ///that doesn't match is reported and skipped, never forced.
+    ///backup directory (`pax export pdfs [<dir>]`; research/.pdfs/ when
+    ///--from is given no directory): each <citation_key>.pdf whose hash is
+    ///the recorded one is added back to the Nix store; one that doesn't
+    ///match is reported and skipped, never forced.
     Sync {
         /// Restore papers added from a local file from this backup directory
-        #[arg(long, value_name = "DIR")]
+        /// (research/.pdfs when given without one)
+        #[arg(
+            long,
+            value_name = "DIR",
+            num_args = 0..=1,
+            default_missing_value = DEFAULT_PDFS_DIR
+        )]
         from: Option<PathBuf>,
     },
     ///Print the review's PRISMA 2020 flow-diagram counts
@@ -321,12 +328,24 @@ enum ExportFormat {
     ///Copies each one out of the Nix store as <DIR>/<citation_key>.pdf, and
     ///writes <DIR>/manifest.json with the hash each file must match. Papers
     ///with a source URL aren't copied: Nix can download them again. Restore
-    ///with `pax sync --from <DIR>`.
+    ///with `pax sync --from [<DIR>]`.
+    ///
+    ///The default directory, research/.pdfs/, is gitignored (the line is
+    ///added to research/.gitignore if missing). It's on the same disk as the
+    ///store: for a real backup, copy it off this machine. A directory inside
+    ///research/ that git doesn't ignore gets a warning, since pax stages
+    ///research/ for git and the PDFs would be committed.
     Pdfs {
         /// The backup directory, created if needed
+        #[arg(default_value = DEFAULT_PDFS_DIR)]
         dir: PathBuf,
     },
 }
+
+/// `export pdfs` and `sync --from`'s directory when given none, relative to
+/// the library root (the working directory): what
+/// `pax_core::default_backup_dir` names.
+const DEFAULT_PDFS_DIR: &str = "research/.pdfs";
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -803,6 +822,16 @@ async fn run(command: Command, sink: &mut impl Sink, config: &pax_core::Config) 
             format: ExportFormat::Pdfs { dir },
         } => match pax_core::export_pdfs(Path::new("."), &dir) {
             Ok(export) => {
+                if export.staged_by_git {
+                    sink.warning(&format!(
+                        "{} is in research/ but not ignored by git; pax stages \
+                         research/ for git (`git add -A`) before every build, so these \
+                         PDFs would be committed with the library. Use the default \
+                         directory (`pax export pdfs` writes to research/.pdfs/), one \
+                         outside research/, or add this one to research/.gitignore",
+                        export.dir.display()
+                    ));
+                }
                 sink.exported_pdfs(&export);
                 exit::artifacts(
                     export
@@ -939,5 +968,13 @@ mod tests {
         let note = pacing_note(20, Lists::Related, false).unwrap();
         assert!(note.starts_with("requests are spaced 1s apart, so 20 seeds take at least 19s"));
         assert!(note.contains("SEMANTIC_SCHOLAR_API_KEY"));
+    }
+
+    #[test]
+    fn the_default_pdfs_dir_is_the_librarys() {
+        assert_eq!(
+            Path::new(DEFAULT_PDFS_DIR),
+            pax_core::default_backup_dir(Path::new(""))
+        );
     }
 }

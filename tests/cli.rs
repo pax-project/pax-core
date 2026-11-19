@@ -1352,12 +1352,137 @@ fn a_local_artifact_missing_from_the_store_exits_8() {
 }
 
 #[test]
-fn init_keeps_the_gc_roots_out_of_git() {
+fn init_keeps_the_gc_roots_and_the_pdfs_out_of_git() {
     let dir = scratch("init-gitignore");
     assert_eq!(pax(&dir, &["init"]).status.code(), Some(0));
     assert_eq!(
         fs::read_to_string(dir.join("research").join(".gitignore")).unwrap(),
-        ".gcroots/\n"
+        ".gcroots/\n.pdfs/\n"
+    );
+}
+
+/// Runs `git` in `dir`; whether it succeeded. `false` when there's no git.
+fn git(dir: &std::path::Path, args: &[&str]) -> bool {
+    Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// `git status --porcelain` in `dir`.
+fn git_status(dir: &std::path::Path) -> String {
+    let output = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn export_pdfs_defaults_to_a_gitignored_directory() {
+    let dir = library("export-pdfs-default");
+    if !git(&dir, &["init", "-q"]) {
+        eprintln!("skipped: no git");
+        return;
+    }
+    let before = git_status(&dir);
+
+    let output = pax(&dir, &["export", "pdfs"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+    let pdfs = dir.join("research").join(".pdfs");
+    assert_eq!(
+        fs::read_to_string(pdfs.join("manifest.json")).unwrap(),
+        "{}\n"
+    );
+    // Nothing new for git: the directory is ignored.
+    assert_eq!(git_status(&dir), before);
+
+    let output = pax(&dir, &["--json", "export", "pdfs"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let exported = json(&output);
+    assert_eq!(exported["directory"], "research/.pdfs");
+    assert_eq!(exported["manifest"], "research/.pdfs/manifest.json");
+}
+
+#[test]
+fn export_pdfs_adds_the_gitignore_line_to_an_older_library() {
+    let dir = library("export-pdfs-gitignore");
+    let gitignore = dir.join("research").join(".gitignore");
+    fs::write(&gitignore, ".gcroots/\n").unwrap();
+    let output = pax(&dir, &["export", "pdfs", "backup"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        fs::read_to_string(&gitignore).unwrap(),
+        ".gcroots/\n.pdfs/\n"
+    );
+    // No .gitignore at all: one is created.
+    fs::remove_file(&gitignore).unwrap();
+    assert_eq!(pax(&dir, &["export", "pdfs"]).status.code(), Some(0));
+    assert_eq!(fs::read_to_string(&gitignore).unwrap(), ".pdfs/\n");
+}
+
+#[test]
+fn export_pdfs_warns_about_a_directory_git_would_stage() {
+    let dir = library("export-pdfs-warn");
+    let warning = "would be committed with the library";
+    // Not a git repository: nothing to warn about.
+    let output = pax(&dir, &["export", "pdfs", "research/backup"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+    if !git(&dir, &["init", "-q"]) {
+        eprintln!("skipped: no git");
+        return;
+    }
+
+    let output = pax(&dir, &["export", "pdfs", "research/backup"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stderr(&output).contains(warning), "{}", stderr(&output));
+    assert!(
+        stderr(&output).starts_with("Warning: research/backup is in research/"),
+        "{}",
+        stderr(&output)
+    );
+    let output = pax(&dir, &["--json", "export", "pdfs", "research/backup"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        json_error(&output)["warning"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(warning)
+    );
+    assert_eq!(json(&output)["directory"], "research/backup");
+
+    // Outside research/, ignored, or inside an ignored directory: no warning.
+    fs::write(dir.join("research").join(".gitignore"), "kept/\n").unwrap();
+    for target in [
+        "backup",
+        "research/kept",
+        "research/kept/nested",
+        "research/.pdfs",
+    ] {
+        let output = pax(&dir, &["export", "pdfs", target]);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{target}: {}",
+            stderr(&output)
+        );
+        assert!(stderr(&output).is_empty(), "{target}: {}", stderr(&output));
+    }
+}
+
+#[test]
+fn sync_from_without_a_directory_uses_the_default() {
+    let dir = library("sync-from-default");
+    let output = pax_offline(&dir, &["sync", "--from"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("research/.pdfs is not a directory"),
+        "{}",
+        stderr(&output)
     );
 }
 
@@ -1478,6 +1603,19 @@ fn a_local_artifact_is_rooted_backed_up_and_restored() {
     assert_eq!(exported["papers"][0]["status"], "exported");
     assert_eq!(exported["papers"][0]["hash"], hash.as_str());
     assert_eq!(exported["papers"][0]["file"], "backup/lamport1978.pdf");
+    // With no directory, to the gitignored research/.pdfs/.
+    let output = pax(&dir, &["--json", "export", "pdfs"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let exported = json(&output);
+    assert_eq!(exported["directory"], "research/.pdfs");
+    assert_eq!(
+        exported["papers"][0]["file"],
+        "research/.pdfs/lamport1978.pdf"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("research").join(".pdfs").join("lamport1978.pdf")).unwrap(),
+        content
+    );
 
     // A fresh store: without its root, the path can be deleted.
     fs::remove_file(dir.join("research").join(".gcroots").join("lamport1978")).unwrap();
@@ -1503,8 +1641,8 @@ fn a_local_artifact_is_rooted_backed_up_and_restored() {
     assert_eq!(json(&output)["papers"][0]["status"], "hash-mismatch");
     assert_eq!(pax(&dir, &["check"]).status.code(), Some(8));
 
-    // Restore: the file comes back, rooted again.
-    let output = pax(&dir, &["sync", "--from", "backup"]);
+    // Restore from the default directory: the file comes back, rooted again.
+    let output = pax(&dir, &["sync", "--from"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(stdout(&output).contains("Fetched lamport1978"));
     let output = pax(&dir, &["check"]);

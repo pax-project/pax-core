@@ -27,7 +27,7 @@ pub mod stats;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-pub use backup::{PdfCopy, PdfExport, export_pdfs, sync_library_from};
+pub use backup::{PdfCopy, PdfExport, default_backup_dir, export_pdfs, sync_library_from};
 pub use citations::{
     CITATION_PROVIDERS, CitationError, CitationResults, Incomplete, IncompleteReason, RecordSource,
     SeedLookupError, SeedMergeReport, SeedMergedWork, SeedResult, SeedResults, cited_by,
