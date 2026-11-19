@@ -1,5 +1,5 @@
 {
-  description = "A Basic Rust DevShell";
+  description = "pax: discover, declare and reproducibly acquire academic papers";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
@@ -16,13 +16,30 @@
       pkgs = nixpkgs.legacyPackages."x86_64-linux";
       app_deps = [ pkgs.openssl ];
       naerskLib = pkgs.callPackage naersk { };
-    in
-    {
 
-      packages."x86_64-linux".default = naerskLib.buildPackage {
+      # `nix run` and `lib.getExe` find the `pax` binary through mainProgram;
+      # the package is named after the crate (pax-core-papers).
+      pax = (naerskLib.buildPackage {
         src = ./.;
         buildInputs = app_deps;
         nativeBuildInputs = [ pkgs.pkg-config ];
+      }).overrideAttrs (old: {
+        meta = (old.meta or { }) // {
+          description = "Discover, declare and reproducibly acquire academic papers";
+          mainProgram = "pax";
+        };
+      });
+    in
+    {
+
+      packages."x86_64-linux" = {
+        default = pax;
+        inherit pax;
+      };
+
+      # For a consumer that prefers `pkgs.pax` over `inputs.pax-core.packages.<system>.pax`.
+      overlays.default = final: prev: {
+        pax = self.packages.${prev.stdenv.hostPlatform.system}.pax;
       };
 
       homeModules.default = import ./home-manager-module.nix self;
