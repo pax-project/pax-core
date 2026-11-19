@@ -270,6 +270,7 @@ struct Work {
     author: Vec<Contributor>,
     issued: PartialDate,
     link: Vec<ResourceLink>,
+    license: Vec<License>,
     container_title: Vec<String>,
     #[serde(rename = "abstract")]
     abstract_text: Option<String>,
@@ -300,8 +301,27 @@ struct ResourceLink {
     content_type: Option<String>,
 }
 
+/// e.g. `{"URL": "http://creativecommons.org/licenses/by/4.0/"}`.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct License {
+    #[serde(rename = "URL")]
+    url: String,
+}
+
+impl Work {
+    /// Whether a Creative Commons license covers the work, so its
+    /// publisher's full-text link can be fetched without a login.
+    fn is_openly_licensed(&self) -> bool {
+        self.license
+            .iter()
+            .any(|license| license.url.contains("creativecommons.org"))
+    }
+}
+
 impl From<Work> for CandidateWork {
     fn from(value: Work) -> Self {
+        let openly_licensed = value.is_openly_licensed();
         CandidateWork {
             id: CandidateId {
                 provider: ProviderId::Crossref,
@@ -331,9 +351,13 @@ impl From<Work> for CandidateWork {
                 })
                 .unwrap_or_default(),
             doi: (!value.doi.is_empty()).then_some(value.doi),
-            pdf_url: value
-                .link
+            // A `link` is the publisher's full-text link, which for most
+            // closed papers (ACM, IEEE) needs a login and answers 403; only
+            // an openly licensed work's is one `fetch` can download.
+            pdf_url: openly_licensed
+                .then_some(value.link)
                 .into_iter()
+                .flatten()
                 .find(|link| link.content_type.as_deref() == Some("application/pdf"))
                 .map(|link| link.url),
             venue: value.container_title.into_iter().next(),
@@ -482,15 +506,30 @@ mod tests {
         assert_eq!(works[0].authors, ["C. A. R. Hoare"]);
         assert_eq!(works[0].publish_date, "1978-8");
         assert_eq!(works[0].venue.as_deref(), Some("Communications of the ACM"));
-        assert_eq!(
-            works[0].pdf_url.as_deref(),
-            Some("https://example.org/csp.pdf")
-        );
+        // A closed ACM paper: its publisher link needs a login.
+        assert_eq!(works[0].pdf_url, None);
 
         assert_eq!(works[1].title, "");
         assert_eq!(works[1].authors, ["Some Consortium"]);
         assert_eq!(works[1].publish_date, "");
         assert_eq!(works[1].doi.as_deref(), Some("10.5555/untitled"));
+    }
+
+    #[test]
+    fn an_openly_licensed_works_pdf_link_is_its_pdf() {
+        let body = r#"{"status": "ok", "message-type": "work", "message": {
+            "DOI": "10.1/open",
+            "license": [{"URL": "http://creativecommons.org/licenses/by/4.0/"}],
+            "link": [
+                {"URL": "https://example.org/open.xml", "content-type": "text/xml"},
+                {"URL": "https://example.org/open.pdf", "content-type": "application/pdf"}
+            ]
+        }}"#;
+        let work: Work = parse_message(body).unwrap();
+        assert_eq!(
+            CandidateWork::from(work).pdf_url.as_deref(),
+            Some("https://example.org/open.pdf")
+        );
     }
 
     #[test]
