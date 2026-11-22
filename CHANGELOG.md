@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.4.0](https://github.com/pax-project/pax-core/compare/v3.3.1...v3.4.0) - 2026-11-22
+
+### Features
+
+- *(init)* create the library in an existing research/ folder ([#100](https://github.com/pax-project/pax-core/pull/100))
+
 ## [3.3.1](https://github.com/pax-project/pax-core/compare/v3.3.0...v3.3.1) - 2026-11-19
 
 ### Fixed
