@@ -73,6 +73,8 @@ pax open <paper>
 pax export bibtex
 ```
 
+`pax init` creates the library in `research/`: its `flake.nix`, an empty `papers.nix`, and a `.gitignore` for the machine-only folders. A `research/` folder that already exists, such as one holding a thesis's notes, is kept with everything in it, and its `.gitignore` only gains the lines it lacks; a folder that already has a `flake.nix` or `papers.nix` is refused.
+
 `pax search` queries OpenAlex, Crossref, Semantic Scholar, and arXiv, reports how much of each provider's result set it retrieved (`retrieved 50 of 1284`; `--limit N` or `--all` for more), and merges records that are the same paper into one row listing every provider's reference (`merged: 112 → 97 (15 duplicates, 2 unmatched)`). Records count as the same paper when they share a DOI or arXiv id, or an exact title and year without conflicting DOIs. Each merged row shows the published version when there is one (a record with a venue, or a DOI that isn't an arXiv DOI) rather than a preprint, then the most complete record, so its reference is the one to cite and `pax add`.
 
 `--provider` asks only the providers named, repeated for several: `openalex`, `crossref`, `semanticscholar`, `arxiv` or `dblp`. [dblp](https://dblp.org), the computer science bibliography, isn't asked by default, since it covers computer science only; name it to search it, alone or beside the others:
