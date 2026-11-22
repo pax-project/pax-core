@@ -14,7 +14,7 @@ use sink::{JsonSink, Sink, TextSink};
 
 #[derive(Subcommand)]
 enum Command {
-    ///Initiate a new empty library
+    ///Initiate a new empty library in research/ (which may already exist)
     Init,
     ///Search for papers
     Search {

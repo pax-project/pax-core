@@ -5,7 +5,7 @@
 //! artifact, or add one from a file the user already has, per the project's "PAX understands papers, Nix understands
 //! artifacts" split (see `CLAUDE.md`).
 
-use std::fs::{create_dir, write};
+use std::fs::{create_dir_all, write};
 use std::io::Error;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -78,19 +78,30 @@ pub fn pdfs_dir(root: &Path) -> PathBuf {
 /// The line in `research/.gitignore` that keeps [`pdfs_dir`] out of git.
 const PDFS_IGNORE: &str = ".pdfs/";
 
-/// Creates `research/` with a `flake.nix` from the current template, an
-/// empty `papers.nix`, and a `.gitignore` that keeps [`gcroots_dir`] and
-/// [`pdfs_dir`] out of git.
+/// Creates the library in `research/`: a `flake.nix` from the current
+/// template, an empty `papers.nix`, and the [`gcroots_dir`] and [`pdfs_dir`]
+/// lines in `.gitignore`. A `research/` folder that already exists is kept,
+/// with whatever else it holds, and so is its `.gitignore`, which only gains
+/// the lines it lacks. A `flake.nix` or `papers.nix` already there is
+/// [`AlreadyExists`](std::io::ErrorKind::AlreadyExists), and nothing is
+/// written.
 pub fn init_library(root: &Path) -> Result<(), Error> {
     let research_dir = root.join("research");
-    create_dir(&research_dir)?;
-    write(research_dir.join("flake.nix"), FLAKE_TEMPLATE)?;
-    write(papers_path(root), PAPERS_TEMPLATE)?;
-    write(
-        gitignore_path(root),
-        format!("{GCROOTS_IGNORE}\n{PDFS_IGNORE}\n"),
-    )?;
-    Ok(())
+    let flake = research_dir.join("flake.nix");
+    let papers = papers_path(root);
+    for path in [&papers, &flake] {
+        if path.exists() {
+            return Err(Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("{} already exists", path.display()),
+            ));
+        }
+    }
+    create_dir_all(&research_dir)?;
+    write(flake, FLAKE_TEMPLATE)?;
+    write(papers, PAPERS_TEMPLATE)?;
+    ignore_gcroots(root)?;
+    ignore_pdfs(root)
 }
 
 /// Adds the [`gcroots_dir`] line to `research/.gitignore` when it's missing,
@@ -441,6 +452,49 @@ mod tests {
         write(&gitignore, ".pdfs-old/\n").unwrap();
         ignore_pdfs(&root).unwrap();
         assert_eq!(read(), ".pdfs-old/\n.pdfs/\n");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn init_keeps_an_existing_research_folder_and_refuses_an_existing_library() {
+        let root = std::env::temp_dir().join(format!("pax-nix-test-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let research = root.join("research");
+        std::fs::create_dir_all(research.join("sls")).unwrap();
+        write(research.join("README.md"), "notes").unwrap();
+        write(gitignore_path(&root), "result\n.pdfs\n").unwrap();
+
+        init_library(&root).unwrap();
+        assert!(flake_builds_local_artifacts(&root));
+        assert_eq!(
+            std::fs::read_to_string(papers_path(&root)).unwrap(),
+            PAPERS_TEMPLATE
+        );
+        assert_eq!(
+            std::fs::read_to_string(research.join("README.md")).unwrap(),
+            "notes"
+        );
+        assert!(research.join("sls").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(gitignore_path(&root)).unwrap(),
+            "result\n.pdfs\n.gcroots/\n"
+        );
+
+        // A second init, or one over a library's either file, writes nothing.
+        write(papers_path(&root), "{ kept = {}; }").unwrap();
+        let e = init_library(&root).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(e.to_string().contains("papers.nix"), "{e}");
+        assert_eq!(
+            std::fs::read_to_string(papers_path(&root)).unwrap(),
+            "{ kept = {}; }"
+        );
+        std::fs::remove_file(papers_path(&root)).unwrap();
+        write(research.join("flake.nix"), "{ }").unwrap();
+        let e = init_library(&root).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(e.to_string().contains("flake.nix"), "{e}");
+        assert!(!papers_path(&root).exists());
         std::fs::remove_dir_all(&root).unwrap();
     }
 

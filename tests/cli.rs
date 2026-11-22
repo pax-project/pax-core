@@ -174,6 +174,18 @@ fn initializing_an_existing_library_is_refused_with_5() {
 }
 
 #[test]
+fn init_creates_a_library_in_an_existing_research_folder() {
+    let dir = scratch("init-existing-research");
+    std::fs::create_dir_all(dir.join("research").join("sls")).unwrap();
+    std::fs::write(dir.join("research").join("README.md"), "notes").unwrap();
+    let output = pax(&dir, &["init"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(dir.join("research").join("papers.nix").is_file());
+    let readme = std::fs::read_to_string(dir.join("research").join("README.md")).unwrap();
+    assert_eq!(readme, "notes");
+}
+
+#[test]
 fn a_command_outside_a_library_exits_7() {
     let dir = scratch("no-library");
     for args in [
